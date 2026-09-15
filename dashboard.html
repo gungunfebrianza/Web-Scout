@@ -1,0 +1,952 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Web-scout Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=JetBrains+Mono:wght@400;600&display=swap" media="print" onload="this.media='all'">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg-void: #05070a;
+    --bg-panel: #0b0f10;
+    --bg-panel-raised: #0e1416;
+    --border-hud: #14301f;
+    --accent-predator: #ff9d00;
+    --accent-alien: #7cff3c;
+    --accent-danger: #ff2a3d;
+    --accent-info: #29e2ff;
+    --ink-primary: #d8ffe0;
+    --ink-muted: #5f7a68;
+    --font-display: 'Orbitron', 'Arial Narrow', Arial, sans-serif;
+    --font-mono: 'JetBrains Mono', Consolas, 'Courier New', monospace;
+    --kind-action: var(--accent-info);
+    --kind-snapshot: var(--ink-muted);
+    --kind-diff: var(--accent-predator);
+    --kind-console: var(--accent-danger);
+    --kind-net: var(--accent-alien);
+    --kind-verity: #c084ff;
+    --ok-bg: #123b1a; --ok-fg: var(--accent-alien);
+    --fail-bg: #3a1016; --fail-fg: var(--accent-danger);
+    --active-bg: #0c2a33; --active-fg: var(--accent-info);
+    --warn-bg: #3a2606; --warn-fg: var(--accent-predator);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg-void); color: var(--ink-primary); font: 13px/1.5 var(--font-mono); position: relative; }
+  body::before {
+    content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+    background: repeating-linear-gradient(0deg, rgba(124,255,60,.035) 0px, transparent 1px, transparent 3px);
+    animation: scan-drift 8s linear infinite;
+    mix-blend-mode: overlay;
+  }
+  @keyframes scan-drift { 0% { background-position: 0 0; } 100% { background-position: 0 60px; } }
+  h1 { font-family: var(--font-display); font-size: 18px; letter-spacing: .12em; text-transform: uppercase; margin: 0 0 12px; color: var(--accent-predator); text-shadow: 0 0 8px rgba(255,157,0,.35); }
+  h2 { font-family: var(--font-display); font-size: 13px; text-transform: uppercase; letter-spacing: .1em; color: var(--accent-info); margin: 20px 0 8px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  select, input, textarea, button { background: var(--bg-panel-raised); color: var(--ink-primary); border: 1px solid var(--border-hud); border-radius: 2px; padding: 6px 8px; font: inherit; }
+  button { cursor: pointer; text-transform: uppercase; letter-spacing: .04em; font-size: 12px; }
+  button:hover { border-color: var(--accent-predator); box-shadow: 0 0 6px rgba(255,157,0,.4); }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .badge-ok { background: var(--ok-bg); color: var(--ok-fg); }
+  .badge-fail { background: var(--fail-bg); color: var(--fail-fg); }
+  .badge-active { background: var(--active-bg); color: var(--active-fg); }
+  .badge-ended { background: #15181c; color: var(--ink-muted); }
+  .badge-crv { background: var(--warn-bg); color: var(--warn-fg); }
+  .chip { display: inline-block; background: var(--bg-panel-raised); color: var(--ink-muted); border: 1px solid var(--border-hud); border-radius: 10px; padding: 1px 8px; font-size: 11px; margin-right: 4px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border-hud); vertical-align: top; }
+  th { color: var(--accent-info); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  tr.expandable { cursor: pointer; }
+  tr.expandable:hover { background: var(--bg-panel-raised); }
+  pre { white-space: pre-wrap; word-break: break-word; background: #05070a; color: var(--ink-primary); border: 1px solid var(--border-hud); border-radius: 4px; padding: 8px; margin: 4px 0 0; max-height: 320px; overflow: auto; }
+  .empty { color: var(--ink-muted); font-style: italic; padding: 8px 0; }
+  .panel, .hud-section { background: var(--bg-panel); border: 1px solid var(--border-hud); border-radius: 2px; padding: 12px; position: relative; }
+  .hud-section { padding: 8px 10px 12px; margin-bottom: 4px; }
+  .panel::before, .panel::after, .hud-section::before, .hud-section::after {
+    content: ''; position: absolute; width: 12px; height: 12px; border: 2px solid var(--accent-predator); opacity: .75; pointer-events: none;
+  }
+  .panel::before, .hud-section::before { top: -1px; left: -1px; border-right: none; border-bottom: none; }
+  .panel::after, .hud-section::after { bottom: -1px; right: -1px; border-left: none; border-top: none; }
+  .goal { font-size: 14px; font-weight: 600; color: var(--accent-predator); }
+  .context { color: var(--ink-muted); margin-top: 2px; }
+  .qa-item { border-bottom: 1px solid var(--border-hud); padding: 8px 0; }
+  .qa-item:last-child { border-bottom: none; }
+  .qa-q { font-weight: 600; color: var(--accent-info); }
+  .qa-a { margin-top: 4px; white-space: pre-wrap; }
+  .qa-err { color: var(--accent-danger); margin-top: 4px; }
+  #askForm { margin-top: 8px; }
+  #askQuestion { width: 100%; min-height: 56px; resize: vertical; }
+  .muted { color: var(--ink-muted); }
+  #tagFilter { width: 160px; }
+  #sessionPicker { min-width: 260px; }
+  .level-error, .level-uncaught, .level-unhandledrejection { color: var(--accent-danger); }
+  .level-warn { color: var(--accent-predator); }
+  tr.pending-row td { color: var(--accent-predator); font-style: italic; }
+  .spinner { display: inline-block; width: 9px; height: 9px; border: 2px solid var(--border-hud); border-top-color: var(--accent-predator); border-radius: 50%; animation: spin .7s linear infinite; margin-right: 6px; vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .filter-row { margin-bottom: 6px; }
+  .filter-row select, .filter-row input { font-size: 12px; padding: 4px 6px; }
+  #actionSearch { width: 220px; }
+  .timeline-item { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border-hud); font-size: 12px; }
+  .timeline-time { color: var(--ink-muted); min-width: 70px; }
+  .timeline-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; box-shadow: 0 0 4px currentColor; }
+  .tl-action { background: var(--kind-action); }
+  .tl-snapshot { background: var(--kind-snapshot); }
+  .tl-diff { background: var(--kind-diff); }
+  .tl-console { background: var(--kind-console); }
+  .tl-net { background: var(--kind-net); }
+  .tl-verity { background: var(--kind-verity); }
+  .timeline-label { color: var(--ink-muted); font-size: 11px; text-transform: uppercase; min-width: 64px; }
+  #globalSearch { min-width: 220px; }
+  #searchResults .empty { padding: 4px 0; }
+  .search-hit { padding: 6px 0; border-bottom: 1px solid var(--border-hud); font-size: 12px; cursor: pointer; }
+  .search-hit:hover { background: var(--bg-panel-raised); }
+  .search-hit .muted { font-size: 11px; }
+  .macro-steps-list { list-style: none; margin: 4px 0 0; padding: 0; }
+  .macro-steps-list li { display: flex; align-items: center; gap: 6px; padding: 3px 0; border-bottom: 1px solid var(--border-hud); font-size: 12px; }
+  .macro-steps-list .step-type { flex: 1; }
+  .macro-steps-list button { padding: 2px 6px; font-size: 11px; }
+  .diff-added { color: var(--accent-alien); }
+  .diff-removed { color: var(--accent-danger); }
+  .diff-changed { color: var(--accent-predator); }
+  #frictionBanner { background: var(--warn-bg); border: 1px solid var(--accent-predator); border-radius: 2px; padding: 10px 12px; margin-bottom: 12px; }
+  #frictionBanner h3 { margin: 0 0 6px; font-family: var(--font-display); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--accent-predator); }
+  #frictionBanner ul { margin: 0; padding-left: 18px; }
+  #frictionBanner li { margin: 2px 0; }
+  #frictionToggle { float: right; background: none; border: none; color: var(--ink-muted); cursor: pointer; padding: 0 4px; }
+  .hud-pulse { animation: hud-blink 1.6s ease-in-out infinite; }
+  @keyframes hud-blink { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+  .hud-header { display: flex; flex-direction: column; gap: 10px; }
+  .hud-header-row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .hud-stat-strip { display: flex; gap: 8px; flex-wrap: wrap; }
+  .hud-tile { background: var(--bg-panel-raised); border: 1px solid var(--border-hud); border-radius: 2px; padding: 6px 12px; min-width: 100px; }
+  .hud-tile-label { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-muted); }
+  .hud-tile-value { font-size: 18px; font-weight: 700; color: var(--accent-info); font-family: var(--font-display); }
+  .hud-tile-ok .hud-tile-value { color: var(--accent-alien); }
+  .hud-tile-warn .hud-tile-value { color: var(--accent-predator); }
+  .hud-tile-fail .hud-tile-value { color: var(--accent-danger); }
+  .hud-sparkline { flex: 1; min-width: 220px; margin-top: 6px; }
+  .hud-sparkline svg { display: block; height: 28px; width: 100%; }
+  .hud-radar { width: 100px; height: 100px; flex-shrink: 0; }
+  .hud-radar svg { width: 100%; height: 100%; }
+  .radar-ring { fill: none; stroke: var(--border-hud); stroke-width: 1; }
+  .radar-sweep { transform-origin: 50px 50px; animation: radar-rotate 4s linear infinite; }
+  .radar-sweep line { stroke: var(--accent-alien); stroke-width: 1.5; opacity: .8; }
+  @keyframes radar-rotate { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    body::before, .hud-pulse, .radar-sweep, .spinner { animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="hud-header hud-section">
+  <h1>Web-scout Dashboard</h1>
+  <div class="hud-header-row">
+    <div style="flex:1; min-width:260px;">
+      <div id="hudStatStrip" class="hud-stat-strip"></div>
+      <div id="hudSparkline" class="hud-sparkline"><svg id="hudSparklineSvg"></svg></div>
+    </div>
+    <div id="hudRadar" class="hud-radar" aria-hidden="true" title="motion tracker: recent event activity">
+      <svg viewBox="0 0 100 100">
+        <circle class="radar-ring" cx="50" cy="50" r="46"/>
+        <circle class="radar-ring" cx="50" cy="50" r="30"/>
+        <circle class="radar-ring" cx="50" cy="50" r="14"/>
+        <g class="radar-sweep"><line x1="50" y1="50" x2="50" y2="4"/></g>
+        <g id="hudRadarBlips"></g>
+      </svg>
+    </div>
+  </div>
+  <div class="row">
+    <span id="relayStatus" class="muted hud-pulse">checking relay...</span>
+    <span id="agentsStatus" class="muted"></span>
+    <input id="tagFilter" placeholder="filter sessions (goal/context/tag)...">
+    <select id="sessionPicker"></select>
+    <input id="globalSearch" placeholder="search ALL sessions' actions...">
+    <button id="globalSearchBtn">Search</button>
+  </div>
+</div>
+
+<div id="frictionBanner" hidden>
+  <button id="frictionToggle">hide</button>
+  <h3>Known friction (across every session)</h3>
+  <ul id="frictionList"></ul>
+</div>
+
+<div id="searchResults" hidden></div>
+
+<div id="noSession" class="empty" hidden>No sessions yet (or none match the filter). Start one from the CLI: <code>node tools/web-scout/cli.mjs session start "&lt;goal&gt;" "&lt;context&gt;"</code></div>
+
+<div id="sessionPanel" hidden>
+  <div class="panel">
+    <div class="row" style="justify-content: space-between;">
+      <div>
+        <div class="goal" id="sessionGoal"></div>
+        <div class="context" id="sessionContext"></div>
+        <div id="sessionTags" style="margin-top: 4px;"></div>
+      </div>
+      <div class="row">
+        <span id="sessionCrvBadge" class="badge badge-crv" hidden>strict-CRV</span>
+        <span id="sessionStatusBadge" class="badge"></span>
+        <button id="exportReportBtn">Export report</button>
+        <button id="endSessionBtn">End session</button>
+      </div>
+    </div>
+  </div>
+
+  <section class="hud-section">
+  <h2>Timeline</h2>
+  <div id="timeline"></div>
+  <div id="timelineEmpty" class="empty" hidden>Nothing recorded yet.</div>
+  </section>
+
+  <section class="hud-section">
+  <h2>Action log</h2>
+  <div class="row filter-row">
+    <select id="actionTypeFilter"><option value="">all types</option></select>
+    <select id="actionOkFilter"><option value="">ok + fail</option><option value="ok">ok only</option><option value="fail">fail only</option></select>
+    <input id="actionSearch" placeholder="search params/result...">
+  </div>
+  <table id="actionsTable"><thead><tr><th>Time</th><th>Agent</th><th>Type</th><th>Result</th><th>ms</th></tr></thead><tbody></tbody></table>
+  <div id="actionsEmpty" class="empty" hidden>No actions recorded yet.</div>
+  </section>
+
+  <section class="hud-section">
+  <h2>State snapshots</h2>
+  <table id="snapshotsTable"><thead><tr><th>ID</th><th>Time</th><th>Agent</th><th>Counts</th><th>Size</th></tr></thead><tbody></tbody></table>
+  <div id="snapshotsEmpty" class="empty" hidden>No snapshots yet - <code>idb snapshot</code> from the CLI.</div>
+  </section>
+
+  <section class="hud-section">
+  <h2>State diffs</h2>
+  <table id="diffsTable"><thead><tr><th>ID</th><th>From &rarr; To</th><th>Summary</th></tr></thead><tbody></tbody></table>
+  <div id="diffsEmpty" class="empty" hidden>No diffs yet - <code>idb diff &lt;a&gt; &lt;b&gt;</code> from the CLI.</div>
+  </section>
+
+  <section class="hud-section">
+  <h2>Console</h2>
+  <table id="consoleTable"><thead><tr><th>Time</th><th>Agent</th><th>Level</th><th>Message</th></tr></thead><tbody></tbody></table>
+  <div id="consoleEmpty" class="empty" hidden>No console entries captured yet.</div>
+  </section>
+
+  <section class="hud-section">
+  <h2>Network</h2>
+  <table id="netTable"><thead><tr><th>Time</th><th>Agent</th><th>Via</th><th>Method</th><th>URL</th><th>Status</th></tr></thead><tbody></tbody></table>
+  <div id="netEmpty" class="empty" hidden>No network entries captured yet.</div>
+  </section>
+
+  <section class="hud-section">
+  <h2>Verity UI checks</h2>
+  <div class="muted">accessibility-tree evidence imported from <code>tools/ui-verifier</code> (a Verity <code>scenario</code> result JSON) - Verity itself persists nothing on its own</div>
+  <div class="row" style="margin-top: 4px;">
+    <input type="file" id="verityFileInput" accept="application/json">
+    <input id="verityLabel" placeholder="label (optional)">
+    <button id="verityImportBtn">Import</button>
+  </div>
+  <table id="verityTable"><thead><tr><th>ID</th><th>Label</th><th>Result</th><th>Steps</th><th>Imported</th></tr></thead><tbody></tbody></table>
+  <div id="verityEmpty" class="empty" hidden>No Verity results imported for this session yet.</div>
+  </section>
+
+  <section class="hud-section">
+  <h2>Macros</h2>
+  <div class="row">
+    <button id="recordMacroBtn">Record macro from this session</button>
+    <span class="muted">saves this session's own replayable actions (dom/idb/page.reload/eval) as a named, replayable sequence</span>
+  </div>
+  <table id="macrosTable"><thead><tr><th>ID</th><th>Name</th><th>Steps</th><th>Source session</th><th>Created</th><th></th></tr></thead><tbody></tbody></table>
+  <div id="macrosEmpty" class="empty" hidden>No macros recorded yet.</div>
+  </section>
+
+  <section class="hud-section">
+  <h2>Ask AI</h2>
+  <div id="qaList"></div>
+  <form id="askForm">
+    <textarea id="askQuestion" placeholder="What changed in the last diff, and why does that answer the session's goal?"></textarea>
+    <div class="row" style="margin-top: 6px;">
+      <button type="submit" id="askSubmit">Ask</button>
+      <span id="askStatus" class="muted"></span>
+    </div>
+  </form>
+  </section>
+</div>
+
+<script>
+const BASE = location.origin;
+let currentSessionId = null;
+let allSessions = [];
+// Caches of the last-rendered rows for each panel - reused by the Timeline
+// (which merges all of them) and the Action log filter bar (which re-renders
+// client-side without a re-fetch on every keystroke).
+let lastActions = [];
+let lastSnapshots = [];
+let lastDiffs = [];
+let lastConsoleEntries = [];
+let lastNetEntries = [];
+let lastVerityRuns = [];
+// In-flight action rows, keyed by `${type}:${startedAt}:${agentName}` -
+// added on the relay's 'action_start' SSE push, cleared on the next full
+// 'action' refresh for the same session (which will already include the
+// now-finished row). See tools/web-scout/relay.mjs withLoggedAction.
+const pendingActions = new Map();
+let pendingTickTimer = null;
+// Cached /health payload - refreshHealth() used to discard it after
+// updating the status text; the HUD stat strip needs agents_connected too.
+let lastHealth = null;
+// Fixed kind->CSS-var mapping shared by the Timeline dots (.tl-*) and the
+// motion-tracker radar blips, so the same event kind is always the same
+// color in both places.
+const KIND_COLOR_VAR = { action: '--kind-action', snapshot: '--kind-snapshot', diff: '--kind-diff', console: '--kind-console', net: '--kind-net', verity: '--kind-verity' };
+
+async function api(method, path, body) {
+  const opts = { method };
+  if (body !== undefined) { opts.headers = { 'Content-Type': 'application/json' }; opts.body = JSON.stringify(body); }
+  const res = await fetch(BASE + path, opts);
+  const json = await res.json();
+  if (!json.ok) throw new Error(json.error || ('request failed: ' + path));
+  return json.result;
+}
+
+function el(id) { return document.getElementById(id); }
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtTime(iso) { return iso ? new Date(iso).toLocaleTimeString() : ''; }
+
+function toggleRow(tr, detailHtml) {
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains('detail-row')) { next.remove(); return; }
+  const detailRow = document.createElement('tr');
+  detailRow.className = 'detail-row';
+  const td = document.createElement('td');
+  td.colSpan = tr.children.length;
+  td.innerHTML = detailHtml;
+  detailRow.appendChild(td);
+  tr.after(detailRow);
+}
+
+function sessionMatchesFilter(s, filter) {
+  if (!filter) return true;
+  const haystack = [s.goal, s.context, ...(s.tags || [])].filter(Boolean).join(' ').toLowerCase();
+  return haystack.includes(filter.toLowerCase());
+}
+
+async function refreshSessionPicker() {
+  allSessions = await api('GET', '/sessions');
+  const filter = el('tagFilter').value.trim();
+  const filtered = allSessions.filter((s) => sessionMatchesFilter(s, filter));
+  const picker = el('sessionPicker');
+  const prev = picker.value;
+  picker.innerHTML = filtered.map((s) => {
+    const tags = s.tags?.length ? ` [${s.tags.join(',')}]` : '';
+    return `<option value="${s.id}">#${s.id} [${s.status}] ${esc(s.goal)}${esc(tags)}</option>`;
+  }).join('');
+  if (!filtered.length) {
+    el('noSession').hidden = false;
+    el('sessionPanel').hidden = true;
+    currentSessionId = null;
+    return;
+  }
+  el('noSession').hidden = true;
+  el('sessionPanel').hidden = false;
+  const wanted = prev && filtered.some((s) => String(s.id) === prev) ? prev : String(filtered[0].id);
+  picker.value = wanted;
+  currentSessionId = Number(wanted);
+}
+
+async function refreshHealth() {
+  const health = await api('GET', '/health');
+  lastHealth = health;
+  el('relayStatus').textContent = 'relay: ok';
+  el('agentsStatus').textContent = health.agents_connected.length
+    ? `agents: ${health.agents_connected.join(', ')}`
+    : 'agents: none connected';
+  renderHud();
+}
+
+function computeStats() {
+  const totalActions = lastActions.length;
+  const failCount = lastActions.filter((a) => !a.ok).length;
+  const failRate = totalActions ? (failCount / totalActions * 100) : 0;
+  const consoleErrors = lastConsoleEntries.filter((c) => /error|uncaught|unhandledrejection/.test(c.level)).length;
+  const netCalls = lastNetEntries.length;
+  const agentsConnected = lastHealth?.agents_connected?.length ?? 0;
+  return { totalActions, failRate, consoleErrors, netCalls, agentsConnected };
+}
+
+function renderStatStrip() {
+  const s = computeStats();
+  const band = s.failRate < 10 ? 'ok' : s.failRate < 30 ? 'warn' : 'fail';
+  el('hudStatStrip').innerHTML = `
+    <div class="hud-tile"><div class="hud-tile-label">Actions</div><div class="hud-tile-value">${s.totalActions}</div></div>
+    <div class="hud-tile hud-tile-${band}"><div class="hud-tile-label">Fail rate</div><div class="hud-tile-value">${s.failRate.toFixed(1)}%</div></div>
+    <div class="hud-tile"><div class="hud-tile-label">Console errors</div><div class="hud-tile-value">${s.consoleErrors}</div></div>
+    <div class="hud-tile"><div class="hud-tile-label">Net calls</div><div class="hud-tile-value">${s.netCalls}</div></div>
+    <div class="hud-tile"><div class="hud-tile-label">Agents</div><div class="hud-tile-value">${s.agentsConnected}</div></div>`;
+}
+
+function renderSparkline() {
+  // Buckets actions by minute over the last 30 minutes - single-hue
+  // magnitude-over-time sparkline, no chart library needed.
+  const now = Date.now();
+  const buckets = new Array(30).fill(0);
+  for (const a of lastActions) {
+    const t = new Date(a.started_at).getTime();
+    const bucket = 29 - Math.floor((now - t) / 60000);
+    if (bucket >= 0 && bucket < 30) buckets[bucket]++;
+  }
+  const max = Math.max(1, ...buckets);
+  const w = 4, gap = 1;
+  const bars = buckets.map((v, i) => {
+    const h = Math.max(1, (v / max) * 24);
+    return `<rect x="${i * (w + gap)}" y="${24 - h}" width="${w}" height="${h}" fill="var(--accent-predator)"/>`;
+  }).join('');
+  const svg = el('hudSparklineSvg');
+  svg.setAttribute('viewBox', `0 0 ${30 * (w + gap)} 24`);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.innerHTML = bars;
+}
+
+function renderRadar() {
+  // Motion tracker: recent events (any kind) fade outward as blips, reusing
+  // the exact kind->color mapping the Timeline dots use (KIND_COLOR_VAR).
+  const now = Date.now();
+  const windowMs = 15000;
+  const items = [
+    ...lastActions.map((a) => ({ at: a.started_at, kind: 'action' })),
+    ...lastSnapshots.map((s) => ({ at: s.taken_at, kind: 'snapshot' })),
+    ...lastDiffs.map((d) => ({ at: d.computed_at, kind: 'diff' })),
+    ...lastConsoleEntries.map((c) => ({ at: c.occurred_at, kind: 'console' })),
+    ...lastNetEntries.map((n) => ({ at: n.occurred_at, kind: 'net' })),
+    ...lastVerityRuns.map((v) => ({ at: v.imported_at, kind: 'verity' })),
+  ].filter((i) => i.at && (now - new Date(i.at).getTime()) < windowMs && (now - new Date(i.at).getTime()) >= 0)
+   .sort((a, b) => a.at.localeCompare(b.at))
+   .slice(-15);
+  const g = el('hudRadarBlips');
+  g.innerHTML = items.map((item, i) => {
+    const age = now - new Date(item.at).getTime();
+    const opacity = Math.max(0.15, 1 - age / windowMs);
+    const angle = (i / Math.max(1, items.length)) * 2 * Math.PI;
+    const radius = 10 + (age / windowMs) * 34;
+    const x = 50 + Math.cos(angle) * radius;
+    const y = 50 + Math.sin(angle) * radius;
+    const colorVar = KIND_COLOR_VAR[item.kind] || '--accent-info';
+    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.4" fill="var(${colorVar})" opacity="${opacity.toFixed(2)}"/>`;
+  }).join('');
+}
+
+function renderHud() {
+  renderStatStrip();
+  renderSparkline();
+  renderRadar();
+}
+
+function actionMatchesFilters(a) {
+  const type = el('actionTypeFilter').value;
+  const okFilter = el('actionOkFilter').value;
+  const text = el('actionSearch').value.trim().toLowerCase();
+  if (type && a.type !== type) return false;
+  if (okFilter === 'ok' && !a.ok) return false;
+  if (okFilter === 'fail' && a.ok) return false;
+  if (text) {
+    const haystack = [a.type, JSON.stringify(a.params), JSON.stringify(a.result), a.error].filter(Boolean).join(' ').toLowerCase();
+    if (!haystack.includes(text)) return false;
+  }
+  return true;
+}
+
+function populateActionTypeFilter(actions) {
+  const select = el('actionTypeFilter');
+  const prev = select.value;
+  const types = [...new Set(actions.map((a) => a.type))].sort();
+  select.innerHTML = '<option value="">all types</option>' + types.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
+  if (types.includes(prev)) select.value = prev;
+}
+
+function renderPendingRows(tbody) {
+  const sessionPending = [...pendingActions.values()].filter((p) => p.sessionId === currentSessionId);
+  for (const p of sessionPending.sort((a, b) => a.startedAt.localeCompare(b.startedAt))) {
+    const elapsed = ((Date.now() - new Date(p.startedAt).getTime()) / 1000).toFixed(1);
+    const tr = document.createElement('tr');
+    tr.className = 'pending-row';
+    tr.innerHTML = `<td>${fmtTime(p.startedAt)}</td><td>${esc(p.agentName)}</td><td>${esc(p.type)}</td><td><span class="spinner"></span>running...</td><td>${elapsed}s</td>`;
+    tbody.insertBefore(tr, tbody.firstChild);
+  }
+  if (!pendingTickTimer) pendingTickTimer = setInterval(() => { if (pendingActions.size) renderActions(lastActions); }, 500);
+}
+
+function renderActions(actions) {
+  lastActions = actions;
+  populateActionTypeFilter(actions);
+  const filtered = actions.filter(actionMatchesFilters);
+  el('actionsEmpty').hidden = filtered.length > 0 || pendingActions.size > 0;
+  const body = document.querySelector('#actionsTable tbody');
+  body.innerHTML = '';
+  for (const a of filtered) {
+    const tr = document.createElement('tr');
+    tr.className = 'expandable';
+    tr.innerHTML = `<td>${fmtTime(a.started_at)}</td><td>${esc(a.agent_name ?? 'default')}</td><td>${esc(a.type)}</td><td><span class="badge ${a.ok ? 'badge-ok' : 'badge-fail'}">${a.ok ? 'ok' : 'fail'}</span></td><td>${a.duration_ms ?? ''}</td>`;
+    tr.addEventListener('click', () => {
+      // Screenshots render as an inline thumbnail instead of dumping their
+      // (large) base64 data URL into a <pre> block.
+      const resultHtml = (a.type === 'dom.screenshot' && a.ok && a.result?.dataUrl)
+        ? `<img src="${esc(a.result.dataUrl)}" alt="screenshot" style="max-width:480px;border:1px solid var(--border-hud);border-radius:4px;display:block;margin-top:4px;"><div class="muted">${a.result.width}x${a.result.height}</div>`
+        : `<pre>${esc(a.ok ? JSON.stringify(a.result, null, 2) : a.error)}</pre>`;
+      toggleRow(tr, `<strong>params</strong><pre>${esc(JSON.stringify(a.params, null, 2))}</pre><strong>${a.ok ? 'result' : 'error'}</strong>${resultHtml}`);
+    });
+    body.appendChild(tr);
+  }
+  renderPendingRows(body);
+}
+
+function renderTimeline() {
+  // Merges the already-fetched panels into one lane by timestamp - answers
+  // "which diff came from that click, right after that console error"
+  // without cross-referencing 5 separate tables by eye (real friction hit
+  // during a verification pass).
+  const items = [
+    ...lastActions.map((a) => ({ at: a.started_at, kind: 'action', dot: 'tl-action', label: 'action', text: `${a.type}${a.ok ? '' : ' (fail)'}` })),
+    ...lastSnapshots.map((s) => ({ at: s.taken_at, kind: 'snapshot', dot: 'tl-snapshot', label: 'snapshot', text: `#${s.id}` })),
+    ...lastDiffs.map((d) => ({ at: d.computed_at, kind: 'diff', dot: 'tl-diff', label: 'diff', text: `#${d.id} (${d.snapshot_from_id}→${d.snapshot_to_id})` })),
+    ...lastConsoleEntries.map((c) => ({ at: c.occurred_at, kind: 'console', dot: 'tl-console', label: c.level, text: c.message })),
+    ...lastNetEntries.map((n) => ({ at: n.occurred_at, kind: 'net', dot: 'tl-net', label: n.method, text: n.url || '' })),
+    ...lastVerityRuns.map((v) => ({ at: v.imported_at, kind: 'verity', dot: 'tl-verity', label: 'verity', text: `${v.label ?? ''} (${v.passed === null ? 'unknown' : (v.passed ? 'PASS' : 'FAIL')}, ${v.passed_count}/${v.step_count})` })),
+  ].filter((i) => i.at).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 200);
+  el('timelineEmpty').hidden = items.length > 0;
+  el('timeline').innerHTML = items.map((i) => `
+    <div class="timeline-item">
+      <div class="timeline-time">${fmtTime(i.at)}</div>
+      <div class="timeline-dot ${i.dot}"></div>
+      <div class="timeline-label">${esc(i.label)}</div>
+      <div>${esc(i.text)}</div>
+    </div>`).join('');
+  renderHud();
+}
+
+function renderSnapshots(snapshots) {
+  lastSnapshots = snapshots;
+  el('snapshotsEmpty').hidden = snapshots.length > 0;
+  const body = document.querySelector('#snapshotsTable tbody');
+  body.innerHTML = '';
+  for (const s of snapshots) {
+    const tr = document.createElement('tr');
+    tr.className = 'expandable';
+    const countsSummary = Object.entries(s.counts).filter(([, n]) => n > 0).map(([k, n]) => `${k}:${n}`).join(', ') || '(all empty)';
+    tr.innerHTML = `<td>${s.id}</td><td>${fmtTime(s.taken_at)}</td><td>${esc(s.agent_name ?? 'default')}</td><td>${esc(countsSummary)}</td><td>${(s.byte_size / 1024).toFixed(1)} KB</td>`;
+    tr.addEventListener('click', async () => {
+      const existing = tr.nextElementSibling;
+      if (existing && existing.classList.contains('detail-row')) { existing.remove(); return; }
+      if (s.byte_size > 500000 && !confirm(`This snapshot is ${(s.byte_size / 1024).toFixed(0)} KB - render it inline anyway?`)) return;
+      const full = await api('GET', `/state/snapshots/${s.id}`);
+      toggleRow(tr, `<pre>${esc(JSON.stringify(full.stores, null, 2))}</pre>`);
+    });
+    body.appendChild(tr);
+  }
+}
+
+function renderDiffs(diffs) {
+  lastDiffs = diffs;
+  el('diffsEmpty').hidden = diffs.length > 0;
+  const body = document.querySelector('#diffsTable tbody');
+  body.innerHTML = '';
+  for (const d of diffs) {
+    const tr = document.createElement('tr');
+    tr.className = 'expandable';
+    const summaryHtml = Object.entries(d.summary).map(([store, c]) =>
+      `${esc(store)}: <span class="diff-added">+${c.added}</span>/<span class="diff-removed">-${c.removed}</span>/<span class="diff-changed">~${c.changed}</span>`
+    ).join(', ') || '<span class="muted">(no change)</span>';
+    tr.innerHTML = `<td>${d.id}</td><td>${d.snapshot_from_id} &rarr; ${d.snapshot_to_id}</td><td>${summaryHtml}</td>`;
+    tr.addEventListener('click', async () => {
+      const existing = tr.nextElementSibling;
+      if (existing && existing.classList.contains('detail-row')) { existing.remove(); return; }
+      const full = await api('GET', `/state/diffs/${d.id}`);
+      toggleRow(tr, `<pre>${esc(JSON.stringify(full.diff, null, 2))}</pre>`);
+    });
+    body.appendChild(tr);
+  }
+}
+
+function renderConsole(entries) {
+  lastConsoleEntries = entries;
+  el('consoleEmpty').hidden = entries.length > 0;
+  const body = document.querySelector('#consoleTable tbody');
+  body.innerHTML = entries.map((c) => `<tr><td>${fmtTime(c.occurred_at)}</td><td>${esc(c.agent_name)}</td><td class="level-${esc(c.level)}">${esc(c.level)}</td><td>${esc(c.message)}</td></tr>`).join('');
+}
+
+function renderNet(entries) {
+  lastNetEntries = entries;
+  el('netEmpty').hidden = entries.length > 0;
+  const body = document.querySelector('#netTable tbody');
+  body.innerHTML = entries.map((n) => `<tr><td>${fmtTime(n.occurred_at)}</td><td>${esc(n.agent_name)}</td><td>${esc(n.via)}</td><td>${esc(n.method)}</td><td>${esc(n.url)}</td><td>${n.status ?? (n.error ? `ERR: ${esc(n.error)}` : '')}</td></tr>`).join('');
+}
+
+function renderQA(qa) {
+  el('qaList').innerHTML = qa.length ? qa.map((q) => `
+    <div class="qa-item">
+      <div class="qa-q">Q: ${esc(q.question)}</div>
+      ${q.answer ? `<div class="qa-a">${esc(q.answer)}</div>` : ''}
+      ${q.error ? `<div class="qa-err">error: ${esc(q.error)}</div>` : ''}
+      <div class="muted">${fmtTime(q.asked_at)}</div>
+    </div>`).join('') : '<div class="empty">No questions asked yet.</div>';
+}
+
+// Shared by the macro row's "Run" button and the step inspector's "Run
+// from here" - relay.mjs's cross-context replay guard (see
+// docs/web-scout-roadmap.md's V8 entry) refuses a macro run (409) when the
+// currently active session's goal looks unrelated to the macro's own
+// recorded-from session's goal, unless {"confirm": true}. Surfaces that
+// exact message via a real confirm() dialog and retries with confirm:true
+// on OK, instead of the error just reading as an opaque failure.
+async function runMacro(macroId, extraBody) {
+  try {
+    return await api('POST', `/macros/${macroId}/run`, extraBody);
+  } catch (err) {
+    if (err.message.startsWith('cross-context replay guard:') && confirm(`${err.message}\n\nRun anyway?`)) {
+      return await api('POST', `/macros/${macroId}/run`, { ...extraBody, confirm: true });
+    }
+    throw err;
+  }
+}
+
+function renderMacroStepInspector(m) {
+  const list = document.createElement('ul');
+  list.className = 'macro-steps-list';
+  m.steps.forEach((step, i) => {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="muted">${i}.</span> <span class="step-type">${esc(step.type)}</span>
+      <button class="stepUpBtn" ${i === 0 ? 'disabled' : ''}>&uarr;</button>
+      <button class="stepDownBtn" ${i === m.steps.length - 1 ? 'disabled' : ''}>&darr;</button>
+      <button class="stepRemoveBtn">Remove</button>
+      <button class="stepRunFromBtn">Run from here</button>`;
+    li.querySelector('.stepUpBtn').addEventListener('click', async () => {
+      const steps = [...m.steps];
+      [steps[i - 1], steps[i]] = [steps[i], steps[i - 1]];
+      await api('PUT', `/macros/${m.id}/steps`, { steps });
+      await refreshMacros();
+    });
+    li.querySelector('.stepDownBtn').addEventListener('click', async () => {
+      const steps = [...m.steps];
+      [steps[i + 1], steps[i]] = [steps[i], steps[i + 1]];
+      await api('PUT', `/macros/${m.id}/steps`, { steps });
+      await refreshMacros();
+    });
+    li.querySelector('.stepRemoveBtn').addEventListener('click', async () => {
+      const steps = m.steps.filter((_, idx) => idx !== i);
+      await api('PUT', `/macros/${m.id}/steps`, { steps });
+      await refreshMacros();
+    });
+    li.querySelector('.stepRunFromBtn').addEventListener('click', async () => {
+      if (!currentSessionId) { alert('no active session to run against'); return; }
+      try {
+        const result = await runMacro(m.id, { fromStep: i });
+        alert(`macro "${m.name}" ran ${result.ranSteps}/${result.totalSteps} step(s) from step ${i}`);
+        await refreshAll();
+      } catch (err) {
+        alert('macro run failed: ' + err.message);
+      }
+    });
+    list.appendChild(li);
+  });
+  return list;
+}
+
+function renderVerityRuns(runs) {
+  lastVerityRuns = runs;
+  el('verityEmpty').hidden = runs.length > 0;
+  const body = document.querySelector('#verityTable tbody');
+  body.innerHTML = '';
+  for (const v of runs) {
+    const tr = document.createElement('tr');
+    tr.className = 'expandable';
+    const outcome = v.passed === null ? '<span class="muted">unknown</span>' : `<span class="badge ${v.passed ? 'badge-ok' : 'badge-fail'}">${v.passed ? 'PASS' : 'FAIL'}</span>`;
+    tr.innerHTML = `<td>${v.id}</td><td>${esc(v.label ?? '')}</td><td>${outcome}</td><td>${v.passed_count}/${v.step_count} (${v.failed_count} failed)</td><td>${fmtTime(v.imported_at)}</td>`;
+    tr.addEventListener('click', async () => {
+      const existing = tr.nextElementSibling;
+      if (existing && existing.classList.contains('detail-row')) { existing.remove(); return; }
+      const full = await api('GET', `/verity-runs/${v.id}`);
+      toggleRow(tr, `<pre>${esc(JSON.stringify(full.result, null, 2))}</pre>`);
+    });
+    body.appendChild(tr);
+  }
+}
+
+async function refreshVerityRuns() { if (currentSessionId) renderVerityRuns(await api('GET', `/sessions/${currentSessionId}/verity-runs`)); }
+
+async function refreshMacros() {
+  const macros = await api('GET', '/macros');
+  el('macrosEmpty').hidden = macros.length > 0;
+  const body = document.querySelector('#macrosTable tbody');
+  body.innerHTML = '';
+  for (const m of macros) {
+    const tr = document.createElement('tr');
+    tr.className = 'expandable';
+    tr.innerHTML = `<td>${m.id}</td><td>${esc(m.name)}</td><td>${m.steps.length}</td><td>${m.source_session_id ?? ''}</td><td>${fmtTime(m.created_at)}</td><td><button class="runMacroBtn">Run</button> <button class="delMacroBtn">Delete</button></td>`;
+    tr.querySelector('.runMacroBtn').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        const result = await runMacro(m.id, {});
+        alert(`macro "${m.name}" ran ${result.ranSteps}/${result.totalSteps} step(s)`);
+        await refreshAll();
+      } catch (err) {
+        alert('macro run failed: ' + err.message);
+      }
+    });
+    tr.querySelector('.delMacroBtn').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete macro "${m.name}"?`)) return;
+      await api('DELETE', `/macros/${m.id}`);
+      await refreshMacros();
+    });
+    tr.addEventListener('click', () => {
+      const existing = tr.nextElementSibling;
+      if (existing && existing.classList.contains('detail-row')) { existing.remove(); return; }
+      const detailRow = document.createElement('tr');
+      detailRow.className = 'detail-row';
+      const td = document.createElement('td');
+      td.colSpan = tr.children.length;
+      td.appendChild(renderMacroStepInspector(m));
+      detailRow.appendChild(td);
+      tr.after(detailRow);
+    });
+    body.appendChild(tr);
+  }
+}
+
+async function refreshSessionMeta() {
+  if (!currentSessionId) return;
+  const session = await api('GET', `/sessions/${currentSessionId}`);
+  el('sessionGoal').textContent = session.goal;
+  el('sessionContext').textContent = session.context || '';
+  el('sessionTags').innerHTML = (session.tags || []).map((t) => `<span class="chip">${esc(t)}</span>`).join('');
+  const badge = el('sessionStatusBadge');
+  badge.textContent = session.status;
+  badge.className = 'badge ' + (session.status === 'active' ? 'badge-active' : 'badge-ended');
+  el('sessionCrvBadge').hidden = !session.strict_crv;
+  el('endSessionBtn').disabled = session.status !== 'active';
+}
+
+async function refreshActions() { if (currentSessionId) renderActions(await api('GET', `/sessions/${currentSessionId}/actions`)); }
+async function refreshSnapshots() { if (currentSessionId) renderSnapshots(await api('GET', `/sessions/${currentSessionId}/snapshots`)); }
+async function refreshDiffs() { if (currentSessionId) renderDiffs(await api('GET', `/sessions/${currentSessionId}/diffs`)); }
+async function refreshConsole() { if (currentSessionId) renderConsole(await api('GET', `/sessions/${currentSessionId}/console`)); }
+async function refreshNet() { if (currentSessionId) renderNet(await api('GET', `/sessions/${currentSessionId}/net`)); }
+async function refreshQA() { if (currentSessionId) renderQA(await api('GET', `/sessions/${currentSessionId}/qa`)); }
+
+async function refreshSessionDetail() {
+  if (!currentSessionId) return;
+  await Promise.all([refreshSessionMeta(), refreshActions(), refreshSnapshots(), refreshDiffs(), refreshConsole(), refreshNet(), refreshQA(), refreshVerityRuns()]);
+  renderTimeline();
+}
+
+let frictionDismissed = false;
+
+function renderFriction(a) {
+  if (frictionDismissed) return;
+  const items = [];
+  for (const t of a.failureRateByType.slice(0, 3)) {
+    items.push(`<strong>${esc(t.type)}</strong> fails ${(t.failureRate * 100).toFixed(0)}% of the time (${t.failed}/${t.total} across all sessions)`);
+  }
+  for (const s of a.topFailedSelectors.slice(0, 3)) {
+    items.push(`selector <code>${esc(s.selector)}</code> failed ${s.failCount}x on <strong>${esc(s.type)}</strong> across ${s.sessionCount} session(s)`);
+  }
+  for (const m of a.macrosNeverRun.slice(0, 3)) {
+    items.push(`macro <strong>${esc(m.name)}</strong> (#${m.id}) recorded but never run`);
+  }
+  for (const m of a.macrosNeverSucceeding.slice(0, 3)) {
+    items.push(`macro <strong>${esc(m.name)}</strong> (#${m.id}) has been run but never succeeded on any step`);
+  }
+  for (const v of a.verityLabelsStillFailing.slice(0, 3)) {
+    items.push(`Verity check <strong>${esc(v.label)}</strong> still FAIL as of its latest import (${v.importCount} import(s) so far)`);
+  }
+  // A malformed row is now SKIPPED, not a silent global outage of this
+  // whole banner (see db.mjs's listAllActions) - surfaced here rather than
+  // swallowed, so "friction analytics itself has a data-quality problem"
+  // is visible instead of the banner just quietly showing less than it
+  // should with no sign why.
+  if (a.malformedActionsSkipped > 0) {
+    items.push(`<span class="muted">(${a.malformedActionsSkipped} action row(s) had corrupted JSON and were skipped from this analysis)</span>`);
+  }
+  el('frictionBanner').hidden = items.length === 0;
+  el('frictionList').innerHTML = items.map((i) => `<li>${i}</li>`).join('');
+}
+
+async function refreshFriction() {
+  try {
+    const a = await api('GET', '/analytics');
+    renderFriction(a);
+  } catch {
+    // Best-effort - a relay that can't even answer /health has already
+    // surfaced its own error via refreshHealth's catch below.
+  }
+}
+
+async function refreshAll() {
+  try {
+    await refreshHealth();
+    await refreshSessionPicker();
+    await refreshSessionDetail();
+    await refreshMacros();
+    await refreshFriction();
+  } catch (err) {
+    el('relayStatus').textContent = 'relay: unreachable - ' + err.message;
+  }
+}
+
+// ---------- Realtime (SSE) ----------
+// Pushes a "something changed" signal only - re-fetches the specific
+// resource via the same functions the initial load already uses, rather
+// than duplicating row serialization over the event stream.
+const KIND_REFRESH = {
+  session: async () => { await refreshSessionPicker(); await refreshHealth(); },
+  agent: refreshHealth,
+  action: async () => { await refreshActions(); renderTimeline(); },
+  snapshot: async () => { await refreshSnapshots(); renderTimeline(); },
+  diff: async () => { await refreshDiffs(); renderTimeline(); },
+  console: async () => { await refreshConsole(); renderTimeline(); },
+  net: async () => { await refreshNet(); renderTimeline(); },
+  qa: refreshQA,
+  macro: refreshMacros,
+  verity: async () => { await refreshVerityRuns(); renderTimeline(); },
+};
+
+function connectEvents() {
+  const es = new EventSource(BASE + '/events');
+  es.addEventListener('update', (e) => {
+    let data;
+    try { data = JSON.parse(e.data); } catch { return; }
+    if (data.kind === 'action_start') {
+      // See tools/web-scout/relay.mjs withLoggedAction - fires the moment a
+      // command dispatches, before it resolves, so a dom.wait/idb.wait/
+      // dom.pick round trip (up to 10-15s) shows a live "running..." row
+      // instead of a dead-looking dashboard.
+      if (data.sessionId === currentSessionId) {
+        pendingActions.set(`${data.type}:${data.startedAt}:${data.agentName}`, { ...data });
+        renderActions(lastActions);
+      }
+      return;
+    }
+    const refresh = KIND_REFRESH[data.kind];
+    if (!refresh) return;
+    if (data.kind === 'action' && data.sessionId === currentSessionId) {
+      // The finishing action's own row is now in the DB - drop every
+      // pending entry for this session (simplest correct clear; a real
+      // finish always follows its own start).
+      for (const [key, p] of pendingActions) if (p.sessionId === currentSessionId) pendingActions.delete(key);
+    }
+    if (data.sessionId === null || data.sessionId === currentSessionId) refresh();
+  });
+  // EventSource auto-reconnects on its own; the 3s poll below is a lower-
+  // frequency fallback in case it stays down for a while.
+}
+
+el('sessionPicker').addEventListener('change', (e) => { currentSessionId = Number(e.target.value); refreshSessionDetail(); });
+el('tagFilter').addEventListener('input', () => refreshSessionPicker());
+
+el('actionTypeFilter').addEventListener('change', () => renderActions(lastActions));
+el('actionOkFilter').addEventListener('change', () => renderActions(lastActions));
+el('actionSearch').addEventListener('input', () => renderActions(lastActions));
+
+async function runGlobalSearch() {
+  const q = el('globalSearch').value.trim();
+  const resultsEl = el('searchResults');
+  if (!q) { resultsEl.hidden = true; resultsEl.innerHTML = ''; return; }
+  resultsEl.hidden = false;
+  resultsEl.innerHTML = '<div class="muted">searching...</div>';
+  try {
+    const { count, matches } = await api('GET', `/search?q=${encodeURIComponent(q)}`);
+    if (!count) { resultsEl.innerHTML = '<div class="empty">No matches across any session.</div>'; return; }
+    resultsEl.innerHTML = matches.map((m) => `
+      <div class="search-hit" data-session-id="${m.sessionId}">
+        <div><strong>#${m.sessionId}</strong> [${esc(m.sessionStatus)}] ${esc(m.sessionGoal)} &mdash; <span class="badge ${m.ok ? 'badge-ok' : 'badge-fail'}">${esc(m.type)}</span></div>
+        <div class="muted">${esc(m.snippet)}</div>
+      </div>`).join('') + `<div class="muted" style="margin-top:6px;">${count} match(es)${count >= 200 ? ' (capped at 200)' : ''}</div>`;
+    resultsEl.querySelectorAll('.search-hit').forEach((hitEl) => {
+      hitEl.addEventListener('click', () => {
+        const sid = Number(hitEl.dataset.sessionId);
+        el('sessionPicker').value = String(sid);
+        currentSessionId = sid;
+        refreshSessionDetail();
+        resultsEl.hidden = true;
+      });
+    });
+  } catch (err) {
+    resultsEl.innerHTML = `<div class="qa-err">search failed: ${esc(err.message)}</div>`;
+  }
+}
+el('globalSearchBtn').addEventListener('click', runGlobalSearch);
+el('globalSearch').addEventListener('keydown', (e) => { if (e.key === 'Enter') runGlobalSearch(); });
+
+el('frictionToggle').addEventListener('click', () => {
+  frictionDismissed = true;
+  el('frictionBanner').hidden = true;
+});
+
+el('endSessionBtn').addEventListener('click', async () => {
+  if (!currentSessionId) return;
+  await api('POST', `/sessions/${currentSessionId}/end`);
+  await refreshAll();
+});
+
+el('verityImportBtn').addEventListener('click', async () => {
+  if (!currentSessionId) { alert('select a session first'); return; }
+  const file = el('verityFileInput').files[0];
+  if (!file) { alert('choose a Verity scenario-result JSON file first'); return; }
+  try {
+    const text = await file.text();
+    const result = JSON.parse(text);
+    const label = el('verityLabel').value.trim() || file.name;
+    await api('POST', '/verity/import', { sessionId: currentSessionId, label, result });
+    el('verityFileInput').value = '';
+    el('verityLabel').value = '';
+    await refreshVerityRuns();
+    renderTimeline();
+  } catch (err) {
+    alert('verity import failed: ' + err.message);
+  }
+});
+
+el('recordMacroBtn').addEventListener('click', async () => {
+  if (!currentSessionId) return;
+  const name = prompt('Macro name?');
+  if (!name) return;
+  try {
+    await api('POST', '/macros', { name, sessionId: currentSessionId });
+    await refreshMacros();
+  } catch (err) {
+    alert('record failed: ' + err.message);
+  }
+});
+
+el('exportReportBtn').addEventListener('click', async () => {
+  if (!currentSessionId) return;
+  const { content } = await api('GET', `/sessions/${currentSessionId}/report?format=md`);
+  const blob = new Blob([content], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `web-scout-session-${currentSessionId}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+el('askForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const question = el('askQuestion').value.trim();
+  if (!question || !currentSessionId) return;
+  el('askSubmit').disabled = true;
+  el('askStatus').textContent = 'asking...';
+  try {
+    await api('POST', '/ask', { session_id: currentSessionId, question });
+    el('askQuestion').value = '';
+    el('askStatus').textContent = '';
+    await refreshQA();
+  } catch (err) {
+    el('askStatus').textContent = 'error: ' + err.message;
+  } finally {
+    el('askSubmit').disabled = false;
+  }
+});
+
+refreshAll();
+connectEvents();
+setInterval(refreshAll, 3000);
+setInterval(renderRadar, 2000);
+</script>
+</body>
+</html>
