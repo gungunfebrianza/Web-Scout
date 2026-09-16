@@ -1,5 +1,7 @@
 # Web-scout
 
+![web-scout](img/web-scout.png)
+
 **Give your AI coding agent eyes and hands in a real browser tab.**
 
 Web-scout is a small, dependency-free tool that lets Claude Code, Codex CLI,
