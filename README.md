@@ -1,8 +1,8 @@
 # Web-scout
 
-See [`docs/web-scout.md`](../../docs/web-scout.md) for the full mechanism,
+See [`docs/web-scout.md`](./docs/web-scout.md) for the full mechanism,
 security model, and evidence-hierarchy guidance, and
-[`docs/web-scout-roadmap.md`](../../docs/web-scout-roadmap.md) for the
+[`docs/web-scout-roadmap.md`](./docs/web-scout-roadmap.md) for the
 version-by-version rationale behind each round of additions. This file is
 the command reference and quickstart - see ["Using this on your own
 project"](#using-this-on-your-own-project) below to skip straight to
