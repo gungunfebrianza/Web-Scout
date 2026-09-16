@@ -81,6 +81,9 @@
   #sessionPicker { min-width: 260px; }
   .level-error, .level-uncaught, .level-unhandledrejection { color: var(--accent-danger); }
   .level-warn { color: var(--accent-predator); }
+  #netTable .sortable { cursor: pointer; user-select: none; }
+  #netTable .sortable:hover { color: var(--accent-info); }
+  .net-slow { color: var(--accent-danger); font-weight: 600; }
   tr.pending-row td { color: var(--accent-predator); font-style: italic; }
   .spinner { display: inline-block; width: 9px; height: 9px; border: 2px solid var(--border-hud); border-top-color: var(--accent-predator); border-radius: 50%; animation: spin .7s linear infinite; margin-right: 6px; vertical-align: middle; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -109,11 +112,15 @@
   .diff-added { color: var(--accent-alien); }
   .diff-removed { color: var(--accent-danger); }
   .diff-changed { color: var(--accent-predator); }
-  #frictionBanner { background: var(--warn-bg); border: 1px solid var(--accent-predator); border-radius: 2px; padding: 10px 12px; margin-bottom: 12px; }
-  #frictionBanner h3 { margin: 0 0 6px; font-family: var(--font-display); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--accent-predator); }
+  #frictionBanner, #dbVersionBanner { background: var(--warn-bg); border: 1px solid var(--accent-predator); border-radius: 2px; padding: 10px 12px; margin-bottom: 12px; }
+  #frictionBanner h3, #dbVersionBanner h3 { margin: 0 0 6px; font-family: var(--font-display); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--accent-predator); }
   #frictionBanner ul { margin: 0; padding-left: 18px; }
   #frictionBanner li { margin: 2px 0; }
-  #frictionToggle { float: right; background: none; border: none; color: var(--ink-muted); cursor: pointer; padding: 0 4px; }
+  #frictionToggle, #dbVersionToggle { float: right; background: none; border: none; color: var(--ink-muted); cursor: pointer; padding: 0 4px; }
+  .assert-run { border-bottom: 1px solid var(--border-hud); padding: 8px 0; }
+  .assert-run:last-child { border-bottom: none; }
+  .assert-checks-list { list-style: none; margin: 4px 0 0; padding: 0; }
+  .assert-checks-list li { padding: 2px 0; font-size: 12px; }
   .hud-pulse { animation: hud-blink 1.6s ease-in-out infinite; }
   @keyframes hud-blink { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
   .hud-header { display: flex; flex-direction: column; gap: 10px; }
@@ -136,6 +143,15 @@
   @media (prefers-reduced-motion: reduce) {
     body::before, .hud-pulse, .radar-sweep, .spinner { animation: none !important; }
   }
+  dialog#settingsDialog { background: var(--bg-panel); color: var(--ink-primary); border: 1px solid var(--border-hud); border-radius: 4px; padding: 16px; max-width: 640px; width: 90vw; }
+  dialog#settingsDialog::backdrop { background: rgba(0,0,0,.6); }
+  .settings-tabs { margin: 10px 0; }
+  .settings-tab-btn.active { border-color: var(--accent-predator); color: var(--accent-predator); }
+  .settings-tab { margin-top: 10px; }
+  .settings-tab label { display: block; margin: 10px 0 4px; font-size: 12px; color: var(--ink-muted); }
+  .settings-tab input { width: 200px; }
+  #serverConfigView div { margin: 3px 0; }
+  #aboutContent p { margin: 6px 0; }
 </style>
 </head>
 <body>
@@ -163,7 +179,55 @@
     <select id="sessionPicker"></select>
     <input id="globalSearch" placeholder="search ALL sessions' actions...">
     <button id="globalSearchBtn">Search</button>
+    <button id="settingsBtn" title="Display preferences, server config, about this project">Settings</button>
   </div>
+</div>
+
+<dialog id="settingsDialog">
+  <form method="dialog">
+    <div class="row" style="justify-content: space-between; align-items:center;">
+      <h2 style="margin:0;">Settings</h2>
+      <button id="settingsCloseBtn" type="submit">Close</button>
+    </div>
+    <div class="settings-tabs row">
+      <button type="button" class="settings-tab-btn" data-tab="Display">Display</button>
+      <button type="button" class="settings-tab-btn" data-tab="Server">Server config</button>
+      <button type="button" class="settings-tab-btn" data-tab="About">About / Project</button>
+    </div>
+
+    <section id="settingsTabDisplay" class="settings-tab">
+      <div class="muted">Stored in this browser only (localStorage) - applies immediately, no relay restart.</div>
+      <label>Poll interval (ms)<input id="setPollInterval" type="number" min="1000" step="500"></label>
+      <label>Action rows rendered (cap)<input id="setActionsCap" type="number" min="50" step="50"></label>
+      <label>Console/net rows fetched (cap)<input id="setConsoleNetLimit" type="number" min="100" step="100"></label>
+      <label>Slow-request highlight threshold (ms)<input id="setNetSlowMs" type="number" min="500" step="500"></label>
+      <div class="row" style="margin-top:10px;">
+        <button type="button" id="settingsApplyBtn">Apply</button>
+        <button type="button" id="settingsResetBtn">Reset to defaults</button>
+      </div>
+    </section>
+
+    <section id="settingsTabServer" class="settings-tab" hidden>
+      <div class="muted">Read from the relay process's own environment. Host/port/DB path/auto-open are fixed at process start - change the env var and restart the relay. AI backend URL is the exception: it's re-read on every "Ask AI" call, so it's editable live below.</div>
+      <div id="serverConfigView" class="muted" style="margin-top:8px;">loading...</div>
+      <label>AI backend URL (live-editable)<input id="setAiBackendUrl" style="width:100%;"></label>
+      <div class="row" style="margin-top:6px;">
+        <button type="button" id="settingsSaveAiBackendBtn">Save</button>
+        <button type="button" id="settingsResetAiBackendBtn">Reset to default</button>
+        <span id="settingsAiBackendStatus" class="muted"></span>
+      </div>
+    </section>
+
+    <section id="settingsTabAbout" class="settings-tab" hidden>
+      <div id="aboutContent">loading...</div>
+    </section>
+  </form>
+</dialog>
+
+<div id="dbVersionBanner" hidden>
+  <button id="dbVersionToggle">hide</button>
+  <h3>IndexedDB schema drift</h3>
+  <div id="dbVersionText"></div>
 </div>
 
 <div id="frictionBanner" hidden>
@@ -211,6 +275,13 @@
   </section>
 
   <section class="hud-section">
+  <h2>Regression checks</h2>
+  <div class="muted">results of <code>session assert</code> - declarative checks against LIVE state (see the CLI's own "session assert" doc)</div>
+  <div id="assertRunsList" style="margin-top: 4px;"></div>
+  <div id="assertRunsEmpty" class="empty" hidden>No "session assert" runs recorded yet for this session.</div>
+  </section>
+
+  <section class="hud-section">
   <h2>State snapshots</h2>
   <table id="snapshotsTable"><thead><tr><th>ID</th><th>Time</th><th>Agent</th><th>Counts</th><th>Size</th></tr></thead><tbody></tbody></table>
   <div id="snapshotsEmpty" class="empty" hidden>No snapshots yet - <code>idb snapshot</code> from the CLI.</div>
@@ -230,7 +301,7 @@
 
   <section class="hud-section">
   <h2>Network</h2>
-  <table id="netTable"><thead><tr><th>Time</th><th>Agent</th><th>Via</th><th>Method</th><th>URL</th><th>Status</th></tr></thead><tbody></tbody></table>
+  <table id="netTable"><thead><tr><th>Time</th><th>Agent</th><th>Via</th><th>Method</th><th>URL</th><th>Status</th><th id="netDurationHeader" class="sortable" title="Click to sort by duration">Duration</th></tr></thead><tbody></tbody></table>
   <div id="netEmpty" class="empty" hidden>No network entries captured yet.</div>
   </section>
 
@@ -273,6 +344,29 @@
 const BASE = location.origin;
 let currentSessionId = null;
 let allSessions = [];
+
+// ---------- Settings (client display prefs, persisted to localStorage) ----------
+// Browser-side only - a fork running this dashboard against a different
+// target app, or a user who just wants different tradeoffs (more history
+// vs. less render/fetch cost), doesn't need to edit this file to get them.
+const SETTINGS_STORAGE_KEY = 'webscoutDashboardSettings';
+const DEFAULT_SETTINGS = { pollIntervalMs: 3000, actionsRenderCap: 500, consoleNetFetchLimit: 2000, netSlowMs: 10000 };
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : { ...DEFAULT_SETTINGS };
+  } catch {
+    return { ...DEFAULT_SETTINGS }; // private window / blocked storage - falls back silently, settings just won't persist
+  }
+}
+
+let settings = loadSettings();
+
+function saveSettings(next) {
+  settings = next;
+  try { localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings)); } catch { /* settings still apply for this tab's lifetime */ }
+}
 // Caches of the last-rendered rows for each panel - reused by the Timeline
 // (which merges all of them) and the Action log filter bar (which re-renders
 // client-side without a re-fetch on every keystroke).
@@ -282,11 +376,40 @@ let lastDiffs = [];
 let lastConsoleEntries = [];
 let lastNetEntries = [];
 let lastVerityRuns = [];
+// Lazily-fetched full (unredacted) action rows, keyed by action id - avoids
+// re-fetching the same expanded row's heavy payload on every collapse/
+// re-expand within a session. Cleared on session switch (see below) so it
+// can't grow across an entire dashboard lifetime.
+let actionDetailCache = new Map();
+// Rendered detail-row HTML per action id - an action row in this table is
+// always already finished (pending/in-flight rows live in pendingActions,
+// a separate map), so its detail HTML is immutable and safe to cache
+// forever within a session instead of re-stringifying+re-escaping the same
+// params/result JSON on every reopen.
+let renderedDetailHtmlCache = new Map();
 // In-flight action rows, keyed by `${type}:${startedAt}:${agentName}` -
 // added on the relay's 'action_start' SSE push, cleared on the next full
 // 'action' refresh for the same session (which will already include the
 // now-finished row). See tools/web-scout/relay.mjs withLoggedAction.
 const pendingActions = new Map();
+
+// Coalesces bursty callers (an SSE push per finished action, PLUS the 3s
+// refreshAll() fallback poll, PLUS action_start pushes) into one trailing
+// call per `ms` - without this, an active session firing several actions a
+// second reruns fn's full network fetch + full DOM rebuild that many times
+// a second too, which was confirmed in practice to make the actions table
+// impossible to click (a row is a brand-new DOM node again by the time a
+// click finishes, or the table is mid-rebuild under the cursor). This is a
+// scheduling fix, not a threading one - the DOM is single-thread no matter
+// what fetches it; the actual cost is redundant full rebuilds, not a lack
+// of parallelism.
+function debounce(fn, ms) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
 let pendingTickTimer = null;
 // Cached /health payload - refreshHealth() used to discard it after
 // updating the status text; the HUD stat strip needs agents_connected too.
@@ -350,6 +473,16 @@ async function refreshSessionPicker() {
   currentSessionId = Number(wanted);
 }
 
+let dbVersionDismissedFor = null; // remembers WHICH drift (source+live pair) was dismissed, so a NEW drift re-shows
+
+function renderDbVersionBanner(drift) {
+  if (!drift || !drift.checked || !drift.drift) { el('dbVersionBanner').hidden = true; return; }
+  const key = `${drift.sourceVersion}:${drift.liveVersion}`;
+  if (dbVersionDismissedFor === key) { el('dbVersionBanner').hidden = true; return; }
+  el('dbVersionText').innerHTML = `Connected tab's live IndexedDB version is <strong>${drift.liveVersion}</strong> but <code>js/db.js</code>'s own <code>DB_VERSION</code> is <strong>${drift.sourceVersion}</strong> - the tab has not re-opened the DB since a migration bump. Run <code>page reload</code> (or <code>page reload --hard</code>) before trusting any new-store check.`;
+  el('dbVersionBanner').hidden = false;
+}
+
 async function refreshHealth() {
   const health = await api('GET', '/health');
   lastHealth = health;
@@ -357,6 +490,7 @@ async function refreshHealth() {
   el('agentsStatus').textContent = health.agents_connected.length
     ? `agents: ${health.agents_connected.join(', ')}`
     : 'agents: none connected';
+  renderDbVersionBanner(health.db_version_drift);
   renderHud();
 }
 
@@ -459,16 +593,91 @@ function populateActionTypeFilter(actions) {
   if (types.includes(prev)) select.value = prev;
 }
 
+// Only the elapsed-seconds cell of already-inserted pending rows needs to
+// change every tick - patches those cells in place instead of tearing down
+// and rebuilding the whole (potentially large) actions table every 500ms,
+// which was the main cause of the table being unclickable during an active
+// session (a row could be a brand-new DOM node again mid-click).
+function tickPendingRows() {
+  const body = document.querySelector('#actionsTable tbody');
+  if (!body) return;
+  for (const tr of body.querySelectorAll('tr.pending-row')) {
+    const startedAt = tr.dataset.startedAt;
+    if (!startedAt) continue;
+    const elapsed = ((Date.now() - new Date(startedAt).getTime()) / 1000).toFixed(1);
+    tr.children[4].textContent = `${elapsed}s`;
+  }
+}
+
 function renderPendingRows(tbody) {
   const sessionPending = [...pendingActions.values()].filter((p) => p.sessionId === currentSessionId);
   for (const p of sessionPending.sort((a, b) => a.startedAt.localeCompare(b.startedAt))) {
     const elapsed = ((Date.now() - new Date(p.startedAt).getTime()) / 1000).toFixed(1);
     const tr = document.createElement('tr');
     tr.className = 'pending-row';
+    tr.dataset.startedAt = p.startedAt;
     tr.innerHTML = `<td>${fmtTime(p.startedAt)}</td><td>${esc(p.agentName)}</td><td>${esc(p.type)}</td><td><span class="spinner"></span>running...</td><td>${elapsed}s</td>`;
     tbody.insertBefore(tr, tbody.firstChild);
   }
-  if (!pendingTickTimer) pendingTickTimer = setInterval(() => { if (pendingActions.size) renderActions(lastActions); }, 500);
+  if (!pendingTickTimer) pendingTickTimer = setInterval(() => { if (pendingActions.size) tickPendingRows(); }, 500);
+}
+
+// Caps how many rows actually get built/attached - the action log only
+// ever grows across a session (a long CRV session easily reaches 1000+
+// rows), so an unbounded rebuild gets slower and slower for the rest of
+// the session even after the churn fix above. Newest-first ordering from
+// the API means this is always the most recent N, not an arbitrary cut.
+// User-configurable via Settings > Display (settings.actionsRenderCap).
+
+// Every full rebuild (SSE-triggered debounced refresh, the 3s fallback
+// poll) tears down and rebuilds every <tr> from scratch - without this, a
+// row a user just expanded would silently collapse again the moment any
+// of those triggers next fired (as fast as 250ms into an active session),
+// since the detail-row is just a DOM sibling with no persistence of its
+// own. Tracks which action ids are currently expanded so a rebuild can
+// re-open them instead of just dropping them.
+const expandedActionIds = new Set();
+
+async function actionDetailHtml(a) {
+  const cached = renderedDetailHtmlCache.get(a.id);
+  if (cached !== undefined) return cached;
+  // Server strips the 3 known-heavy result shapes (dom.screenshot
+  // dataUrl / idb.snapshot stores / net.log entries) from the list
+  // response - fetch the one untouched row lazily, only on expand,
+  // instead of every row paying for its full payload on every refresh.
+  let full = a;
+  if (a.result?.redacted) full = actionDetailCache.get(a.id) ?? await api('GET', `/sessions/${currentSessionId}/actions/${a.id}`).then((r) => { actionDetailCache.set(a.id, r); return r; });
+  // Screenshots render as an inline thumbnail instead of dumping their
+  // (large) base64 data URL into a <pre> block.
+  const resultHtml = (full.type === 'dom.screenshot' && full.ok && full.result?.dataUrl)
+    ? `<img src="${esc(full.result.dataUrl)}" alt="screenshot" style="max-width:480px;border:1px solid var(--border-hud);border-radius:4px;display:block;margin-top:4px;"><div class="muted">${full.result.width}x${full.result.height}</div>`
+    : `<pre>${esc(full.ok ? JSON.stringify(full.result, null, 2) : full.error)}</pre>`;
+  const html = `<strong>params</strong><pre>${esc(JSON.stringify(full.params, null, 2))}</pre><strong>${full.ok ? 'result' : 'error'}</strong>${resultHtml}`;
+  renderedDetailHtmlCache.set(a.id, html);
+  return html;
+}
+
+// A rebuild destroys and recreates every detail-row's <pre> from scratch,
+// which reset scroll position to the top on every reopen - jarring when
+// scrolled into a long result during an active session's frequent
+// rebuilds. Captured (per action id, one entry per <pre> in DOM order,
+// since a row's HTML shape is fixed for its type) right before the wipe
+// below and restored right after a reopened row's content lands.
+function captureDetailScrollTops(body) {
+  const map = new Map();
+  for (const tr of body.querySelectorAll('tr.expandable')) {
+    const next = tr.nextElementSibling;
+    if (next && next.classList.contains('detail-row')) {
+      map.set(tr.dataset.actionId, [...next.querySelectorAll('pre')].map((p) => p.scrollTop));
+    }
+  }
+  return map;
+}
+
+function restoreDetailScrollTop(tr, scrollTops, actionId) {
+  const saved = scrollTops.get(String(actionId));
+  if (!saved || !tr.nextElementSibling) return;
+  tr.nextElementSibling.querySelectorAll('pre').forEach((p, i) => { if (saved[i] !== undefined) p.scrollTop = saved[i]; });
 }
 
 function renderActions(actions) {
@@ -476,23 +685,74 @@ function renderActions(actions) {
   populateActionTypeFilter(actions);
   const filtered = actions.filter(actionMatchesFilters);
   el('actionsEmpty').hidden = filtered.length > 0 || pendingActions.size > 0;
+  const visible = filtered.slice(0, settings.actionsRenderCap);
+  const visibleIds = new Set(visible.map((a) => a.id));
+  for (const id of expandedActionIds) { if (!visibleIds.has(id)) expandedActionIds.delete(id); }
   const body = document.querySelector('#actionsTable tbody');
+  const scrollTops = captureDetailScrollTops(body);
   body.innerHTML = '';
-  for (const a of filtered) {
+  for (const a of visible) {
     const tr = document.createElement('tr');
     tr.className = 'expandable';
+    tr.dataset.actionId = a.id;
     tr.innerHTML = `<td>${fmtTime(a.started_at)}</td><td>${esc(a.agent_name ?? 'default')}</td><td>${esc(a.type)}</td><td><span class="badge ${a.ok ? 'badge-ok' : 'badge-fail'}">${a.ok ? 'ok' : 'fail'}</span></td><td>${a.duration_ms ?? ''}</td>`;
-    tr.addEventListener('click', () => {
-      // Screenshots render as an inline thumbnail instead of dumping their
-      // (large) base64 data URL into a <pre> block.
-      const resultHtml = (a.type === 'dom.screenshot' && a.ok && a.result?.dataUrl)
-        ? `<img src="${esc(a.result.dataUrl)}" alt="screenshot" style="max-width:480px;border:1px solid var(--border-hud);border-radius:4px;display:block;margin-top:4px;"><div class="muted">${a.result.width}x${a.result.height}</div>`
-        : `<pre>${esc(a.ok ? JSON.stringify(a.result, null, 2) : a.error)}</pre>`;
-      toggleRow(tr, `<strong>params</strong><pre>${esc(JSON.stringify(a.params, null, 2))}</pre><strong>${a.ok ? 'result' : 'error'}</strong>${resultHtml}`);
+    tr.addEventListener('click', async () => {
+      const existing = tr.nextElementSibling;
+      if (existing && existing.classList.contains('detail-row')) { existing.remove(); expandedActionIds.delete(a.id); return; }
+      expandedActionIds.add(a.id);
+      toggleRow(tr, await actionDetailHtml(a));
     });
+    body.appendChild(tr);
+    if (expandedActionIds.has(a.id)) {
+      actionDetailHtml(a).then((html) => {
+        // Guard against a race with a newer rebuild that already replaced
+        // this <tr> (or re-opened it) by the time the lazy fetch resolves.
+        if (body.contains(tr) && !(tr.nextElementSibling && tr.nextElementSibling.classList.contains('detail-row'))) {
+          toggleRow(tr, html);
+          restoreDetailScrollTop(tr, scrollTops, a.id);
+        }
+      }).catch(() => {
+        // A transient fetch error here (e.g. session ended mid-request)
+        // should not silently leave the row stuck closed - it stays
+        // tracked as expanded and gets another reopen attempt next render.
+      });
+    }
+  }
+  if (filtered.length > settings.actionsRenderCap) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td colspan="5" class="muted">... ${filtered.length - settings.actionsRenderCap} earlier row(s) not shown (capped at ${settings.actionsRenderCap} most recent - adjust in Settings) - narrow with the type/status/search filters above to see older rows</td>`;
     body.appendChild(tr);
   }
   renderPendingRows(body);
+}
+
+// session.assert's action row only stores the raw per-check array (see
+// tools/web-scout/relay.mjs's POST /sessions/:id/assert - the overall
+// passed boolean is computed there and returned to the immediate caller,
+// never persisted on the row itself) - recomputed here the same way
+// (every(check => check.pass)) so a HISTORICAL run still renders an
+// accurate overall badge, not just the run that happened to be active when
+// the response first came back. Previously this only showed up as a
+// generic Action-log row (raw JSON, no dedicated pass/fail view) - real
+// gap for a feature whose whole point is regression-checking, expandable
+// state noticed reading the dashboard fresh.
+function renderAssertRuns(actions) {
+  const runs = actions.filter((a) => a.type === 'session.assert' && Array.isArray(a.result));
+  el('assertRunsEmpty').hidden = runs.length > 0;
+  el('assertRunsList').innerHTML = runs.map((a) => {
+    const checks = a.result;
+    const passed = checks.every((c) => c.pass);
+    const checksHtml = checks.map((c) => {
+      const label = [c.store, c.where ? JSON.stringify(c.where) : null].filter(Boolean).join(' ');
+      return `<li><span class="badge ${c.pass ? 'badge-ok' : 'badge-fail'}">${c.pass ? 'ok' : 'fail'}</span> ${esc(label)} - ${esc(c.detail)}</li>`;
+    }).join('');
+    return `
+      <div class="assert-run">
+        <span class="badge ${passed ? 'badge-ok' : 'badge-fail'}">${passed ? 'PASS' : 'FAIL'}</span>
+        <span class="muted">${fmtTime(a.started_at)} - ${checks.length} check(s)</span>
+        <ul class="assert-checks-list">${checksHtml}</ul>
+      </div>`;
+  }).join('');
 }
 
 function renderTimeline() {
@@ -528,7 +788,8 @@ function renderSnapshots(snapshots) {
     const tr = document.createElement('tr');
     tr.className = 'expandable';
     const countsSummary = Object.entries(s.counts).filter(([, n]) => n > 0).map(([k, n]) => `${k}:${n}`).join(', ') || '(all empty)';
-    tr.innerHTML = `<td>${s.id}</td><td>${fmtTime(s.taken_at)}</td><td>${esc(s.agent_name ?? 'default')}</td><td>${esc(countsSummary)}</td><td>${(s.byte_size / 1024).toFixed(1)} KB</td>`;
+    const goldenBadge = s.golden_name ? ` <span class="badge badge-crv" title="golden regression baseline - diffable from any future session via idb diff-golden">golden: ${esc(s.golden_name)}</span>` : '';
+    tr.innerHTML = `<td>${s.id}</td><td>${fmtTime(s.taken_at)}${goldenBadge}</td><td>${esc(s.agent_name ?? 'default')}</td><td>${esc(countsSummary)}</td><td>${(s.byte_size / 1024).toFixed(1)} KB</td>`;
     tr.addEventListener('click', async () => {
       const existing = tr.nextElementSibling;
       if (existing && existing.classList.contains('detail-row')) { existing.remove(); return; }
@@ -569,11 +830,37 @@ function renderConsole(entries) {
   body.innerHTML = entries.map((c) => `<tr><td>${fmtTime(c.occurred_at)}</td><td>${esc(c.agent_name)}</td><td class="level-${esc(c.level)}">${esc(c.level)}</td><td>${esc(c.message)}</td></tr>`).join('');
 }
 
+// A row over this duration gets the slow-request flag - lets a
+// hung-looking-but-actually-still-cooking request (e.g. a long AI review
+// call) be spotted at a glance instead of requiring CLI polling to tell
+// "still running" from "dead". Matches the CLI's own net-history default
+// intuition, not tied to any single feature's real timeout. User-
+// configurable via Settings > Display (settings.netSlowMs).
+let netSortByDuration = false;
+
+function netDurationMs(n) {
+  const started = Date.parse(n.started_at);
+  const ended = Date.parse(n.ended_at);
+  return Number.isFinite(started) && Number.isFinite(ended) ? ended - started : null;
+}
+
+function fmtDuration(ms) {
+  if (ms === null || !Number.isFinite(ms)) return '';
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+}
+
 function renderNet(entries) {
   lastNetEntries = entries;
   el('netEmpty').hidden = entries.length > 0;
   const body = document.querySelector('#netTable tbody');
-  body.innerHTML = entries.map((n) => `<tr><td>${fmtTime(n.occurred_at)}</td><td>${esc(n.agent_name)}</td><td>${esc(n.via)}</td><td>${esc(n.method)}</td><td>${esc(n.url)}</td><td>${n.status ?? (n.error ? `ERR: ${esc(n.error)}` : '')}</td></tr>`).join('');
+  const rows = netSortByDuration
+    ? [...entries].sort((a, b) => (netDurationMs(b) ?? -1) - (netDurationMs(a) ?? -1))
+    : entries;
+  body.innerHTML = rows.map((n) => {
+    const ms = netDurationMs(n);
+    const slow = ms !== null && ms >= settings.netSlowMs;
+    return `<tr><td>${fmtTime(n.occurred_at)}</td><td>${esc(n.agent_name)}</td><td>${esc(n.via)}</td><td>${esc(n.method)}</td><td>${esc(n.url)}</td><td>${n.status ?? (n.error ? `ERR: ${esc(n.error)}` : '')}</td><td class="${slow ? 'net-slow' : ''}">${fmtDuration(ms)}</td></tr>`;
+  }).join('');
 }
 
 function renderQA(qa) {
@@ -708,9 +995,19 @@ async function refreshMacros() {
   }
 }
 
+// Set by refreshSessionMeta, read by refreshSessionDetail - an 'ended'
+// session's rows are immutable (no CLI/agent can add actions/console/net/
+// snapshots/diffs to a session that has already ended), so once its panels
+// have been fetched once, the 3s poll has nothing new to find. Without this,
+// a confirmed-past session (e.g. one opened purely to read old results) paid
+// the exact same full 8-endpoint refetch + full-table-rebuild cost every 3s
+// as a live session, forever, for data that can never change again.
+let currentSessionStatus = null;
+
 async function refreshSessionMeta() {
   if (!currentSessionId) return;
   const session = await api('GET', `/sessions/${currentSessionId}`);
+  currentSessionStatus = session.status;
   el('sessionGoal').textContent = session.goal;
   el('sessionContext').textContent = session.context || '';
   el('sessionTags').innerHTML = (session.tags || []).map((t) => `<span class="chip">${esc(t)}</span>`).join('');
@@ -721,17 +1018,118 @@ async function refreshSessionMeta() {
   el('endSessionBtn').disabled = session.status !== 'active';
 }
 
-async function refreshActions() { if (currentSessionId) renderActions(await api('GET', `/sessions/${currentSessionId}/actions`)); }
-async function refreshSnapshots() { if (currentSessionId) renderSnapshots(await api('GET', `/sessions/${currentSessionId}/snapshots`)); }
-async function refreshDiffs() { if (currentSessionId) renderDiffs(await api('GET', `/sessions/${currentSessionId}/diffs`)); }
-async function refreshConsole() { if (currentSessionId) renderConsole(await api('GET', `/sessions/${currentSessionId}/console`)); }
-async function refreshNet() { if (currentSessionId) renderNet(await api('GET', `/sessions/${currentSessionId}/net`)); }
-async function refreshQA() { if (currentSessionId) renderQA(await api('GET', `/sessions/${currentSessionId}/qa`)); }
+// Every row in every panel has an autoincrement `id` - since rows are only
+// ever appended (never mutated/deleted server-side), "length + max id
+// unchanged since last render" is a cheap, sufficient proof that a fresh
+// fetch's result is byte-identical to what's already on screen. Skipping
+// the render in that case (rather than tearing down and rebuilding a table
+// that would come out looking exactly the same) is most of what "laggy even
+// though nothing happened" was: the 3s poll re-rendering idle panels for no
+// reason, contending with whatever the user was actually doing (e.g.
+// scrolling a result <pre>) on the same main thread.
+function fingerprintRows(rows) {
+  if (!rows.length) return '0';
+  let maxId = rows[0].id;
+  for (const r of rows) if (r.id > maxId) maxId = r.id;
+  return `${rows.length}:${maxId}`;
+}
+
+let lastActionsFp = null, lastSnapshotsFp = null, lastDiffsFp = null, lastConsoleFp = null, lastNetFp = null, lastQaFp = null, lastVerityFp = null;
+
+async function refreshActions() {
+  if (!currentSessionId) return false;
+  const actions = await api('GET', `/sessions/${currentSessionId}/actions`);
+  const fp = fingerprintRows(actions);
+  if (fp === lastActionsFp) return false;
+  lastActionsFp = fp;
+  renderActions(actions);
+  renderAssertRuns(actions);
+  return true;
+}
+async function refreshSnapshots() {
+  if (!currentSessionId) return false;
+  const snapshots = await api('GET', `/sessions/${currentSessionId}/snapshots`);
+  const fp = fingerprintRows(snapshots);
+  if (fp === lastSnapshotsFp) return false;
+  lastSnapshotsFp = fp;
+  renderSnapshots(snapshots);
+  return true;
+}
+async function refreshDiffs() {
+  if (!currentSessionId) return false;
+  const diffs = await api('GET', `/sessions/${currentSessionId}/diffs`);
+  const fp = fingerprintRows(diffs);
+  if (fp === lastDiffsFp) return false;
+  lastDiffsFp = fp;
+  renderDiffs(diffs);
+  return true;
+}
+// Capped server-side (not just discarded client-side after receiving it
+// all) - a long-running session's console/net capture only grows, and this
+// table re-fetches+re-renders the whole thing on every refresh tick. User-
+// configurable via Settings > Display (settings.consoleNetFetchLimit).
+async function refreshConsole() {
+  if (!currentSessionId) return false;
+  const entries = await api('GET', `/sessions/${currentSessionId}/console?limit=${settings.consoleNetFetchLimit}`);
+  const fp = fingerprintRows(entries);
+  if (fp === lastConsoleFp) return false;
+  lastConsoleFp = fp;
+  renderConsole(entries);
+  return true;
+}
+async function refreshNet() {
+  if (!currentSessionId) return false;
+  const entries = await api('GET', `/sessions/${currentSessionId}/net?limit=${settings.consoleNetFetchLimit}`);
+  const fp = fingerprintRows(entries);
+  if (fp === lastNetFp) return false;
+  lastNetFp = fp;
+  renderNet(entries);
+  return true;
+}
+async function refreshQA() {
+  if (!currentSessionId) return false;
+  const qa = await api('GET', `/sessions/${currentSessionId}/qa`);
+  const fp = fingerprintRows(qa);
+  if (fp === lastQaFp) return false;
+  lastQaFp = fp;
+  renderQA(qa);
+  return true;
+}
+async function refreshVerityRuns() {
+  if (!currentSessionId) return false;
+  const runs = await api('GET', `/sessions/${currentSessionId}/verity-runs`);
+  const fp = fingerprintRows(runs);
+  if (fp === lastVerityFp) return false;
+  lastVerityFp = fp;
+  renderVerityRuns(runs);
+  return true;
+}
+
+// refreshSessionDetail() is called both on an actual session switch AND by
+// the routine 3s poll (refreshAll) for the SAME still-active session - only
+// the former should reset per-session UI state. Clearing on every call
+// wiped an expanded row's tracked id (and its detail cache) every single
+// poll tick, which looked exactly like "detail rows close on their own"
+// even with zero real session change.
+let lastDetailSessionId = null;
 
 async function refreshSessionDetail() {
   if (!currentSessionId) return;
-  await Promise.all([refreshSessionMeta(), refreshActions(), refreshSnapshots(), refreshDiffs(), refreshConsole(), refreshNet(), refreshQA(), refreshVerityRuns()]);
-  renderTimeline();
+  const isSwitch = currentSessionId !== lastDetailSessionId;
+  if (isSwitch) {
+    actionDetailCache = new Map();
+    renderedDetailHtmlCache = new Map();
+    expandedActionIds.clear();
+    lastActionsFp = lastSnapshotsFp = lastDiffsFp = lastConsoleFp = lastNetFp = lastQaFp = lastVerityFp = null;
+    lastDetailSessionId = currentSessionId;
+  }
+  await refreshSessionMeta();
+  // Ended sessions are immutable - past the first load, nothing under them
+  // can change, so skip the other 7 fetches entirely instead of just
+  // re-rendering identical data every 3s (see currentSessionStatus above).
+  if (!isSwitch && currentSessionStatus === 'ended') return;
+  const changed = await Promise.all([refreshActions(), refreshSnapshots(), refreshDiffs(), refreshConsole(), refreshNet(), refreshQA(), refreshVerityRuns()]);
+  if (isSwitch || changed.some(Boolean)) renderTimeline();
 }
 
 let frictionDismissed = false;
@@ -792,14 +1190,29 @@ async function refreshAll() {
 // Pushes a "something changed" signal only - re-fetches the specific
 // resource via the same functions the initial load already uses, rather
 // than duplicating row serialization over the event stream.
+//
+// action/console/net are debounced: inject.js flushes console/net capture
+// batches every 250ms, and an active CRV session can finish several
+// actions a second - each was previously its own SSE push triggering its
+// own full network re-fetch + full table rebuild, independent of the 3s
+// refreshAll() poll and (for actions) the 500ms pending-spinner tick doing
+// the same. Stacked together, this made the actions table effectively
+// unclickable (a row could be torn down and rebuilt mid-click) - not a
+// threading problem (the DOM is single-thread regardless of how the data
+// arrives), just uncoalesced rebuild churn. Collapsing a burst into one
+// trailing refresh per 250ms fixes it.
+const debouncedPendingRerender = debounce(() => renderActions(lastActions), 100);
+const debouncedActionRefresh = debounce(async () => { await refreshActions(); renderTimeline(); }, 250);
+const debouncedConsoleRefresh = debounce(async () => { await refreshConsole(); renderTimeline(); }, 250);
+const debouncedNetRefresh = debounce(async () => { await refreshNet(); renderTimeline(); }, 250);
 const KIND_REFRESH = {
   session: async () => { await refreshSessionPicker(); await refreshHealth(); },
   agent: refreshHealth,
-  action: async () => { await refreshActions(); renderTimeline(); },
+  action: debouncedActionRefresh,
   snapshot: async () => { await refreshSnapshots(); renderTimeline(); },
   diff: async () => { await refreshDiffs(); renderTimeline(); },
-  console: async () => { await refreshConsole(); renderTimeline(); },
-  net: async () => { await refreshNet(); renderTimeline(); },
+  console: debouncedConsoleRefresh,
+  net: debouncedNetRefresh,
   qa: refreshQA,
   macro: refreshMacros,
   verity: async () => { await refreshVerityRuns(); renderTimeline(); },
@@ -817,7 +1230,7 @@ function connectEvents() {
       // instead of a dead-looking dashboard.
       if (data.sessionId === currentSessionId) {
         pendingActions.set(`${data.type}:${data.startedAt}:${data.agentName}`, { ...data });
-        renderActions(lastActions);
+        debouncedPendingRerender();
       }
       return;
     }
@@ -870,11 +1283,23 @@ async function runGlobalSearch() {
   }
 }
 el('globalSearchBtn').addEventListener('click', runGlobalSearch);
+el('netDurationHeader').addEventListener('click', () => {
+  netSortByDuration = !netSortByDuration;
+  el('netDurationHeader').textContent = netSortByDuration ? 'Duration ▼' : 'Duration';
+  renderNet(lastNetEntries);
+});
 el('globalSearch').addEventListener('keydown', (e) => { if (e.key === 'Enter') runGlobalSearch(); });
 
 el('frictionToggle').addEventListener('click', () => {
   frictionDismissed = true;
   el('frictionBanner').hidden = true;
+});
+
+el('dbVersionToggle').addEventListener('click', () => {
+  if (lastHealth?.db_version_drift?.checked && lastHealth.db_version_drift.drift) {
+    dbVersionDismissedFor = `${lastHealth.db_version_drift.sourceVersion}:${lastHealth.db_version_drift.liveVersion}`;
+  }
+  el('dbVersionBanner').hidden = true;
 });
 
 el('endSessionBtn').addEventListener('click', async () => {
@@ -943,10 +1368,119 @@ el('askForm').addEventListener('submit', async (e) => {
   }
 });
 
+// Restartable (not a bare setInterval) - Settings > Display can change the
+// poll interval live, which needs the old timer cleared before a new one
+// with the new period is started.
+let refreshAllTimer = null;
+function restartPolling() {
+  if (refreshAllTimer) clearInterval(refreshAllTimer);
+  refreshAllTimer = setInterval(refreshAll, settings.pollIntervalMs);
+}
+
 refreshAll();
 connectEvents();
-setInterval(refreshAll, 3000);
+restartPolling();
 setInterval(renderRadar, 2000);
+
+// ---------- Settings dialog wiring ----------
+
+function populateSettingsForm() {
+  el('setPollInterval').value = settings.pollIntervalMs;
+  el('setActionsCap').value = settings.actionsRenderCap;
+  el('setConsoleNetLimit').value = settings.consoleNetFetchLimit;
+  el('setNetSlowMs').value = settings.netSlowMs;
+}
+
+function showSettingsTab(name) {
+  document.querySelectorAll('.settings-tab-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === name));
+  document.querySelectorAll('.settings-tab').forEach((sec) => { sec.hidden = sec.id !== `settingsTab${name}`; });
+}
+document.querySelectorAll('.settings-tab-btn').forEach((btn) => btn.addEventListener('click', () => showSettingsTab(btn.dataset.tab)));
+
+// Re-fetches (not just re-renders cached data) so a raised/lowered
+// actions/console/net cap takes effect immediately rather than waiting for
+// the next real change or poll tick - nulling the fingerprints first
+// guarantees refreshActions/refreshConsole/refreshNet won't skip the
+// render just because the underlying row set happens to look unchanged.
+function applyDisplaySettingsNow() {
+  restartPolling();
+  lastActionsFp = lastConsoleFp = lastNetFp = null;
+  Promise.all([refreshActions(), refreshConsole(), refreshNet()]).then(() => renderTimeline());
+}
+
+el('settingsApplyBtn').addEventListener('click', () => {
+  saveSettings({
+    pollIntervalMs: Math.max(1000, Number(el('setPollInterval').value) || DEFAULT_SETTINGS.pollIntervalMs),
+    actionsRenderCap: Math.max(50, Number(el('setActionsCap').value) || DEFAULT_SETTINGS.actionsRenderCap),
+    consoleNetFetchLimit: Math.max(100, Number(el('setConsoleNetLimit').value) || DEFAULT_SETTINGS.consoleNetFetchLimit),
+    netSlowMs: Math.max(500, Number(el('setNetSlowMs').value) || DEFAULT_SETTINGS.netSlowMs),
+  });
+  applyDisplaySettingsNow();
+});
+
+el('settingsResetBtn').addEventListener('click', () => {
+  saveSettings({ ...DEFAULT_SETTINGS });
+  populateSettingsForm();
+  applyDisplaySettingsNow();
+});
+
+async function loadConfigTabs() {
+  el('serverConfigView').textContent = 'loading...';
+  el('aboutContent').textContent = 'loading...';
+  el('settingsAiBackendStatus').textContent = '';
+  try {
+    const cfg = await api('GET', '/config');
+    el('serverConfigView').innerHTML = `
+      <div>Relay: <code>${esc(cfg.host)}:${esc(cfg.port)}</code> <span class="muted">(WEBSCOUT_PORT - restart to change)</span></div>
+      <div>Database: <code>${esc(cfg.dbPath)}</code></div>
+      <div>Node: <code>${esc(cfg.nodeVersion)}</code> on <code>${esc(cfg.platform)}</code></div>
+      <div>Auto-open dashboard on session start: <code>${cfg.autoOpenEnabled ? 'enabled' : 'disabled'}</code> <span class="muted">(WEBSCOUT_NO_AUTOOPEN)</span></div>
+      <div>web-scout version: <code>${esc(cfg.webscoutVersion)}</code></div>`;
+    el('setAiBackendUrl').value = cfg.aiBackendUrl;
+    el('settingsAiBackendStatus').textContent = cfg.aiBackendUrlIsOverridden
+      ? 'overridden for this relay process (resets on relay restart unless WEBSCOUT_AI_BACKEND_URL is also set in its environment)'
+      : 'using built-in default';
+    const r = cfg.repo || {};
+    el('aboutContent').innerHTML = `
+      <p><strong>Web-scout</strong> - a local, zero-npm-dependency browser-automation and evidence-capture relay plus this realtime dashboard: lets an AI coding agent (or a human) drive a real browser tab, capture what actually happened (actions, console, network, IndexedDB snapshots and diffs), and verify it - instead of trusting an agent's own claim that something worked.</p>
+      <p>License: MIT (<code>tools/web-scout/LICENSE</code>). Docs: <code>tools/web-scout/README.md</code> (usage/API reference), <code>docs/web-scout-roadmap.md</code> (version-by-version design history and the reasoning behind it).</p>
+      <p>${r.remoteUrl ? `Source: <code>${esc(r.remoteUrl)}</code> - this tool lives under <code>tools/web-scout/</code> in that repository` : '<span class="muted">no git remote detected (not a git checkout, or no "origin" configured)</span>'}${r.branch ? ` &mdash; branch <code>${esc(r.branch)}</code>` : ''}${r.commit ? ` &mdash; <code>${esc(r.commit.slice(0, 8))}</code>` : ''}</p>
+      <p class="muted">Built organically against one real app's verification needs - see the roadmap for what problem each version solved. Its session/action/snapshot/diff model, safety hardening (session gating, macro cross-context replay guard, result redaction), and this dashboard are meant to generalize to other browser apps. Forking ideas and issues are welcome.</p>`;
+  } catch (err) {
+    el('serverConfigView').innerHTML = `<span class="qa-err">failed to load: ${esc(err.message)}</span>`;
+    el('aboutContent').innerHTML = `<span class="qa-err">failed to load: ${esc(err.message)}</span>`;
+  }
+}
+
+el('settingsBtn').addEventListener('click', () => {
+  populateSettingsForm();
+  showSettingsTab('Display');
+  el('settingsDialog').showModal();
+  loadConfigTabs();
+});
+
+el('settingsSaveAiBackendBtn').addEventListener('click', async () => {
+  const value = el('setAiBackendUrl').value.trim();
+  if (!value) { alert('AI backend URL cannot be empty - use "Reset to default" instead'); return; }
+  try { new URL(value); } catch { alert('not a valid URL'); return; }
+  el('settingsAiBackendStatus').textContent = 'saving...';
+  try {
+    await api('PUT', '/config', { aiBackendUrl: value });
+    el('settingsAiBackendStatus').textContent = 'saved - takes effect on the next Ask AI call';
+  } catch (err) {
+    el('settingsAiBackendStatus').textContent = 'error: ' + err.message;
+  }
+});
+
+el('settingsResetAiBackendBtn').addEventListener('click', async () => {
+  el('settingsAiBackendStatus').textContent = 'resetting...';
+  try {
+    await api('PUT', '/config', { aiBackendUrl: null });
+    await loadConfigTabs();
+  } catch (err) {
+    el('settingsAiBackendStatus').textContent = 'error: ' + err.message;
+  }
+});
 </script>
 </body>
 </html>

@@ -1,0 +1,177 @@
+// Also home to a handful of small pieces of REAL logic (net-history client-
+// side filtering, page-freshness hashing, the Verity-scenario-stub builder,
+// the suite step-runner) that both cli.mjs and mcp-server.mjs need
+// byte-identical - none of these are relay routes, they're client-side
+// composition on top of the routes above, so they live here once instead
+// of being copy-pasted (and inevitably drifting) into two CLIs.
+//
+// Shared HTTP client for talking to the already-running relay
+// (tools/web-scout/relay.mjs, must already be running -
+// `node tools/web-scout/relay.mjs`). Extracted from cli.mjs so a second
+// caller - tools/web-scout/mcp-server.mjs - doesn't reimplement (and
+// potentially drift on) how a relay error response becomes a thrown Error.
+// Both files import `request` from here; each still defines its own thin
+// `send(type, params)` wrapper around it, since they differ on how the
+// optional `agent` (multi-tab target) field is supplied - cli.mjs threads a
+// single process-lifetime `--agent` flag through a module-level variable,
+// while mcp-server.mjs takes it per tool-call (a stdio server process can
+// outlive many independent calls, so no such global is safe there).
+
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+
+export const HOST = process.env.WEBSCOUT_HOST || '127.0.0.1';
+export const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
+export const BASE = `http://${HOST}:${PORT}`;
+
+export async function request(method, pathName, body) {
+  const opts = { method };
+  if (body !== undefined) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify(body);
+  }
+  let res;
+  try {
+    res = await fetch(`${BASE}${pathName}`, opts);
+  } catch (err) {
+    throw new Error(`cannot reach the web-scout relay at ${BASE} - is it running? Start it with "node tools/web-scout/relay.mjs". (${err.message})`);
+  }
+  const json = await res.json();
+  if (!json.ok) {
+    const err = new Error(json.error || `request to ${pathName} failed`);
+    err.status = res.status;
+    throw err;
+  }
+  return json.result;
+}
+
+// ---------- Net history (durable net_entries, client-side filter/sort) ----------
+//
+// Queries the DURABLE, already-persisted net_entries table (via the
+// relay's GET /sessions/:id/net) instead of the in-page live ring buffer
+// (net.log, capped at 500 - evicted by background sync noise within
+// minutes in a real session). The relay's list route has no filter/sort
+// query params of its own, so those are applied here, client-side, after
+// the fetch - identical logic for cli.mjs's `net history` and
+// mcp-server.mjs's `webscout_net {action:"history"}`.
+export async function netHistory({ sessionId, filter, minDuration, sort, limit } = {}) {
+  let id = sessionId;
+  if (!id) {
+    const health = await request('GET', '/health');
+    if (!health.active_session) throw new Error('no active session - pass sessionId, or start one');
+    id = health.active_session.id;
+  }
+  let entries = await request('GET', `/sessions/${id}/net`);
+  entries = entries.map((e) => ({ ...e, durationMs: (Date.parse(e.ended_at) - Date.parse(e.started_at)) || null }));
+  if (filter) entries = entries.filter((e) => (e.url ?? '').includes(filter));
+  if (minDuration !== undefined) entries = entries.filter((e) => (e.durationMs ?? 0) >= Number(minDuration));
+  if (sort === 'duration') entries = entries.slice().sort((a, b) => (b.durationMs ?? 0) - (a.durationMs ?? 0));
+  if (limit !== undefined) entries = entries.slice(0, Number(limit));
+  return { sessionId: id, count: entries.length, entries };
+}
+
+// ---------- page fresh (hash-through-the-page vs. hash-on-disk) ----------
+//
+// Fetches `localPath` THROUGH THE PAGE (its real cache/Service-Worker
+// stack, not a plain disk read) and hashes it, then hashes the same file
+// on disk, and reports fresh:true/false - answers "is the tab actually
+// running what's on disk" in one call.
+export async function pageFresh({ localPath, urlPath, agent }) {
+  if (!localPath) throw new Error('localPath is required');
+  // A URL path is always forward-slash, regardless of platform - localPath
+  // itself may not be (a Windows PowerShell/cmd caller passing js\db.js,
+  // not js/db.js) - normalized before deriving the served path so this
+  // doesn't silently request an invalid /js\db.js URL.
+  const served = urlPath || `/${localPath.replace(/\\/g, '/').replace(/^\/+/, '')}`;
+  const diskBuf = fs.readFileSync(localPath);
+  const diskSha256 = crypto.createHash('sha256').update(diskBuf).digest('hex');
+  const remote = await request('POST', '/command', { type: 'page.fileHash', params: { path: served }, agent });
+  return {
+    localPath, servedPath: served, diskByteLength: diskBuf.length, diskSha256,
+    pageStatus: remote.status, pageByteLength: remote.byteLength, pageSha256: remote.sha256,
+    fresh: remote.sha256 === diskSha256,
+  };
+}
+
+// ---------- Verity scenario stub from a macro ----------
+//
+// Best-effort skeleton, not a translator - tools/ui-verifier's own selector
+// model (automation_id/name/class_name against the UIA tree) has no
+// reliable mapping from web-scout's CSS selectors, and Verity has no
+// generic "set a field's value" action at all - so dom.fill/idb.*/eval/
+// page.reload steps are skipped, not guessed at. What IS emitted are
+// `invoke` stubs for dom.click (selector left as TODO, with the original
+// CSS selector kept as a `_web_scout_hint` for a human to translate by
+// hand) and `wait_present`/`wait_text_contains` stubs for dom.wait.
+export function buildVerityScenarioStub(macro) {
+  const steps = [];
+  const skipped = [];
+  macro.steps.forEach((step, i) => {
+    const id = `step-${i}`;
+    if (step.type === 'dom.click') {
+      steps.push({ id, action: 'invoke', selector: { name_regex: 'TODO' }, _web_scout_hint: step.params?.selector });
+    } else if (step.type === 'dom.wait') {
+      if (step.params?.text) {
+        steps.push({ id, action: 'wait_text_contains', selector: { name_regex: 'TODO' }, text_regex: step.params.text, _web_scout_hint: step.params?.selector });
+      } else {
+        steps.push({ id, action: 'wait_present', selector: { name_regex: 'TODO' }, _web_scout_hint: step.params?.selector });
+      }
+    } else {
+      skipped.push(`${i}:${step.type}`);
+    }
+  });
+  return {
+    scenario: {
+      target: { window_name_regex: 'TODO', document_name_regex: 'TODO' },
+      policy: { interaction: true, allowed_actions: [...new Set(steps.map((s) => s.action))] },
+      steps,
+      _generated_from_macro: { id: macro.id, name: macro.name },
+      _skipped_steps: skipped,
+    },
+    skipped,
+  };
+}
+
+// ---------- Suite runner (macro/assert/diff-golden steps -> one pass/fail) ----------
+//
+// Bundles what otherwise takes several manual calls (run a macro, assert
+// state, diff-golden to prove nothing else moved) into one named,
+// repeatable sequence with ONE pass/fail summary - the CI-shaped wrapper
+// around already-existing primitives, not a new execution engine. Takes an
+// already-parsed steps array (the file-reading, for cli.mjs's `suite run
+// <path>`, happens at the call site) so mcp-server.mjs can also pass steps
+// inline without a temp file.
+export async function runSuite(steps, { continueOnError = false } = {}) {
+  if (!Array.isArray(steps) || !steps.length) throw new Error('steps must be a non-empty array');
+  const results = [];
+  for (const step of steps) {
+    let outcome;
+    try {
+      if (step.type === 'macro') {
+        if (!step.id) throw new Error('macro step requires "id"');
+        const r = await request('POST', `/macros/${step.id}/run`, { continueOnError: !!step.continueOnError, confirm: !!step.confirm, fromStep: step.fromStep });
+        outcome = { ok: r.results.every((s) => s.ok), detail: r };
+      } else if (step.type === 'assert') {
+        const health = await request('GET', '/health');
+        if (!health.active_session) throw new Error('assert step requires an active session - start one first');
+        let checks = step.checks;
+        if (!Array.isArray(checks)) checks = [checks];
+        const r = await request('POST', `/sessions/${health.active_session.id}/assert`, { checks });
+        outcome = { ok: r.passed, detail: r };
+      } else if (step.type === 'diff-golden') {
+        if (!step.name || !step.idB) throw new Error('diff-golden step requires "name" and "idB"');
+        const r = await request('POST', '/state/diff', { golden: step.name, idB: Number(step.idB) });
+        const clean = Object.keys(r.summary || {}).length === 0;
+        outcome = { ok: step.expectClean === false ? true : clean, detail: r };
+      } else {
+        outcome = { ok: false, detail: { error: `unknown suite step type '${step.type}' - expected macro/assert/diff-golden` } };
+      }
+    } catch (err) {
+      outcome = { ok: false, detail: { error: err.message } };
+    }
+    results.push({ type: step.type, ok: outcome.ok, detail: outcome.detail });
+    if (!outcome.ok && !continueOnError) break;
+  }
+  const passed = results.length === steps.length && results.every((r) => r.ok);
+  return { passed, ranSteps: results.length, totalSteps: steps.length, results };
+}
