@@ -68,11 +68,13 @@ A new leaf command (say, `dom.hover`) touches up to 4 files, in this order:
    `actions` map (e.g. `webscout_dom.actions.hover = (p) => sendCmd('dom.hover', {...}, p?.agent)`), and add it to that tool's `description` string (the MCP
    client's only source of truth for what params it takes - keep it
    accurate, not aspirational).
-5. **Docs** - add the command to `tools/web-scout/README.md`'s `## Commands`
-   reference, and a `docs/web-scout-roadmap.md` entry explaining *why* (what
-   real gap it closes), following the existing `## VN - <name>
-   (implemented)` format. A roadmap entry with no "why" is not useful to a
-   future reader - see any existing entry for the expected depth.
+5. **Docs** - add the command to `tools/web-scout/README.md`'s
+   `## Everyday commands` cheat sheet, its full rationale to
+   `docs/web-scout-architecture.md`, and a `docs/web-scout-roadmap.md`
+   entry explaining *why* (what real gap it closes), following the
+   existing `## VN - <name> (implemented)` format. A roadmap entry with no
+   "why" is not useful to a future reader - see any existing entry for the
+   expected depth.
 
 Run the full test suite before opening a PR (see "Testing" in the README):
 
