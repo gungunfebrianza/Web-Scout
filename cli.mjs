@@ -48,6 +48,16 @@ function usage() {
   console.log(`Usage: node tools/web-scout/cli.mjs <command> [args...]
 
   status                          relay health, connected agents, and active session
+  ping [--agent <name>]           fast liveness probe (default timeout 3000ms, distinct from
+                                   PING_TIMEOUT_MS = 3000) - does no DOM/IndexedDB work, so a
+                                   caller trying to tell "the tab is slow" from "the tab is
+                                   frozen" doesn't have to pay a full page.reload/idb.list/eval
+                                   timeout (up to ~20s each, serially) just to ask that. Still
+                                   routes through the same page-side message queue as every
+                                   other command, so it CANNOT prove liveness if the JS thread
+                                   is genuinely blocked in a synchronous loop - only answers
+                                   faster than the alternatives when the page IS still responsive.
+                                   {alive:false, error} on failure - never throws.
   db version-check [--agent <name>]
                                    compares js/db.js's own DB_VERSION (on disk) against the
                                    connected tab's LIVE IndexedDB version - same check "session
@@ -71,6 +81,16 @@ function usage() {
                                    connected, warns (does not block) when the tab's LIVE
                                    IndexedDB version != js/db.js's own DB_VERSION - the tab
                                    has not re-opened the DB since a migration bump.
+  session start ... --auto-snapshot --stores a,b,c
+                                   also takes+persists a scoped idb.snapshot right at session
+                                   start (unscoped is refused - same 60s timeout risk as an
+                                   unscoped "idb snapshot") and prints its id. Closes a real
+                                   gap in "session cleanup --since-snapshot <id>" (the one mode
+                                   that catches eval/UI-button writes, not just idb.put/delete):
+                                   it needs a snapshot taken BEFORE you start mutating, and
+                                   that step was easy to forget until after the writes already
+                                   happened, at which point there is no way to retroactively
+                                   recover a "before" state.
   session assert <id> '<checks-json>' [--agent <name>]
                                    declarative regression checks against LIVE state - a single
                                    check object or a JSON array of them, each:
@@ -81,7 +101,13 @@ function usage() {
                                    as its own 'session.assert' action. Replaces re-typing the
                                    same idb.dump-and-eyeball checks by hand every later phase.
                                    Exits 1 (not 0) if any check fails - scriptable/CI-safe.
-  session end [id]                 end the given session, or the active one if omitted
+  session end [id]                 end the given session, or the active one if omitted -
+                                   prints a one-line "consider macro record" nudge when the
+                                   session logged 5+ replayable actions (dom.click/fill/wait,
+                                   idb.put/delete/deleteMany/clear/wait, page.reload, eval) and
+                                   was never saved as one - real repeatable shapes (seed/verify/
+                                   cleanup) were confirmed hand-rolled from scratch every later
+                                   phase despite "macro record" already existing for this.
   session current                  show the active session (if any)
   session list                     list every session, newest first
   session show <id>                session detail + actions + snapshots + diffs + qa
@@ -128,7 +154,20 @@ function usage() {
                                    app: "Asking AI to review..." -> the real result), where the
                                    placeholder element already exists so a bare selector-exists
                                    wait resolves instantly and tells you nothing, and predicting
-                                   the eventual result text ahead of time isn't always possible
+                                   the eventual result text ahead of time isn't always possible.
+                                   Default --timeout (10000ms) has no relation to any real
+                                   provider/backend budget - a real AI call in this app can take
+                                   up to that app's own TIMEOUT_MS (confirmed as high as 180000
+                                   in one real provider path); a guessed --timeout shorter than
+                                   the thing you're actually waiting on fails as a false
+                                   "timed out", indistinguishable from a real hang. Match
+                                   --timeout to a known real budget, not a guess.
+  dom * --selector-file <path>    for query/click/fill/rect/style/wait: reads the selector from
+                                   a local file instead of the shell arg (trimmed) - same fix as
+                                   eval --file, for the same underlying problem: shell-quoting a
+                                   selector with nested quotes/brackets/attribute values through
+                                   bash was a real, repeated time-sink. Overrides the positional
+                                   selector argument when both are given.
   dom pick [--timeout <ms>]       arm a one-time click listener and BLOCK until a HUMAN clicks
                                    something in the real browser tab - not a programmatic
                                    selector finder, there is no way to feed it a target
@@ -154,7 +193,16 @@ function usage() {
   idb list                        list IndexedDB object store names + a per-store row count
                                    (cheap store.count(), not a full dump) - check this before
                                    an unscoped "idb snapshot" on a store you suspect is large
-  idb dump <store>                dump every row (+ real keyPath) in one store
+  idb dump <store> [--where '<json-field-map>']
+                                   dump every row (+ real keyPath) in one store - --where filters
+                                   the returned rows client-side by exact-equality field match
+                                   (same semantics as "session assert"'s own where), e.g.
+                                   --where '{"__synthetic_tag":"MY-TAG"}'. Still fetches the WHOLE
+                                   store first (idb.get is the real indexed-lookup escape hatch
+                                   for a large store + a known key) - this only saves the
+                                   dump-then-pipe-to-node-then-JSON.parse-and-filter dance for
+                                   everything else. Response's "count" is the FILTERED count;
+                                   "totalCount" is always the whole store's real row count.
   idb get <store> <json-key>      real indexed lookup of ONE row by key (store.get, not a
                                    getAll()+filter) - use this instead of "idb dump" when you
                                    already know the key and the store is large (a full dump of
@@ -237,7 +285,17 @@ function usage() {
                                    used to fail with "no web-scout agent named 'default' connected"
                                    on a guessed sleep that was too short. --wait-reconnect blocks
                                    until the agent is seen to DISCONNECT then RECONNECT (default
-                                   timeout 15000ms, longer for --hard on a large cache to clear).
+                                   timeout 45000ms plain, 60000ms --hard - bumped from 15000/30000
+                                   after a real unbundled-ES-module app was confirmed to take
+                                   45-60s to fully reboot, well past the old defaults; --timeout
+                                   still overrides either). If reconnected:false comes back, this
+                                   does NOT necessarily mean a genuine JS freeze - it may just
+                                   still be mid-boot; a repeated eval "1+1" a bit later (own
+                                   process, own timeout) can tell "still booting" from "truly
+                                   stuck" apart without giving up after one wait. If EVERY
+                                   command (reload, ping, eval) times out repeatedly, that IS the
+                                   real freeze signal - see eval's own note below on why reload
+                                   is not always an escape hatch from that state.
   page fresh <local-file-path> [--url </served/path>]
                                    fetches that path THROUGH THE PAGE (its real cache/SW stack,
                                    not a plain disk read) and hashes it, then hashes the same
@@ -265,13 +323,30 @@ function usage() {
                                    /dev/stdin does not resolve correctly for this CLI's file read
                                    on Windows. Write the script to a real temp file and pass THAT
                                    path instead.
+                                   No need to hand-wrap a multi-statement snippet in an IIFE (e.g.
+                                   "(async () => { ... })();") any more - the statement-body
+                                   fallback above already handles that, and a trailing ';' on a
+                                   hand-written IIFE can push expr past the single-expression
+                                   parse into the fallback anyway, silently swallowing a 'return'
+                                   nested inside the inner function (confirmed live - the CLI
+                                   warns on stderr if expr looks IIFE-wrapped, see below).
                                    Races a page-side timeout (default 10000ms) - if expr contains
                                    an unresolved 'await', you get a diagnostic message instead of
                                    a generic relay timeout. Cannot interrupt a SYNCHRONOUS
-                                   infinite loop (JS is single-threaded) - that freezes the tab;
-                                   reload it. A non-JSON-safe result (DOM element, Map, circular,
+                                   infinite loop (JS is single-threaded) - that freezes the tab.
+                                   "reload it" is NOT always a working escape hatch from that
+                                   state: "page reload" is itself a dispatched command needing the
+                                   SAME blocked page thread to process it, and will time out right
+                                   alongside eval if the loop is truly synchronous and unbroken.
+                                   If reload (and ping) also time out repeatedly, this needs a
+                                   manual, browser-side tab refresh - the CLI cannot force that.
+                                   A non-JSON-safe result (DOM element, Map, circular,
                                    ...) comes back as {"__unserializable": true, ...} instead of a
-                                   silently lossy string.
+                                   silently lossy string. TIP: an id returned by *Crud.add() is
+                                   the raw numeric key, not the row - capture and return it
+                                   explicitly (e.g. tag seeded rows with a distinct field and
+                                   return the tag+ids together) so later cleanup doesn't need a
+                                   full store dump to recover what this call created.
 
   macro record "<name>" <sessionId> [--all]
                                    save that session's own replayable actions (dom.click/fill/
@@ -371,16 +446,35 @@ async function handleSession(sub, rawArgs) {
     let tagsValue;
     let strictCrv;
     let storesValue;
+    let autoSnapshot;
     ({ args, value: tagsValue } = extractFlag(args, '--tags'));
     ({ args, value: strictCrv } = extractBooleanFlag(args, '--strict-crv'));
     ({ args, value: storesValue } = extractFlag(args, '--stores'));
+    ({ args, value: autoSnapshot } = extractBooleanFlag(args, '--auto-snapshot'));
     ({ args, value: agentFlag } = extractFlag(args, '--agent'));
     const tags = tagsValue ? tagsValue.split(',').map((t) => t.trim()).filter(Boolean) : [];
     const strictCrvStores = storesValue ? storesValue.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
-    printResult(await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, tags }));
+    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, tags });
     if (strictCrv && !storesValue) {
       console.error('WARNING: --strict-crv with no --stores auto-snapshots the WHOLE db on every dom.click/fill/eval/idb.put/idb.delete - this WILL time out (60s) against a real-size production IndexedDB. Pass --stores a,b,c to scope it.');
     }
+    if (autoSnapshot) {
+      // Requires --stores for the same reason "idb snapshot" itself warns
+      // about unscoped snapshots - refused rather than silently attempting
+      // a whole-db snapshot that risks the same 60s timeout right at
+      // session start.
+      if (!strictCrvStores) {
+        console.error('WARNING: --auto-snapshot requires --stores a,b,c (unscoped risks the same 60s snapshot timeout as an unscoped "idb snapshot") - skipped.');
+      } else {
+        try {
+          const snap = await request('POST', '/state/snapshot', { agent: agentFlag, stores: strictCrvStores });
+          console.error(`auto-snapshot #${snap.id} taken (stores: ${strictCrvStores.join(', ')}) - "session cleanup ${session.id} --since-snapshot ${snap.id}" will catch every row added since now, however it was written.`);
+        } catch (err) {
+          console.error(`WARNING: --auto-snapshot failed: ${err.message}`);
+        }
+      }
+    }
+    printResult(session);
     await warnOnDbVersionDrift();
     return;
   }
@@ -391,7 +485,11 @@ async function handleSession(sub, rawArgs) {
       if (!health.active_session) throw new Error('no active session to end');
       id = health.active_session.id;
     }
-    printResult(await request('POST', `/sessions/${id}/end`));
+    const ended = await request('POST', `/sessions/${id}/end`);
+    if (ended.replayableActionCount >= 5) {
+      console.error(`${ended.replayableActionCount} replayable action(s) this session - consider "macro record \\"<name>\\" ${ended.id}" if this shape (seed/verify/cleanup, etc.) will repeat.`);
+    }
+    printResult(ended);
     return;
   }
   if (sub === 'current') {
@@ -642,6 +740,13 @@ async function main() {
     return;
   }
 
+  if (command === 'ping') {
+    let a = rest;
+    ({ args: a, value: agentFlag } = extractFlag(a, '--agent'));
+    printResult(await request('POST', '/ping', { agent: agentFlag }));
+    return;
+  }
+
   if (command === 'session') {
     await handleSession(rest[0], rest.slice(1));
     return;
@@ -708,6 +813,10 @@ async function main() {
   let sessionValue;
   let changedValue;
   let waitReconnectValue;
+  let whereValue;
+  let selectorFileValue;
+  ({ args, value: selectorFileValue } = extractFlag(args, '--selector-file'));
+  ({ args, value: whereValue } = extractFlag(args, '--where'));
   ({ args, value: changedValue } = extractBooleanFlag(args, '--changed'));
   ({ args, value: waitReconnectValue } = extractBooleanFlag(args, '--wait-reconnect'));
   ({ args, value: nthValue } = extractFlag(args, '--nth'));
@@ -742,10 +851,13 @@ async function main() {
     if (waitReconnectValue) {
       // A hard reload additionally unregisters the Service Worker and
       // clears Cache Storage before navigating - on a large cache this can
-      // take noticeably longer than a plain reload's default 15000ms wait,
-      // which previously produced a false-negative reconnected:false even
-      // though the tab came back healthy moments later (confirmed live).
-      const defaultTimeout = hard ? 30000 : 15000;
+      // take noticeably longer than a plain reload's wait, which at the old
+      // 15000/30000 defaults previously produced a false-negative
+      // reconnected:false even though the tab came back healthy moments
+      // later (confirmed live, twice, against a real app with hundreds of
+      // unbundled ES module files - full boot took 45-60s+). Bumped to
+      // 45000/60000; --timeout still overrides either.
+      const defaultTimeout = hard ? 60000 : 45000;
       result.reconnect = await waitForReconnect({ agent: agentFlag, timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : defaultTimeout });
     }
     printResult(result);
@@ -799,6 +911,17 @@ async function main() {
     } else {
       expr = args.join(' ');
     }
+    // A hand-written `(async () => { ... })();` wrapper is unnecessary
+    // (the relay-side statement-body fallback already handles multiple
+    // statements) and actively dangerous: the trailing `;` breaks the
+    // single-EXPRESSION parse attempt, falling into that fallback anyway,
+    // where a `return` nested inside THIS inner function never reaches the
+    // outer one - silently yielding undefined (confirmed live, twice, in a
+    // real session before the cause was found). Warn, don't block - a
+    // caller with a real reason to nest an IIFE (rare) can ignore this.
+    if (/^\s*\(\s*(async\s+)?\(\s*\)\s*=>\s*\{[\s\S]*\}\s*\)\s*\(\s*\)\s*;?\s*$/.test(expr)) {
+      console.error('NOTE: expr looks like a hand-wrapped IIFE ("(async () => { ... })();"). This is usually unnecessary now (eval already falls back to a statement body for multi-statement input) and can silently swallow a `return` nested inside it. Consider writing expr as a plain statement body instead - see eval\'s help text.');
+    }
     printResult(await send('eval', { expr, timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined }));
     return;
   }
@@ -818,15 +941,21 @@ async function main() {
 
   const sub = args[0];
   const subArgs = args.slice(1);
+  // --selector-file reads the selector from a file (trimmed) instead of the
+  // shell arg - same fix, same reason, as eval --file: shell-quoting a
+  // selector with nested quotes/brackets/attribute-value strings through
+  // bash was a real, repeated time-sink. Only affects dom subcommands that
+  // take a selector as their first positional arg.
+  const domSelector = selectorFileValue ? fs.readFileSync(selectorFileValue, 'utf8').trim() : subArgs[0];
 
   const table = {
     dom: {
-      query: () => send('dom.query', { selector: subArgs[0] }),
-      click: () => send('dom.click', { selector: subArgs[0], nth: nthValue !== undefined ? Number(nthValue) : undefined }),
-      fill: () => send('dom.fill', { selector: subArgs[0], value: subArgs[1], nth: nthValue !== undefined ? Number(nthValue) : undefined }),
-      rect: () => send('dom.rect', { selector: subArgs[0] }),
-      style: () => send('dom.computedStyle', { selector: subArgs[0], properties: subArgs[1] ? subArgs[1].split(',').map((s) => s.trim()) : undefined }),
-      wait: () => send('dom.wait', { selector: subArgs[0], text: textValue, timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined, changed: changedValue }),
+      query: () => send('dom.query', { selector: domSelector }),
+      click: () => send('dom.click', { selector: domSelector, nth: nthValue !== undefined ? Number(nthValue) : undefined }),
+      fill: () => send('dom.fill', { selector: domSelector, value: subArgs[1], nth: nthValue !== undefined ? Number(nthValue) : undefined }),
+      rect: () => send('dom.rect', { selector: domSelector }),
+      style: () => send('dom.computedStyle', { selector: domSelector, properties: subArgs[1] ? subArgs[1].split(',').map((s) => s.trim()) : undefined }),
+      wait: () => send('dom.wait', { selector: domSelector, text: textValue, timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined, changed: changedValue }),
       pick: () => send('dom.pick', { timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined }),
       // Generic "wait until quiet" - pass a selector to scope it (default:
       // document.body). Use after a click/rebuild and before the next
@@ -835,7 +964,19 @@ async function main() {
     },
     idb: {
       list: () => send('idb.list', {}),
-      dump: () => send('idb.dump', { store: subArgs[0] }),
+      dump: async () => {
+        const dump = await send('idb.dump', { store: subArgs[0] });
+        if (!whereValue) return dump;
+        // Client-side post-filter (same exact-equality "where" semantics as
+        // "session assert"'s own checks) - still fetches the whole store
+        // first (idb.get is the real indexed lookup for a known key on a
+        // large store), this only saves the dump-then-pipe-to-node-then-
+        // JSON.parse-and-filter dance that every inspection this shape
+        // needed otherwise, confirmed real friction in a live session.
+        const where = JSON.parse(whereValue);
+        const rows = dump.rows.filter((r) => Object.entries(where).every(([k, v]) => JSON.stringify(r?.[k]) === JSON.stringify(v)));
+        return { ...dump, totalCount: dump.count, count: rows.length, rows, where };
+      },
       get: () => send('idb.get', { store: subArgs[0], key: JSON.parse(subArgs[1]) }),
       snapshot: async () => {
         const stores = storesValue ? storesValue.split(',').map((s) => s.trim()) : undefined;

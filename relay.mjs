@@ -39,9 +39,20 @@ const HOST = '127.0.0.1';
 const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
 // Bumped alongside docs/web-scout-roadmap.md's latest "## VN" entry - purely
 // informational (the dashboard's About panel), never read by any behavior.
-const WEBSCOUT_VERSION = '0.15.0';
+const WEBSCOUT_VERSION = '0.16.0'; // bumped alongside docs/web-scout-roadmap.md's V20 entry
 const COMMAND_TIMEOUT_MS = 15000; // interactive dom/net/eval round trips
 const SNAPSHOT_TIMEOUT_MS = 60000; // bulk idb.snapshot reads can be large
+// Short, independent budgets for two round trips that must never inherit
+// COMMAND_TIMEOUT_MS's full 15s: PING_TIMEOUT_MS backs POST /ping, a
+// deliberately cheap liveness probe (see inject.js's 'ping' handler) meant
+// to answer "is the page thread even responding" fast, not after paying the
+// same wait as a real dom/eval command. DB_VERSION_DRIFT_TIMEOUT_MS backs
+// GET /health's own db.version check - confirmed live to drag /health
+// itself (meant to be a cheap status read, polled by the dashboard every
+// few seconds) down to 15s whenever the connected tab was slow/unresponsive,
+// exactly when a fast /health reply mattered most for diagnosing that.
+const PING_TIMEOUT_MS = 3000;
+const DB_VERSION_DRIFT_TIMEOUT_MS = 3000;
 const WS_MAGIC = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const DEFAULT_AGENT = 'default';
 // Strict-CRV mode auto-snapshots before/after any command in this set -
@@ -251,6 +262,11 @@ function handleAgentMessage(text, agentName) {
     }
     clearTimeout(entry.timer);
     pending.delete(msg.id);
+    // Any reply at all - ok or failed - proves the page's JS thread is
+    // actually processing messages right now, which raw socket presence
+    // does not (see agentsDetail() above).
+    const agentEntry = agents.get(agentName);
+    if (agentEntry) agentEntry.lastAckAt = Date.now();
     if (msg.ok) entry.resolve(msg.result);
     else entry.reject(new Error(msg.error || 'agent command failed'));
     return;
@@ -430,6 +446,28 @@ function connectedAgentNames() {
   return [...agents.entries()].filter(([, a]) => a.socket && !a.socket.destroyed).map(([name]) => name);
 }
 
+// `agents_connected`/`GET /agents` only ever reported socket-level presence
+// - confirmed live to be actively misleading during a stuck-tab episode: it
+// kept reporting the agent as "connected" for several minutes while the
+// page's own JS thread was not responding to anything (reload, idb.list,
+// eval all timed out serially). lastAckAt (set in handleAgentMessage below,
+// on ANY reply - success or failure, `ping` included) is the one honest
+// signal that the page thread itself is actually still alive, not just the
+// socket. Additive - connectedAgentNames() above is unchanged so no
+// existing caller (waitForReconnect's `agents.includes(name)`, the
+// dashboard) needs to change shape.
+function agentsDetail() {
+  const now = Date.now();
+  return [...agents.entries()]
+    .filter(([, a]) => a.socket && !a.socket.destroyed)
+    .map(([name, a]) => ({
+      name,
+      connectedAt: a.connectedAt ?? null,
+      lastAckAt: a.lastAckAt ?? null,
+      msSinceLastAck: a.lastAckAt ? now - a.lastAckAt : null,
+    }));
+}
+
 async function gatherReportBundle(sessionId) {
   const session = dbApi.getSession(sessionId);
   return {
@@ -593,7 +631,7 @@ async function computeDbVersionDrift() {
   const session = dbApi.getCurrentSession();
   if (!session || !agents.size) return { checked: false, sourceVersion };
   try {
-    const live = await dispatchCommand('db.version', {}, COMMAND_TIMEOUT_MS, DEFAULT_AGENT);
+    const live = await dispatchCommand('db.version', {}, DB_VERSION_DRIFT_TIMEOUT_MS, DEFAULT_AGENT);
     return { checked: true, sourceVersion, liveVersion: live.version, drift: live.version !== sourceVersion };
   } catch (err) {
     return { checked: false, sourceVersion, error: err.message };
@@ -646,7 +684,7 @@ function getRepoInfo() {
 }
 
 const routes = [
-  { method: 'GET', pattern: /^\/health$/, handler: async () => ({ status: 'ok', agents_connected: connectedAgentNames(), active_session: dbApi.getCurrentSession(), db_version_drift: await getDbVersionDrift() }) },
+  { method: 'GET', pattern: /^\/health$/, handler: async () => ({ status: 'ok', agents_connected: connectedAgentNames(), agents_detail: agentsDetail(), active_session: dbApi.getCurrentSession(), db_version_drift: await getDbVersionDrift() }) },
   {
     // Powers the dashboard's Settings dialog (Server config + About tabs).
     // Everything except aiBackendUrl is read-only from the browser's point
@@ -694,7 +732,29 @@ const routes = [
       return { aiBackendUrl, aiBackendUrlDefault: DEFAULT_BACKEND_URL, aiBackendUrlIsOverridden: aiBackendUrl !== DEFAULT_BACKEND_URL };
     },
   },
-  { method: 'GET', pattern: /^\/agents$/, handler: async () => ({ agents: connectedAgentNames() }) },
+  { method: 'GET', pattern: /^\/agents$/, handler: async () => ({ agents: connectedAgentNames(), detail: agentsDetail() }) },
+  {
+    // Cheap, dedicated liveness probe - see inject.js's 'ping' handler and
+    // PING_TIMEOUT_MS above. Deliberately does NOT require an active
+    // session (requireActiveSession() is skipped here on purpose): the
+    // exact moment this is most useful is mid-diagnosis, when a caller
+    // isn't sure a session-gated command is even worth trying yet. Never
+    // throws on a failed/timed-out probe - `alive:false` with the
+    // underlying error is itself the answer, not a route failure.
+    method: 'POST',
+    pattern: /^\/ping$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      const agentName = body.agent || DEFAULT_AGENT;
+      const start = Date.now();
+      try {
+        await dispatchCommand('ping', {}, PING_TIMEOUT_MS, agentName);
+        return { alive: true, roundTripMs: Date.now() - start };
+      } catch (err) {
+        return { alive: false, roundTripMs: Date.now() - start, error: err.message };
+      }
+    },
+  },
   { method: 'GET', pattern: /^\/dashboard$/, isHtml: true, handler: async () => fs.readFileSync(path.join(__dirname, 'dashboard.html'), 'utf8') },
 
   {
@@ -718,9 +778,16 @@ const routes = [
     method: 'POST',
     pattern: /^\/sessions\/(\d+)\/end$/,
     handler: async (_req, m) => {
-      const session = dbApi.endSession(Number(m[1]));
+      const sessionId = Number(m[1]);
+      // Surfaced so the CLI can nudge "consider macro record" for a session
+      // that did real, replayable work and never got saved as one -
+      // confirmed real: a seed/verify/cleanup shape hand-rolled once in a
+      // session is exactly the shape the NEXT phase needs again, and
+      // `macro record` (which already exists) has no prompt pointing at it.
+      const replayableActionCount = dbApi.listActions(sessionId).filter((a) => a.ok && DEFAULT_MACRO_TYPES.has(a.type)).length;
+      const session = dbApi.endSession(sessionId);
       broadcastUpdate('session', null);
-      return session;
+      return { ...session, replayableActionCount };
     },
   },
   { method: 'GET', pattern: /^\/sessions$/, handler: async () => dbApi.listSessions() },
@@ -1391,7 +1458,7 @@ server.on('upgrade', (req, socket) => {
     log(`replacing previously connected agent '${agentName}'`);
     existing.socket.destroy();
   }
-  agents.set(agentName, { socket, buffer: Buffer.alloc(0) });
+  agents.set(agentName, { socket, buffer: Buffer.alloc(0), connectedAt: Date.now(), lastAckAt: null });
   log(`agent '${agentName}' connected from`, req.socket.remoteAddress);
   broadcastUpdate('agent', null);
 

@@ -124,10 +124,14 @@ the full explanation behind any of these.
 
 **Sessions** (required before anything else)
 ```bash
-session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c]
+session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--auto-snapshot]
                                # --stores scopes every strict-crv auto-snapshot to those
-                               # stores - omitting it against a real-size db WILL time out
-session end [id]              # defaults to the active session
+                               # stores - omitting it against a real-size db WILL time out.
+                               # --auto-snapshot (needs --stores) takes+persists a snapshot
+                               # right at start, so "session cleanup --since-snapshot" has a
+                               # baseline without a separate manual "idb snapshot" call first
+session end [id]              # defaults to the active session; nudges "macro record" if the
+                               # session logged 5+ replayable actions and never saved one
 session current
 session list
 session show <id>             # everything for one session
@@ -143,9 +147,13 @@ dom pick                      # click any element in the browser -> get its sele
 dom click "#some-button"
 dom fill "#some-input" "value"
 dom wait "#result" --text "DONE" --timeout 20000
-dom wait "#result" --changed --timeout 20000   # resolves once content DIFFERS from its call-time baseline
+dom wait "#result" --changed --timeout 20000   # resolves once content DIFFERS from its call-time baseline -
+                               # match --timeout to a known real provider budget, not a guess
 dom settle --quiet-ms 300     # wait for the page to stop mutating
 dom screenshot "#some-panel" --out ./shot.png
+dom query --selector-file ./selector.txt   # reads the selector from a file - sidesteps shell
+                               # quoting for a selector with nested quotes/brackets/attrs
+                               # (also works on click/fill/rect/style/wait)
 ```
 
 **IndexedDB**
@@ -153,6 +161,8 @@ dom screenshot "#some-panel" --out ./shot.png
 idb list                      # store names + a cheap per-store row count (check before an
                                # unscoped snapshot on a store you suspect is large)
 idb dump my_store
+idb dump my_store --where '{"status":"OK"}'   # client-side exact-match filter; "count" is the
+                               # filtered count, "totalCount" is the whole store's real count
 idb get my_store 1            # single-key lookup (store.get), not a full-store scan
 idb put my_store '{"id":1,"status":"OK"}'
 idb delete my_store 1
@@ -180,9 +190,25 @@ page reload                   # does NOT bust a Service Worker's cache - can kee
 page reload --hard            # also unregisters Service Workers + clears Cache Storage -
                                # use this after editing any file the app precaches
 page reload --hard --wait-reconnect   # blocks until the agent disconnects then reconnects
-                               # (default wait is longer for --hard - a big cache clear
-                               # can take noticeably more than a plain reload)
+                               # (default wait: 45000ms plain, 60000ms --hard - a real
+                               # unbundled-module app can legitimately take 45-60s+ to
+                               # reboot; --timeout overrides). reconnected:false doesn't
+                               # always mean frozen - it may still be mid-boot; a genuine
+                               # freeze shows as EVERY command (reload/ping/eval) timing out
 page fresh path/to/file.js    # is the tab actually running what's on disk?
+```
+
+**Liveness**
+```bash
+ping                          # fast, cheap round trip (default timeout 3000ms) - answers
+                               # "is the page thread responding" without paying a full
+                               # reload/idb/eval timeout just to find out. {alive:false} on
+                               # failure, never throws. Can't prove liveness against a truly
+                               # blocked synchronous loop - only faster than the alternatives
+                               # when the page IS still responsive
+status                         # also reports agents_detail: {name, connectedAt, lastAckAt} -
+                               # lastAckAt is the honest "page thread alive" signal; raw
+                               # socket presence (agents_connected) alone can be misleading
 ```
 
 **DB version**

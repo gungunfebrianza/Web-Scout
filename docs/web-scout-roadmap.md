@@ -1408,6 +1408,107 @@ snapshot-taking paths - golden-baseline capture, "diff vs now" above - are
 comparatively rare/deliberate actions rather than an easy-to-mis-scope
 default, so the same size warning was judged lower-value there for now).
 
+## V20 - liveness/diagnostic lessons from a real P4.5 CRV session (implemented)
+
+Every item here traces to a specific friction point hit during one real CRV
+pass (Comparative Decision Utility, P4.5) against a real, large,
+production-data IndexedDB and a real, slow-booting (hundreds of unbundled ES
+module files) tab - not a self-audit.
+
+- **`eval` statement-body `__note` now checks for a TOP-LEVEL `return`, not
+  any `return`:** the old check was a bare `/\breturn\b/.test(expr)` - it
+  matched a `return` nested inside an inner function/arrow (e.g. a hand-
+  wrapped `(async () => { ... return x; })();`), which never reaches the
+  outer statement body and still yields `undefined` - so the `__note`
+  existing specifically to explain that case silently failed to fire for
+  it, twice, in a real session, before the real cause (a trailing `;`
+  pushing expr into the statement-body fallback) was found by hand.
+  `hasTopLevelReturn` now tracks brace depth (skipping string/template-
+  literal contents) and only counts a `return` at depth 0 - best-effort,
+  not a real parser, but a real improvement over a substring search.
+- **`eval` warns (stderr, not blocking) when `expr` looks like a hand-
+  wrapped IIFE:** `(async () => { ... })();` is unnecessary now (the
+  statement-body fallback already handles multi-statement input) and is
+  exactly the shape that caused the `__note` miss above - flagged up front
+  instead of relying on a caller noticing after the fact.
+- **`page reload` / `--hard --wait-reconnect` default timeouts raised
+  (15000->45000 plain, 30000->60000 `--hard`):** confirmed live against a
+  real unbundled-module app that a full reboot legitimately takes 45-60s+ -
+  well past V19's already-once-raised `--hard` default, and past the plain
+  default too. `--timeout` still overrides either.
+- **`ping` (new CLI command) + `POST /ping` (new route) + `ping` (new
+  inject.js handler):** a deliberately trivial round trip (no DOM/
+  IndexedDB work at all) with its own short budget (`PING_TIMEOUT_MS`,
+  3000ms) - confirmed real friction diagnosing a stuck tab: every other
+  diagnostic (`page reload`, `idb list`, `eval "1+1"`) paid its own full
+  ~15-20s timeout in serial while answering the same underlying "is the
+  page thread even responding" question. Does not require an active
+  session. Still routes through the same page-side message queue as every
+  other command, so it cannot prove liveness against a genuinely blocked
+  synchronous loop - only answers faster than the alternatives when the
+  page IS still responsive.
+- **`agents_detail` (new field on `GET /health` and `GET /agents`):**
+  `agents_connected`/`agents` only ever reported socket-level presence -
+  confirmed actively misleading during a real stuck-tab episode, where it
+  kept reporting the agent "connected" for several minutes while the page's
+  JS thread was not responding to anything. Each connected agent now also
+  reports `connectedAt` and `lastAckAt` (stamped on ANY reply, success or
+  failure, `ping` included) - the one honest "is the page thread itself
+  still alive" signal, additive so no existing caller's shape changes.
+- **`GET /health`'s `db_version_drift` check gets its own short timeout**
+  (`DB_VERSION_DRIFT_TIMEOUT_MS`, 3000ms, was `COMMAND_TIMEOUT_MS`,
+  15000ms): confirmed live to drag `/health` itself - meant to be a cheap
+  status read the dashboard polls every few seconds - down to a full 15s
+  whenever the connected tab was slow/unresponsive, exactly when a fast
+  `/health` reply mattered most for diagnosing that.
+- **`session start --auto-snapshot --stores a,b,c` (new flag):** takes and
+  persists a scoped `idb.snapshot` right at session start and prints its
+  id. Closes a real gap in `session cleanup --since-snapshot <id>` (the one
+  cleanup mode that catches eval/UI-button writes, not just `idb.put`/
+  `idb.delete`): it needs a snapshot taken BEFORE mutating, and that step
+  was confirmed easy to forget until after the writes already happened, at
+  which point there is no way to retroactively recover a "before" state.
+  Unscoped is refused (same 60s risk as an unscoped `idb snapshot`).
+- **`session end` prints a "consider macro record" nudge** when the ended
+  session logged 5+ replayable actions and was never saved as a macro -
+  `macro record` already existed, but a real repeatable shape (seed/verify/
+  cleanup) was confirmed hand-rolled from scratch again the next phase with
+  no prompt pointing at the feature that already solves it.
+- **`idb dump <store> --where '<json>'` (new flag):** client-side post-
+  filter, same exact-equality semantics as `session assert`'s own `where` -
+  every inspection needing a filtered view previously required a full dump
+  piped to `node -e ...` and hand-written JSON filtering. Response's
+  `count` is the filtered count; `totalCount` is always the real whole-
+  store count.
+- **`dom query/click/fill/rect/style/wait --selector-file <path>` (new
+  flag):** reads the selector from a file (trimmed) instead of the shell
+  arg - same fix, same reason, as `eval --file`: shell-quoting a selector
+  with nested quotes/brackets/attribute-value strings through bash was
+  confirmed real, repeated friction, not hypothetical.
+- **Doc fix: `eval`'s "reload it" advice for a synchronous infinite loop**
+  now says plainly that `page reload` is itself a dispatched command
+  needing the SAME blocked page thread, so it is not always a working
+  escape hatch from that state - if reload (and `ping`) also time out
+  repeatedly, that needs a manual, browser-side tab refresh the CLI cannot
+  force. The old text implied `page reload` always worked as the fix.
+- **Doc tips (no behavior change):** `eval`'s help text now reminds a
+  caller that `*Crud.add()` returns a raw key, not the row - capture and
+  return created ids explicitly for later cleanup/tagging. `dom wait
+  --changed`'s help text now says to match `--timeout` to a known real
+  provider/backend budget (confirmed as high as 180000ms in one real
+  provider path in this app) rather than guessing a value shorter than
+  what it's actually waiting on.
+
+**Considered and not done this round:** MCP server parity for `ping`/
+`--where`/`--selector-file`/`--auto-snapshot` (this round's friction was
+hit entirely through the CLI in the real session that produced it; MCP
+parity is deferred until a real MCP-driven session hits the same gaps, per
+this project's own repeated-friction-first convention rather than
+speculative surface growth). Dashboard-side surfacing of `agents_detail`
+(a "last responded Ns ago" badge next to the connected-agent indicator) -
+real value, but the CLI-side `status`/`ping` already answer the same
+question and no real dashboard-only session has hit this gap yet.
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

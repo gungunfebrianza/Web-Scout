@@ -313,9 +313,55 @@
     }
   }
 
+  // Best-effort top-level-return check for eval's statement-body fallback
+  // (see the 'eval' handler below) - a plain /\breturn\b/ text search
+  // matches ANY 'return' anywhere in expr, including one nested inside an
+  // inner function/arrow definition (e.g. a hand-wrapped IIFE), which never
+  // reaches the outer statement body and still yields undefined - so the
+  // __note below previously failed to fire for exactly the case it exists
+  // to explain (confirmed live: a script wrapped as `(async () => { ...
+  // return x; })();` has a textual 'return' but it's unreachable from the
+  // outer body). Tracks brace depth (and skips string/template-literal
+  // contents) and only counts a 'return' seen at depth 0 - not a real
+  // parser (unbalanced braces inside a string/comment can still fool it),
+  // but a real improvement over a bare substring search.
+  function hasTopLevelReturn(src) {
+    let depth = 0;
+    let inString = null; // one of ' " ` or null
+    for (let i = 0; i < src.length; i += 1) {
+      const c = src[i];
+      if (inString) {
+        if (c === '\\') { i += 1; continue; }
+        if (c === inString) inString = null;
+        continue;
+      }
+      if (c === '\'' || c === '"' || c === '`') { inString = c; continue; }
+      if (c === '{') { depth += 1; continue; }
+      if (c === '}') { depth -= 1; continue; }
+      if (depth === 0 && c === 'r' && src.slice(i, i + 6) === 'return'
+        && !/[A-Za-z0-9_$]/.test(src[i - 1] || '') && !/[A-Za-z0-9_$]/.test(src[i + 6] || '')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // ---------- Command handlers ----------
 
   const handlers = {
+    // Trivial reply used ONLY for a fast liveness probe (see the relay's
+    // POST /ping and the CLI's `ping` command) - distinct from every other
+    // handler here because it does no DOM/IndexedDB work at all, so a short
+    // timeout on this one round trip (PING_TIMEOUT_MS in relay.mjs) is a
+    // real signal, not just a smaller guess: if even THIS doesn't reply,
+    // the page's JS thread itself is blocked, not merely a slow real
+    // operation elsewhere. Still routes through the SAME message queue as
+    // every other command, so it CANNOT distinguish "blocked" from "slow"
+    // if the thread is genuinely stuck in a synchronous loop - only a
+    // faster, cheaper way to ask the same question several other commands
+    // already answer, confirmed real friction during a session where every
+    // diagnostic paid its own full ~15-20s timeout in serial.
+    ping: () => ({ pong: Date.now() }),
     'dom.query': ({ selector }) => {
       const el = document.querySelector(selector);
       if (!el) return { found: false };
@@ -891,7 +937,7 @@
       // undefined", i.e. a bug in the page) when the real cause was just a
       // missing `return`. Flag that specific, easy-to-misread case
       // explicitly instead of returning a bare, ambiguous `undefined`.
-      if (usedStatementFallback && result === undefined && !/\breturn\b/.test(expr)) {
+      if (usedStatementFallback && result === undefined && !hasTopLevelReturn(expr)) {
         return {
           result: undefined,
           __note: "expr had no explicit 'return' and was run as a statement body (see eval's fallback), so this undefined may just mean nothing was returned - not that the expression itself is undefined. Add 'return' before the value you want back.",
