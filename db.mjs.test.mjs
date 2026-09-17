@@ -57,6 +57,22 @@ test('session lifecycle: start requires a goal, enforces one active session, end
   db.endSession(s2.id);
 });
 
+test('strict_crv_stores: persisted/hydrated as an array, null when omitted or empty', () => {
+  const scoped = db.startSession({ goal: 'strict-crv scoped', strictCrv: true, strictCrvStores: ['foo', 'bar'] });
+  assert.equal(scoped.strict_crv, true);
+  assert.deepEqual(scoped.strict_crv_stores, ['foo', 'bar']);
+  assert.deepEqual(db.getSession(scoped.id).strict_crv_stores, ['foo', 'bar']);
+  db.endSession(scoped.id);
+
+  const unscoped = db.startSession({ goal: 'strict-crv unscoped', strictCrv: true });
+  assert.equal(unscoped.strict_crv_stores, null);
+  db.endSession(unscoped.id);
+
+  const emptyArray = db.startSession({ goal: 'strict-crv empty array', strictCrv: true, strictCrvStores: [] });
+  assert.equal(emptyArray.strict_crv_stores, null);
+  db.endSession(emptyArray.id);
+});
+
 test('actions: logged, listed newest-first by default, redaction applied by listActionsSummary only', () => {
   const s = db.startSession({ goal: 'action logging test' });
   const startedAt = new Date().toISOString();

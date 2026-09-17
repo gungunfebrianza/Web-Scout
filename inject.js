@@ -338,15 +338,38 @@
     // worked every time on the identical elements in that same session.
     // Falls back to dispatchEvent only for the rare element with no native
     // `.click` (e.g. some SVG elements in older engines).
-    'dom.click': ({ selector, nth }) => {
-      const el = resolveTarget(selector, nth);
+    // `mutated`/`hrefChanged` give the caller a signal distinguishing "the
+    // click was dispatched AND something observably happened" from "the
+    // click was dispatched and nothing happened" (confirmed real gotcha: a
+    // nav link whose target hash already equals location.hash reports
+    // {clicked:true} but the SPA's hashchange-driven router never fires, so
+    // the page never re-renders - previously indistinguishable from a
+    // genuine successful no-visible-effect click with no signal at all).
+    // Short (200ms) grace window, not a full dom.settle wait - this is a
+    // cheap same-tick-ish signal, not a "wait until done" primitive; use
+    // dom.wait/dom.settle after this for anything that renders async.
+    'dom.click': ({ selector, nth }) => new Promise((resolve, reject) => {
+      let el;
+      try {
+        el = resolveTarget(selector, nth);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      const hrefBefore = location.href;
+      let mutated = false;
+      const observer = new MutationObserver(() => { mutated = true; });
+      observer.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
       if (typeof el.click === 'function') {
         el.click();
       } else {
         el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
       }
-      return { clicked: true };
-    },
+      setTimeout(() => {
+        observer.disconnect();
+        resolve({ clicked: true, mutated, hrefChanged: location.href !== hrefBefore });
+      }, 200);
+    }),
     // Waits until the DOM has been quiet (no mutations observed) for
     // `quietMs` inside the subtree rooted at `selector` (default:
     // document.body) - a generic "settle" primitive, as opposed to
@@ -466,11 +489,24 @@
     }),
     // See "Screenshot helpers" above for the technique + its limitations.
     'dom.screenshot': ({ selector }) => captureScreenshot(selector),
+    // `counts` uses IDBObjectStore.count() (cheap - the browser's own
+    // index metadata, no row payload transferred) per store, not
+    // store.getAll().length - gives a caller a real row-count estimate
+    // BEFORE requesting a snapshot, instead of discovering a store is huge
+    // only after idb.snapshot times out (SNAPSHOT_TIMEOUT_MS, 60s) against
+    // it. `stores` (array of names) kept exactly as before for existing
+    // callers; `counts` is additive.
     'idb.list': async () => {
       const db = await openDb();
       const names = [...db.objectStoreNames];
+      const tx = db.transaction(names, 'readonly');
+      const counts = Object.fromEntries(await Promise.all(names.map((name) => new Promise((resolve, reject) => {
+        const req = tx.objectStore(name).count();
+        req.onsuccess = () => resolve([name, req.result]);
+        req.onerror = () => reject(req.error);
+      }))));
       db.close();
-      return { stores: names };
+      return { stores: names, counts };
     },
     'idb.dump': async ({ store }) => {
       const db = await openDb();
@@ -482,6 +518,21 @@
       db.close();
       return { store, keyPath, count: rows.length, rows };
     },
+    // Single-key lookup - idb.dump only ever does a whole-store scan (via
+    // store.getAll()), so finding one row by an already-known key in a
+    // large store (confirmed real: cfi_cognitive_runs) previously meant
+    // either a slow full dump or a hand-rolled `eval` reaching for
+    // db.getRecord directly. Uses store.get(key), the real indexed lookup,
+    // not a filter over getAll().
+    'idb.get': ({ store, key }) => new Promise((resolve, reject) => {
+      openDb().then((db) => {
+        if (!db.objectStoreNames.contains(store)) { db.close(); reject(new Error(`no such store: ${store}`)); return; }
+        const tx = db.transaction(store, 'readonly');
+        const req = tx.objectStore(store).get(key);
+        req.onsuccess = () => { db.close(); resolve({ store, key, found: req.result !== undefined, row: req.result ?? null }); };
+        req.onerror = () => { db.close(); reject(req.error); };
+      }, reject);
+    }),
     // Full per-store dump (each with its real keyPath), no local id/Map
     // bookkeeping - the relay owns persistence now (POST /state/snapshot),
     // so this survives a tab reload/close instead of living only in page

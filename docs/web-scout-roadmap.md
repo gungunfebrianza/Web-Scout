@@ -1323,6 +1323,91 @@ Exit criteria:
 - `page reload --wait-reconnect` returns only after the agent is
   genuinely back, not on the first (possibly stale) `GET /agents` poll.
 
+## V19 - CLI + dashboard lessons from a real P4.4 CRV session (implemented)
+
+Every item here traces to a specific friction point hit during one real CRV
+pass (Deterministic Component Integration Trial, P4.4) against a real,
+large, production-data IndexedDB - not a self-audit.
+
+- **`session start --stores` (new flag) + `sessions.strict_crv_stores`
+  (new column):** `--strict-crv` auto-snapshots the WHOLE db before/after
+  every `dom.click`/`dom.fill`/`eval`/`idb.put`/`idb.delete` - against a
+  real-size app db this hits `SNAPSHOT_TIMEOUT_MS` (60s) and is unusable.
+  A real session had to abandon `--strict-crv` entirely mid-CRV (end the
+  session, start a fresh one without it) for exactly this reason.
+  `--stores a,b,c` at session-start time scopes every one of those
+  auto-snapshots to just the given stores, the same way `idb snapshot
+  --stores` already scopes a manual one - persisted per-session so the
+  relay doesn't need it re-passed on every dispatch. A `--strict-crv`
+  session started with no `--stores` prints a warning up front instead of
+  silently timing out later.
+- **`dom.click` gains `mutated`/`hrefChanged` in its response:** a nav
+  link whose target hash already equals `location.hash` reported
+  `{clicked:true}` and nothing else - the SPA's hashchange-driven router
+  never fires (no `hashchange` event on a same-value assignment), so the
+  page never re-renders, previously indistinguishable from a genuine
+  successful no-visible-effect click. A short (200ms) `MutationObserver`
+  window around the click now reports whether the DOM actually mutated and
+  whether `location.href` changed - a real signal instead of none.
+- **`page reload --hard` reconnect timeout, and a plain-reload warning:**
+  a hard reload additionally unregisters every Service Worker and clears
+  Cache Storage before navigating, which can genuinely take longer than a
+  plain reload's default 15000ms `--wait-reconnect` wait - a real session
+  hit a `reconnected:false` false-negative on a hard reload that had, in
+  fact, finished cleanly moments later. The default wait is now 30000ms
+  for `--hard` specifically (still overridable via `--timeout`). Separately,
+  a plain `page reload` does NOT bust a Service Worker's cache at all - a
+  stale-while-revalidate SW can keep serving old cached JS across several
+  plain reloads after a real edit, which cost a real session a genuine
+  `VersionError` (stale-cached JS still declaring an old `DB_VERSION`,
+  racing a DB a properly-fresh tab had already bumped). `page reload`
+  (without `--hard`) now warns once, up front, whenever the repo has a
+  `sw.js` at its root.
+- **`eval --file` fails loud on an empty read:** the known Windows/Git
+  Bash `--file /dev/stdin` gotcha (documented in V18) has a quieter
+  sibling - a POSIX-style temp path (e.g. `/tmp/...`) that doesn't throw
+  but also doesn't resolve the way the caller expects, silently reading as
+  an empty string, which then evals as a no-op and returns `{}` with zero
+  signal anything was wrong. `--file` now throws immediately if the read
+  content is empty/whitespace-only, naming the likely cause.
+- **`idb get <store> <key>` (new command) + `idb.get` (new inject.js
+  handler):** `idb dump` only ever does a whole-store scan
+  (`store.getAll()`) - finding one already-known-key row in a large real
+  store (confirmed: `cfi_cognitive_runs`) previously meant either a slow
+  full dump or a hand-rolled `eval` reaching for the app's own
+  `db.getRecord` directly. `idb get` is a real indexed `store.get(key)`
+  lookup exposed as a first-class command.
+- **`idb list` gains per-store row `counts`:** cheap (`store.count()`, no
+  row payload transferred) - lets a caller check a store's real size
+  BEFORE requesting a snapshot, instead of only discovering it's huge after
+  a 60-second timeout. `idb snapshot` (CLI) now checks this automatically
+  when called unscoped and warns if the total row count looks large,
+  before attempting it.
+- **Dashboard: "hard reload now" button on the existing IndexedDB-drift
+  banner** - the banner already named the fix (`page reload --hard`) as
+  text; a caller without the CLI open had no way to act on it from the
+  dashboard itself. One button dispatches `page.hardReload` directly
+  (requires an active session + connected agent, same as any other
+  `/command` dispatch - failures shown inline, not thrown).
+- **Dashboard: "diff vs now" button per snapshot row** - `idb
+  diff`/`diff-golden` already existed CLI-side and diffs were already
+  viewable once computed, but there was no one-click "what's changed since
+  THIS snapshot, right now" from the dashboard itself (the CLI-side
+  equivalent, `session cleanup --since-snapshot`, has no dashboard
+  counterpart). Takes a fresh snapshot of the same stores and diffs it
+  against the row clicked, rendered inline.
+- **MCP parity:** `webscout_idb` gained `get`; `webscout_session.start`
+  gained `strictCrvStores`; `webscout_page.reload`'s `waitReconnect`
+  inherits the same hard-reload-aware default timeout as the CLI.
+  `SERVER_VERSION` bumped to `0.18.0`.
+
+**Considered and not done this round:** dashboard-side surfacing of
+`idb.list`'s new per-store `counts` before a snapshot is triggered FROM the
+dashboard itself (the CLI-side warning exists; the dashboard's own
+snapshot-taking paths - golden-baseline capture, "diff vs now" above - are
+comparatively rare/deliberate actions rather than an easy-to-mis-scope
+default, so the same size warning was judged lower-value there for now).
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

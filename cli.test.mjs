@@ -97,11 +97,30 @@ test('dom/idb/eval against a real connected tab (skipped if none connected in th
 
   const idbList = run('idb', 'list');
   assert.equal(idbList.status, 0, idbList.stderr);
-  assert.ok(Array.isArray(JSON.parse(idbList.stdout).stores));
+  const idbListParsed = JSON.parse(idbList.stdout);
+  assert.ok(Array.isArray(idbListParsed.stores));
+  // `counts` requires the CONNECTED TAB's own already-loaded inject.js to
+  // include the idb.list row-count addition - a tab connected from before
+  // that edit (stale in-page script, needs a page reload to pick up) won't
+  // have it yet, so this is soft-checked (shape-if-present), not required,
+  // to avoid coupling this test's pass/fail to unrelated live browser state.
+  if (idbListParsed.counts !== undefined) {
+    assert.equal(typeof idbListParsed.counts, 'object');
+    for (const name of idbListParsed.stores) assert.ok(Number.isInteger(idbListParsed.counts[name]), `counts.${name} should be an integer`);
+  }
 
   const domQuery = run('dom', 'query', 'body');
   assert.equal(domQuery.status, 0, domQuery.stderr);
   assert.equal(JSON.parse(domQuery.stdout).found, true);
+
+  // `mutated`/`hrefChanged` have the same stale-connected-tab caveat as
+  // `counts` above - soft-checked for the same reason.
+  const domClick = run('dom', 'click', 'body');
+  assert.equal(domClick.status, 0, domClick.stderr);
+  const domClickParsed = JSON.parse(domClick.stdout);
+  assert.equal(domClickParsed.clicked, true);
+  if (domClickParsed.mutated !== undefined) assert.equal(typeof domClickParsed.mutated, 'boolean');
+  if (domClickParsed.hrefChanged !== undefined) assert.equal(typeof domClickParsed.hrefChanged, 'boolean');
 
   run('session', 'end', String(session.id));
 });

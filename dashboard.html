@@ -226,8 +226,10 @@
 
 <div id="dbVersionBanner" hidden>
   <button id="dbVersionToggle">hide</button>
+  <button id="dbVersionReloadBtn">hard reload now</button>
   <h3>IndexedDB schema drift</h3>
   <div id="dbVersionText"></div>
+  <div id="dbVersionReloadStatus"></div>
 </div>
 
 <div id="frictionBanner" hidden>
@@ -283,7 +285,7 @@
 
   <section class="hud-section">
   <h2>State snapshots</h2>
-  <table id="snapshotsTable"><thead><tr><th>ID</th><th>Time</th><th>Agent</th><th>Counts</th><th>Size</th></tr></thead><tbody></tbody></table>
+  <table id="snapshotsTable"><thead><tr><th>ID</th><th>Time</th><th>Agent</th><th>Counts</th><th>Size</th><th></th></tr></thead><tbody></tbody></table>
   <div id="snapshotsEmpty" class="empty" hidden>No snapshots yet - <code>idb snapshot</code> from the CLI.</div>
   </section>
 
@@ -789,13 +791,41 @@ function renderSnapshots(snapshots) {
     tr.className = 'expandable';
     const countsSummary = Object.entries(s.counts).filter(([, n]) => n > 0).map(([k, n]) => `${k}:${n}`).join(', ') || '(all empty)';
     const goldenBadge = s.golden_name ? ` <span class="badge badge-crv" title="golden regression baseline - diffable from any future session via idb diff-golden">golden: ${esc(s.golden_name)}</span>` : '';
-    tr.innerHTML = `<td>${s.id}</td><td>${fmtTime(s.taken_at)}${goldenBadge}</td><td>${esc(s.agent_name ?? 'default')}</td><td>${esc(countsSummary)}</td><td>${(s.byte_size / 1024).toFixed(1)} KB</td>`;
-    tr.addEventListener('click', async () => {
+    tr.innerHTML = `<td>${s.id}</td><td>${fmtTime(s.taken_at)}${goldenBadge}</td><td>${esc(s.agent_name ?? 'default')}</td><td>${esc(countsSummary)}</td><td>${(s.byte_size / 1024).toFixed(1)} KB</td><td><button class="diffSinceBtn" title="take a fresh snapshot of the same stores now and diff it against this one">diff vs now</button></td>`;
+    tr.addEventListener('click', async (ev) => {
+      if (ev.target.closest('.diffSinceBtn')) return; // handled below, doesn't toggle the raw-JSON row
       const existing = tr.nextElementSibling;
       if (existing && existing.classList.contains('detail-row')) { existing.remove(); return; }
       if (s.byte_size > 500000 && !confirm(`This snapshot is ${(s.byte_size / 1024).toFixed(0)} KB - render it inline anyway?`)) return;
       const full = await api('GET', `/state/snapshots/${s.id}`);
       toggleRow(tr, `<pre>${esc(JSON.stringify(full.stores, null, 2))}</pre>`);
+    });
+    // Live "what changed since this snapshot" from the dashboard, without a
+    // CLI round trip - takes a fresh snapshot of the SAME stores this
+    // snapshot covered, then diffs it against `s`, rendered inline. This is
+    // the dashboard-side equivalent of `session cleanup --since-snapshot`.
+    tr.querySelector('.diffSinceBtn').addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const btn = ev.target;
+      const originalLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'diffing...';
+      try {
+        const stores = Object.keys(s.counts || {});
+        const fresh = await api('POST', '/state/snapshot', { stores });
+        const diff = await api('POST', '/state/diff', { idA: s.id, idB: fresh.id });
+        const summaryHtml = Object.entries(diff.summary).map(([store, c]) =>
+          `${esc(store)}: <span class="diff-added">+${c.added}</span>/<span class="diff-removed">-${c.removed}</span>/<span class="diff-changed">~${c.changed}</span>`
+        ).join(', ') || '<span class="muted">(no change)</span>';
+        const existing = tr.nextElementSibling;
+        if (existing && existing.classList.contains('detail-row')) existing.remove();
+        toggleRow(tr, `<div>vs. snapshot #${fresh.id} (just taken): ${summaryHtml}</div><pre>${esc(JSON.stringify(diff.diff, null, 2))}</pre>`);
+      } catch (err) {
+        alert('diff vs now failed: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+      }
     });
     body.appendChild(tr);
   }
@@ -1300,6 +1330,23 @@ el('dbVersionToggle').addEventListener('click', () => {
     dbVersionDismissedFor = `${lastHealth.db_version_drift.sourceVersion}:${lastHealth.db_version_drift.liveVersion}`;
   }
   el('dbVersionBanner').hidden = true;
+});
+
+// One-click fix for the drift this banner is already warning about -
+// previously required knowing the CLI flag ("page reload --hard") existed
+// at all. Requires an active session (same as any other /command dispatch)
+// and a connected agent; both failure shapes are shown inline rather than
+// as an uncaught rejection, since a drift banner is exactly the moment a
+// caller may not have either yet.
+el('dbVersionReloadBtn').addEventListener('click', async () => {
+  const status = el('dbVersionReloadStatus');
+  status.textContent = 'reloading...';
+  try {
+    await api('POST', '/command', { type: 'page.hardReload', params: {} });
+    status.textContent = 'hard reload dispatched - drift clears on the next health poll once the tab reconnects.';
+  } catch (err) {
+    status.textContent = 'could not dispatch: ' + err.message;
+  }
 });
 
 el('endSessionBtn').addEventListener('click', async () => {

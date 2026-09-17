@@ -702,7 +702,13 @@ const routes = [
     pattern: /^\/sessions$/,
     handler: async (req) => {
       const body = await readJsonBody(req);
-      const session = dbApi.startSession({ goal: body.goal, context: body.context, strictCrv: !!body.strict_crv, tags: Array.isArray(body.tags) ? body.tags : undefined });
+      const session = dbApi.startSession({
+        goal: body.goal,
+        context: body.context,
+        strictCrv: !!body.strict_crv,
+        strictCrvStores: Array.isArray(body.strict_crv_stores) ? body.strict_crv_stores : undefined,
+        tags: Array.isArray(body.tags) ? body.tags : undefined,
+      });
       broadcastUpdate('session', null);
       openDashboardInBrowser();
       return session;
@@ -1081,12 +1087,17 @@ const routes = [
       const dispatchTimeoutMs = LONG_POLL_TYPES.has(type) ? (Number(params?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS;
 
       if (session.strict_crv && STRICT_CRV_TYPES.has(type)) {
-        const before = await withLoggedAction(session.id, 'idb.snapshot', { auto: true, phase: 'before', for: type }, () => dispatchCommand('idb.snapshot', {}, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
+        // Scoped to session.strict_crv_stores when the session was started
+        // with `--stores a,b,c` - unscoped (stores: undefined) still means
+        // "whole db", same as before, so an old caller that never scoped
+        // keeps its old (slow, but complete) behavior.
+        const autoStores = session.strict_crv_stores || undefined;
+        const before = await withLoggedAction(session.id, 'idb.snapshot', { auto: true, phase: 'before', for: type, stores: autoStores }, () => dispatchCommand('idb.snapshot', { stores: autoStores }, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
         const beforeSnap = dbApi.saveSnapshot({ sessionId: session.id, actionId: before.actionId, stores: before.result.stores, agentName });
 
         const triggering = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
 
-        const after = await withLoggedAction(session.id, 'idb.snapshot', { auto: true, phase: 'after', for: type, triggered_by_action_id: triggering.actionId }, () => dispatchCommand('idb.snapshot', {}, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
+        const after = await withLoggedAction(session.id, 'idb.snapshot', { auto: true, phase: 'after', for: type, triggered_by_action_id: triggering.actionId, stores: autoStores }, () => dispatchCommand('idb.snapshot', { stores: autoStores }, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
         const afterSnap = dbApi.saveSnapshot({ sessionId: session.id, actionId: after.actionId, stores: after.result.stores, agentName });
 
         const diffOutcome = await withLoggedAction(session.id, 'idb.diff', { auto: true, triggered_by_action_id: triggering.actionId, idA: beforeSnap.id, idB: afterSnap.id }, async () => {

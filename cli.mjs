@@ -9,6 +9,7 @@
 // non-goals.
 
 import fs from 'node:fs';
+import path from 'node:path';
 import http from 'node:http';
 import {
   request, BASE, netHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect,
@@ -55,10 +56,17 @@ function usage() {
                                    blocked RIGHT NOW (another tab - web-scout-connected or not -
                                    holding a connection at the older version), and by what, instead
                                    of only reporting THAT a version-bump "page reload" hasn't taken.
-  session start "<goal>" ["<context>"] [--strict-crv] [--tags a,b,c] [--agent <name>]
+  session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--agent <name>]
                                    declare context/goal - REQUIRED before any action.
                                    --strict-crv auto-snapshots+diffs before/after every
                                    dom.click/dom.fill/eval/idb.put/idb.delete in this session.
+                                   Unscoped, this snapshots the WHOLE db every time and WILL
+                                   TIME OUT (60s) against a real-size production IndexedDB -
+                                   confirmed live. Pass --stores (same store names as
+                                   "idb snapshot --stores") to scope every auto-snapshot to
+                                   just the stores this session actually touches - strongly
+                                   recommended for --strict-crv against a real app db; ignored
+                                   without --strict-crv.
                                    Best-effort: if js/db.js is readable and a tab is already
                                    connected, warns (does not block) when the tab's LIVE
                                    IndexedDB version != js/db.js's own DB_VERSION - the tab
@@ -143,8 +151,14 @@ function usage() {
                                    Whole page if selector omitted. --out saves a PNG file;
                                    without it, prints dimensions only (the data URL is large).
 
-  idb list                        list IndexedDB object store names
+  idb list                        list IndexedDB object store names + a per-store row count
+                                   (cheap store.count(), not a full dump) - check this before
+                                   an unscoped "idb snapshot" on a store you suspect is large
   idb dump <store>                dump every row (+ real keyPath) in one store
+  idb get <store> <json-key>      real indexed lookup of ONE row by key (store.get, not a
+                                   getAll()+filter) - use this instead of "idb dump" when you
+                                   already know the key and the store is large (a full dump of
+                                   a large real store can be slow/time out)
   idb snapshot [--stores a,b,c] [--golden <name>]
                                    capture + PERSIST a DB snapshot -> { id, counts } -
                                    scope to specific stores to avoid the full-DB timeout.
@@ -338,7 +352,7 @@ loaded with the activation flag (?webscout=1 or localStorage.webscout_enabled=1)
 // anyone noticed why a "new" store looked missing. Never fatal: no
 // js/db.js at this relative path, no agent connected yet, or any other
 // read/parse failure is swallowed silently - this is a warning, not a gate.
-async function warnOnDbVersionDrift() {
+async function warnOnDbVersionDrift(hint) {
   try {
     const src = fs.readFileSync('js/db.js', 'utf8');
     const match = src.match(/DB_VERSION\s*=\s*(\d+)/);
@@ -346,7 +360,7 @@ async function warnOnDbVersionDrift() {
     const sourceVersion = Number(match[1]);
     const live = await send('db.version', {});
     if (live.version !== sourceVersion) {
-      console.error(`WARNING: live IndexedDB version (${live.version}) != js/db.js DB_VERSION (${sourceVersion}) - the connected tab has not re-opened the DB since a migration bump. Run "page reload" (or "page reload --hard") before trusting any new-store check.`);
+      console.error(`WARNING: live IndexedDB version (${live.version}) != js/db.js DB_VERSION (${sourceVersion}) - the connected tab has not re-opened the DB since a migration bump. Run "page reload" (or "page reload --hard") before trusting any new-store check.${hint ? ` ${hint}` : ''}`);
     }
   } catch { /* best-effort - no js/db.js here, no agent connected, etc. */ }
 }
@@ -356,11 +370,17 @@ async function handleSession(sub, rawArgs) {
     let args = rawArgs;
     let tagsValue;
     let strictCrv;
+    let storesValue;
     ({ args, value: tagsValue } = extractFlag(args, '--tags'));
     ({ args, value: strictCrv } = extractBooleanFlag(args, '--strict-crv'));
+    ({ args, value: storesValue } = extractFlag(args, '--stores'));
     ({ args, value: agentFlag } = extractFlag(args, '--agent'));
     const tags = tagsValue ? tagsValue.split(',').map((t) => t.trim()).filter(Boolean) : [];
-    printResult(await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, tags }));
+    const strictCrvStores = storesValue ? storesValue.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+    printResult(await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, tags }));
+    if (strictCrv && !storesValue) {
+      console.error('WARNING: --strict-crv with no --stores auto-snapshots the WHOLE db on every dom.click/fill/eval/idb.put/idb.delete - this WILL time out (60s) against a real-size production IndexedDB. Pass --stores a,b,c to scope it.');
+    }
     await warnOnDbVersionDrift();
     return;
   }
@@ -709,9 +729,24 @@ async function main() {
     let a = args.slice(1);
     let hard;
     ({ args: a, value: hard } = extractBooleanFlag(a, '--hard'));
+    // Plain reload does NOT bust a Service Worker's cache - confirmed live:
+    // this cost a real session a genuine VersionError (stale-cached JS
+    // still declaring the OLD DB_VERSION, racing a DB already bumped by a
+    // properly-fresh tab). Warn up front, once, whenever this repo actually
+    // has a sw.js at its root - not fatal, just visible before the caller
+    // trusts a plain reload's result.
+    if (!hard && fs.existsSync(path.join(process.cwd(), 'sw.js'))) {
+      console.error('NOTE: this repo has a sw.js (Service Worker) - a plain "page reload" can keep serving OLD cached JS for several reloads (stale-while-revalidate) even after a real file edit. If you just edited js/db.js, sw.js, or any file this app precaches, use "page reload --hard" instead.');
+    }
     const result = await send(hard ? 'page.hardReload' : 'page.reload', {});
     if (waitReconnectValue) {
-      result.reconnect = await waitForReconnect({ agent: agentFlag, timeoutMs: timeoutValue });
+      // A hard reload additionally unregisters the Service Worker and
+      // clears Cache Storage before navigating - on a large cache this can
+      // take noticeably longer than a plain reload's default 15000ms wait,
+      // which previously produced a false-negative reconnected:false even
+      // though the tab came back healthy moments later (confirmed live).
+      const defaultTimeout = hard ? 30000 : 15000;
+      result.reconnect = await waitForReconnect({ agent: agentFlag, timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : defaultTimeout });
     }
     printResult(result);
     return;
@@ -748,7 +783,22 @@ async function main() {
     // quotes, heredoc-to-var, "unexpected EOF" on any embedded newline) was
     // the single biggest time-sink in a real session; writing the script to
     // a file and passing --file sidesteps shell quoting entirely.
-    const expr = fileValue ? fs.readFileSync(fileValue, 'utf8') : args.join(' ');
+    let expr;
+    if (fileValue) {
+      // fs.readFileSync throwing ENOENT is the easy case - the confirmed
+      // real gotcha is a path that SEEMS to read (no throw) but is empty or
+      // whitespace-only, e.g. a POSIX-style /tmp/... path that doesn't
+      // resolve the way the caller expects on Windows/Git Bash, silently
+      // producing an empty string instead of erroring - which then evals as
+      // a no-op expression and returns {} with zero signal anything went
+      // wrong. Fail loud here instead.
+      expr = fs.readFileSync(fileValue, 'utf8');
+      if (!expr.trim()) {
+        throw new Error(`--file ${fileValue} read as empty/whitespace-only - on Windows/Git Bash a POSIX-style path (e.g. /tmp/...) may not resolve the way you expect; write the script to a real path under your scratchpad directory and pass that.`);
+      }
+    } else {
+      expr = args.join(' ');
+    }
     printResult(await send('eval', { expr, timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined }));
     return;
   }
@@ -786,7 +836,25 @@ async function main() {
     idb: {
       list: () => send('idb.list', {}),
       dump: () => send('idb.dump', { store: subArgs[0] }),
-      snapshot: () => request('POST', '/state/snapshot', { agent: agentFlag, stores: storesValue ? storesValue.split(',').map((s) => s.trim()) : undefined, golden: goldenValue }),
+      get: () => send('idb.get', { store: subArgs[0], key: JSON.parse(subArgs[1]) }),
+      snapshot: async () => {
+        const stores = storesValue ? storesValue.split(',').map((s) => s.trim()) : undefined;
+        // Unscoped snapshot of a real-size db is the confirmed
+        // SNAPSHOT_TIMEOUT_MS (60s) failure mode - warn with a real row-
+        // count total (via the cheap idb.list counts, not a full dump)
+        // BEFORE attempting it, instead of only discovering the size after
+        // a minute-long timeout.
+        if (!stores) {
+          try {
+            const { counts } = await send('idb.list', {});
+            const total = Object.values(counts || {}).reduce((a, b) => a + b, 0);
+            if (total > 5000) {
+              console.error(`WARNING: unscoped snapshot of ~${total} rows across ${Object.keys(counts).length} stores - this may be slow or time out (${'60s'}). Pass --stores a,b,c to scope it to just what you need.`);
+            }
+          } catch { /* best-effort - don't block the real snapshot on this */ }
+        }
+        return request('POST', '/state/snapshot', { agent: agentFlag, stores, golden: goldenValue });
+      },
       diff: () => request('POST', '/state/diff', { idA: Number(subArgs[0]), idB: Number(subArgs[1]) }),
       'diff-golden': () => request('POST', '/state/diff', { golden: subArgs[0], idB: Number(subArgs[1]) }),
       restore: () => request('POST', '/state/restore', { agent: agentFlag, snapshotId: subArgs[0] ? Number(subArgs[0]) : undefined, golden: goldenValue }),

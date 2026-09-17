@@ -38,7 +38,7 @@ import {
 } from './client.mjs';
 
 const SERVER_NAME = 'web-scout';
-const SERVER_VERSION = '0.17.0'; // bumped alongside docs/web-scout-roadmap.md's V18 entry
+const SERVER_VERSION = '0.18.0'; // bumped alongside docs/web-scout-roadmap.md's V19 entry
 
 // ---------- stdio JSON-RPC framing ----------
 //
@@ -112,7 +112,7 @@ const TOOLS = [
       + '(action "start") before any dom/idb/net/console/eval/page action below will be accepted '
       + 'by the relay - there is exactly one "active" session at a time server-side.\n'
       + 'Actions:\n'
-      + '  start {goal, context?, strictCrv?, tags?} - declare a session; becomes the active one\n'
+      + '  start {goal, context?, strictCrv?, strictCrvStores?, tags?} - declare a session; becomes the active one. strictCrvStores scopes every strictCrv auto-snapshot to those stores - omitting it against a real-size db WILL time out\n'
       + '  end {id?} - end a session (defaults to the active one)\n'
       + '  current {} - the active session, or {active:false}\n'
       + '  list {} - every session, newest first\n'
@@ -125,7 +125,9 @@ const TOOLS = [
     actions: {
       start: async (p) => {
         const session = await request('POST', '/sessions', {
-          goal: requireField(p, 'goal'), context: p.context, strict_crv: !!p.strictCrv, tags: p.tags ?? [],
+          goal: requireField(p, 'goal'), context: p.context, strict_crv: !!p.strictCrv,
+          strict_crv_stores: Array.isArray(p.strictCrvStores) ? p.strictCrvStores : undefined,
+          tags: p.tags ?? [],
         });
         // Folds the CLI's separate stderr-only warnOnDbVersionDrift() into
         // the returned result instead - an MCP client has no equivalent of
@@ -226,8 +228,9 @@ const TOOLS = [
     name: 'webscout_idb',
     description: 'IndexedDB read/write plus persisted snapshot/diff/restore, against the active session\'s connected tab.\n'
       + 'Actions:\n'
-      + '  list {} - object store names\n'
+      + '  list {} - object store names + a cheap per-store row count (store.count(), not a full dump) - check before an unscoped snapshot on a store you suspect is large\n'
       + '  dump {store} - every row (+ real keyPath) in one store\n'
+      + '  get {store, key} - single-key lookup (store.get), not a full-store scan - use when the store is large and you already know the key\n'
       + '  snapshot {stores?, golden?} - capture + PERSIST a DB snapshot -> {id, counts}; golden tags it as a named regression baseline\n'
       + '  diff {idA, idB} - compute + PERSIST the diff between two persisted snapshots\n'
       + '  diff_golden {name, idB} - diff a named golden snapshot (from ANY session) against snapshot idB\n'
@@ -243,6 +246,7 @@ const TOOLS = [
     actions: {
       list: (p) => sendCmd('idb.list', {}, p?.agent),
       dump: (p) => sendCmd('idb.dump', { store: requireField(p, 'store') }, p?.agent),
+      get: (p) => sendCmd('idb.get', { store: requireField(p, 'store'), key: requireField(p, 'key') }, p?.agent),
       snapshot: (p) => request('POST', '/state/snapshot', { agent: p?.agent, stores: p?.stores, golden: p?.golden }),
       diff: (p) => request('POST', '/state/diff', { idA: Number(requireField(p, 'idA')), idB: Number(requireField(p, 'idB')) }),
       diff_golden: (p) => request('POST', '/state/diff', { golden: requireField(p, 'name'), idB: Number(requireField(p, 'idB')) }),
@@ -292,7 +296,14 @@ const TOOLS = [
     actions: {
       reload: async (p) => {
         const result = await sendCmd(p?.hard ? 'page.hardReload' : 'page.reload', {}, p?.agent);
-        if (p?.waitReconnect) result.reconnect = await waitForReconnect({ agent: p?.agent, timeoutMs: numOrUndef(p?.timeoutMs) });
+        if (p?.waitReconnect) {
+          // Same reasoning as cli.mjs: a hard reload additionally clears
+          // Cache Storage before navigating, which can take noticeably
+          // longer than a plain reload's default 15000ms wait - previously
+          // a false-negative reconnected:false even on a healthy reconnect.
+          const defaultTimeout = p?.hard ? 30000 : 15000;
+          result.reconnect = await waitForReconnect({ agent: p?.agent, timeoutMs: numOrUndef(p?.timeoutMs) ?? defaultTimeout });
+        }
         return result;
       },
       fresh: (p) => pageFresh({ localPath: requireField(p, 'localPath'), urlPath: p?.urlPath, agent: p?.agent }),

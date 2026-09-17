@@ -124,7 +124,9 @@ the full explanation behind any of these.
 
 **Sessions** (required before anything else)
 ```bash
-session start "<goal>" ["<context>"] [--strict-crv] [--tags a,b,c]
+session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c]
+                               # --stores scopes every strict-crv auto-snapshot to those
+                               # stores - omitting it against a real-size db WILL time out
 session end [id]              # defaults to the active session
 session current
 session list
@@ -148,8 +150,10 @@ dom screenshot "#some-panel" --out ./shot.png
 
 **IndexedDB**
 ```bash
-idb list
+idb list                      # store names + a cheap per-store row count (check before an
+                               # unscoped snapshot on a store you suspect is large)
 idb dump my_store
+idb get my_store 1            # single-key lookup (store.get), not a full-store scan
 idb put my_store '{"id":1,"status":"OK"}'
 idb delete my_store 1
 idb delete-many my_store '[1,2,3]'   # one transaction; response includes deletedKeys/failedKeys
@@ -170,9 +174,14 @@ console log
 
 **Page**
 ```bash
-page reload
-page reload --hard            # also clears Service Worker caches
+page reload                   # does NOT bust a Service Worker's cache - can keep serving
+                               # OLD JS for several reloads after a real edit; CLI warns if
+                               # this repo has a sw.js
+page reload --hard            # also unregisters Service Workers + clears Cache Storage -
+                               # use this after editing any file the app precaches
 page reload --hard --wait-reconnect   # blocks until the agent disconnects then reconnects
+                               # (default wait is longer for --hard - a big cache clear
+                               # can take noticeably more than a plain reload)
 page fresh path/to/file.js    # is the tab actually running what's on disk?
 ```
 

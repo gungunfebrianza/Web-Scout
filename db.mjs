@@ -150,6 +150,13 @@ function ensureColumn(table, column, ddl) {
 }
 
 ensureColumn('sessions', 'strict_crv', 'strict_crv INTEGER NOT NULL DEFAULT 0');
+// Scopes every strict-crv auto-snapshot (before/after each dom.click/fill/
+// eval/idb.put/idb.delete) to a given store list, same as the manual
+// `idb snapshot --stores` form - without this, strict-crv always snapshots
+// the WHOLE db, which times out (SNAPSHOT_TIMEOUT_MS, 60s) against a
+// real-size production IndexedDB (confirmed live: this is what actually
+// forced abandoning --strict-crv mid-session in a real CRV run).
+ensureColumn('sessions', 'strict_crv_stores', 'strict_crv_stores TEXT');
 ensureColumn('sessions', 'tags', 'tags TEXT');
 ensureColumn('actions', 'agent_name', "agent_name TEXT NOT NULL DEFAULT 'default'");
 ensureColumn('state_snapshots', 'agent_name', "agent_name TEXT NOT NULL DEFAULT 'default'");
@@ -164,7 +171,7 @@ ensureColumn('state_snapshots', 'golden_name', 'golden_name TEXT');
 
 // ---------- sessions ----------
 
-const stmtInsertSession = db.prepare('INSERT INTO sessions (goal, context, status, started_at, strict_crv, tags) VALUES (?, ?, ?, ?, ?, ?)');
+const stmtInsertSession = db.prepare('INSERT INTO sessions (goal, context, status, started_at, strict_crv, strict_crv_stores, tags) VALUES (?, ?, ?, ?, ?, ?, ?)');
 const stmtGetCurrentSession = db.prepare("SELECT * FROM sessions WHERE status = 'active' LIMIT 1");
 const stmtGetSession = db.prepare('SELECT * FROM sessions WHERE id = ?');
 const stmtEndSession = db.prepare("UPDATE sessions SET status = 'ended', ended_at = ? WHERE id = ? AND status = 'active'");
@@ -172,14 +179,19 @@ const stmtListSessions = db.prepare('SELECT * FROM sessions ORDER BY id DESC');
 
 function hydrateSession(row) {
   if (!row) return row;
-  return { ...row, strict_crv: !!row.strict_crv, tags: row.tags ? JSON.parse(row.tags) : [] };
+  return {
+    ...row,
+    strict_crv: !!row.strict_crv,
+    strict_crv_stores: row.strict_crv_stores ? JSON.parse(row.strict_crv_stores) : null,
+    tags: row.tags ? JSON.parse(row.tags) : [],
+  };
 }
 
 export function getCurrentSession() {
   return hydrateSession(stmtGetCurrentSession.get() ?? null);
 }
 
-export function startSession({ goal, context, strictCrv, tags }) {
+export function startSession({ goal, context, strictCrv, strictCrvStores, tags }) {
   if (!goal || typeof goal !== 'string' || !goal.trim()) {
     throw new Error('a non-empty goal is required to start a session');
   }
@@ -188,7 +200,8 @@ export function startSession({ goal, context, strictCrv, tags }) {
     throw new Error(`a session is already active (id ${existing.id}: "${existing.goal}") - end it first with "session end", or keep using it`);
   }
   const startedAt = new Date().toISOString();
-  const info = stmtInsertSession.run(goal, context ?? null, 'active', startedAt, strictCrv ? 1 : 0, JSON.stringify(tags ?? []));
+  const storesJson = Array.isArray(strictCrvStores) && strictCrvStores.length ? JSON.stringify(strictCrvStores) : null;
+  const info = stmtInsertSession.run(goal, context ?? null, 'active', startedAt, strictCrv ? 1 : 0, storesJson, JSON.stringify(tags ?? []));
   return hydrateSession(stmtGetSession.get(Number(info.lastInsertRowid)));
 }
 
