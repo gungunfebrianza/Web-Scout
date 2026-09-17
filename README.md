@@ -141,6 +141,7 @@ dom pick                      # click any element in the browser -> get its sele
 dom click "#some-button"
 dom fill "#some-input" "value"
 dom wait "#result" --text "DONE" --timeout 20000
+dom wait "#result" --changed --timeout 20000   # resolves once content DIFFERS from its call-time baseline
 dom settle --quiet-ms 300     # wait for the page to stop mutating
 dom screenshot "#some-panel" --out ./shot.png
 ```
@@ -151,6 +152,7 @@ idb list
 idb dump my_store
 idb put my_store '{"id":1,"status":"OK"}'
 idb delete my_store 1
+idb delete-many my_store '[1,2,3]'   # one transaction; response includes deletedKeys/failedKeys
 idb clear my_store
 idb wait my_store --count-gte 4 --timeout 15000
 idb snapshot --stores my_store --golden my-baseline   # named regression baseline
@@ -170,13 +172,20 @@ console log
 ```bash
 page reload
 page reload --hard            # also clears Service Worker caches
+page reload --hard --wait-reconnect   # blocks until the agent disconnects then reconnects
 page fresh path/to/file.js    # is the tab actually running what's on disk?
+```
+
+**DB version**
+```bash
+db version-check              # compares js/db.js's DB_VERSION to the live tab; on drift, probes
+                               # whether the upgrade is blocked right now (and by what)
 ```
 
 **Scripting**
 ```bash
 eval "document.title"
-eval --file ./script.js
+eval --file ./script.js       # Windows/Git Bash: --file /dev/stdin does NOT work - write a real temp file
 ```
 
 **Macros & suites**

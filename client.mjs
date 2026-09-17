@@ -93,6 +93,71 @@ export async function pageFresh({ localPath, urlPath, agent }) {
   };
 }
 
+// ---------- DB version check (drift + live-blocked probe) ----------
+//
+// Reads dbJsPath's own DB_VERSION constant off disk and compares it to the
+// connected tab's LIVE IndexedDB version - the same comparison "session
+// start" already makes as a best-effort warning, but callable standalone,
+// any time, not just at session-start. On drift, additionally dispatches
+// db.probeUpgrade so the caller learns WHY a "page reload" hasn't picked up
+// the new version, not just THAT it hasn't: a version-bump open() call
+// hangs indefinitely if any other tab (web-scout-connected or not) still
+// holds a connection at the old version - confirmed live in a real session,
+// diagnosed only by hand-rolling an indexedDB.open + onblocked probe via
+// `eval`. This is that probe, as a real command.
+export async function dbVersionCheck({ agent, dbJsPath = 'js/db.js' } = {}) {
+  let sourceVersion;
+  try {
+    const src = fs.readFileSync(dbJsPath, 'utf8');
+    const match = src.match(/DB_VERSION\s*=\s*(\d+)/);
+    if (match) sourceVersion = Number(match[1]);
+  } catch { /* no js/db.js at this relative path - report live version only */ }
+  const live = await request('POST', '/command', { type: 'db.version', params: {}, agent });
+  const result = {
+    name: live.name,
+    liveVersion: live.version,
+    sourceVersion,
+    drift: sourceVersion !== undefined && live.version !== sourceVersion,
+  };
+  if (result.drift) {
+    const probe = await request('POST', '/command', { type: 'db.probeUpgrade', params: { targetVersion: sourceVersion }, agent });
+    result.probe = probe;
+    result.hint = probe.blocked
+      ? 'Blocked right now - another connection (likely another open tab on this origin) is holding IndexedDB at an older version. Close other tabs, then "page reload" (or "page reload --hard") to complete the upgrade.'
+      : `Not currently blocked - "page reload" (or "page reload --hard") should complete the upgrade to v${sourceVersion} cleanly.`;
+  }
+  return result;
+}
+
+// ---------- Wait for reconnect (after page reload / hardReload) ----------
+//
+// `page.reload`/`page.hardReload` resolve immediately (before the actual
+// navigation fires) - there was previously no signal for "the reload
+// finished and the agent is back", so a caller had to guess a sleep
+// duration and retry-on-error ("no web-scout agent named 'default'
+// connected"). This polls GET /agents and reports done only after it has
+// seen the target agent name DISCONNECT and then RECONNECT - not just
+// "present" (which could still be the pre-reload connection, not yet torn
+// down, giving a false-positive on the very first poll).
+export async function waitForReconnect({ agent, timeoutMs } = {}) {
+  const limit = Number(timeoutMs) || 15000;
+  const target = agent || 'default';
+  const start = Date.now();
+  let sawDisconnect = false;
+  while (Date.now() - start < limit) {
+    const { agents } = await request('GET', '/agents');
+    const present = agents.includes(target);
+    if (!present) sawDisconnect = true;
+    if (sawDisconnect && present) return { reconnected: true, waitedMs: Date.now() - start };
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  return {
+    reconnected: false,
+    waitedMs: Date.now() - start,
+    note: 'timed out waiting for reconnect - the tab may still be mid-reload (a hard reload with a large cache to clear can take longer than the default 15000ms), or it never re-activated (check the activation flag survived: ?webscout=1 in the URL, or localStorage.webscout_enabled)',
+  };
+}
+
 // ---------- Verity scenario stub from a macro ----------
 //
 // Best-effort skeleton, not a translator - tools/ui-verifier's own selector

@@ -34,11 +34,11 @@
 import fs from 'node:fs';
 import readline from 'node:readline';
 import {
-  request, BASE, netHistory, pageFresh, buildVerityScenarioStub, runSuite,
+  request, BASE, netHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect,
 } from './client.mjs';
 
 const SERVER_NAME = 'web-scout';
-const SERVER_VERSION = '0.16.0'; // bumped alongside docs/web-scout-roadmap.md's V16 entry
+const SERVER_VERSION = '0.17.0'; // bumped alongside docs/web-scout-roadmap.md's V18 entry
 
 // ---------- stdio JSON-RPC framing ----------
 //
@@ -93,12 +93,16 @@ const TOOLS = [
       + '  agents {} - list connected multi-tab agent names\n'
       + '  analytics {} - cross-session Friction Analytics (recurring failure patterns across ALL sessions)\n'
       + '  search {q} - full-text search across every session\'s actions\n'
+      + '  db_version_check {agent?, dbJsPath?} - compares js/db.js\'s own DB_VERSION (on disk, default "js/db.js") '
+      + 'against the connected tab\'s LIVE IndexedDB version; on drift, also probes whether opening at the source '
+      + 'version is blocked RIGHT NOW (another tab holding a connection at the older version) and by what\n'
       + '  dashboard_url {} - the realtime dashboard\'s URL (this does not open a browser itself)',
     actions: {
       status: () => request('GET', '/health'),
       agents: () => request('GET', '/agents'),
       analytics: () => request('GET', '/analytics'),
       search: (p) => request('GET', `/search?q=${encodeURIComponent(requireField(p, 'q'))}`),
+      db_version_check: (p) => dbVersionCheck({ agent: p?.agent, dbJsPath: p?.dbJsPath }),
       dashboard_url: () => ({ url: `${BASE}/dashboard` }),
     },
   },
@@ -191,7 +195,9 @@ const TOOLS = [
       + '  fill {selector, value, nth?} - set a form field + dispatch input/change\n'
       + '  rect {selector} - getBoundingClientRect\n'
       + '  style {selector, properties?} - computed style (curated defaults, or a given array of property names)\n'
-      + '  wait {selector, text?, timeoutMs?} - poll until selector matches (and, if given, contains text) or timeout (default 10000)\n'
+      + '  wait {selector, text?, timeoutMs?, changed?} - poll until selector matches (and, if text given, contains it), '
+      + 'or - with changed:true - until its textContent differs from what it was at call time (use for a placeholder-swapped-'
+      + 'for-a-real-result pattern, e.g. an AI-review button, instead of predicting the eventual text)\n'
       + '  pick {timeoutMs?} - BLOCKS until a HUMAN clicks something in the real tab; returns a selector for it. No programmatic target.\n'
       + '  settle {selector?, quietMs?, timeoutMs?} - wait until the DOM under selector (default document.body) has had no mutations for quietMs (default 300)\n'
       + '  screenshot {selector?, outPath?} - best-effort DOM rasterization; outPath saves a PNG locally, else returns dimensions only\n'
@@ -202,7 +208,7 @@ const TOOLS = [
       fill: (p) => sendCmd('dom.fill', { selector: requireField(p, 'selector'), value: requireField(p, 'value'), nth: numOrUndef(p?.nth) }, p?.agent),
       rect: (p) => sendCmd('dom.rect', { selector: requireField(p, 'selector') }, p?.agent),
       style: (p) => sendCmd('dom.computedStyle', { selector: requireField(p, 'selector'), properties: p?.properties }, p?.agent),
-      wait: (p) => sendCmd('dom.wait', { selector: requireField(p, 'selector'), text: p?.text, timeoutMs: numOrUndef(p?.timeoutMs) }, p?.agent),
+      wait: (p) => sendCmd('dom.wait', { selector: requireField(p, 'selector'), text: p?.text, timeoutMs: numOrUndef(p?.timeoutMs), changed: !!p?.changed }, p?.agent),
       pick: (p) => sendCmd('dom.pick', { timeoutMs: numOrUndef(p?.timeoutMs) }, p?.agent),
       settle: (p) => sendCmd('dom.settle', { selector: p?.selector, quietMs: numOrUndef(p?.quietMs), timeoutMs: numOrUndef(p?.timeoutMs) }, p?.agent),
       screenshot: async (p) => {
@@ -228,7 +234,8 @@ const TOOLS = [
       + '  restore {snapshotId?, golden?} - replay a persisted snapshot\'s rows back into IndexedDB (PUTs only, never deletes)\n'
       + '  put {store, row} - write one row, keyed by the store\'s real keyPath; response includes the full stored row\n'
       + '  delete {store, key} - delete one row by key\n'
-      + '  delete_many {store, keys} - delete many rows by key, one transaction\n'
+      + '  delete_many {store, keys} - delete many rows by key, one transaction; response includes deletedKeys/failedKeys '
+      + '(not just counts), so a caller never has to re-dump/snapshot just to confirm which rows actually went away\n'
       + '  clear {store} - delete every row in a store\n'
       + '  wait {store, countGte?, timeoutMs?} - poll a store\'s row count until >= countGte or timeout (default 10000)\n'
       + '(No "watch" action - it\'s an indefinite streaming poll with no clean single request/response mapping; use "wait" for a bounded check.)\n'
@@ -276,11 +283,18 @@ const TOOLS = [
     name: 'webscout_page',
     description: 'Whole-page operations.\n'
       + 'Actions:\n'
-      + '  reload {hard?} - location.reload(); hard also unregisters every Service Worker and clears Cache Storage first (use for a stale-while-revalidate SW after editing a file)\n'
+      + '  reload {hard?, waitReconnect?, timeoutMs?} - location.reload(); hard also unregisters every Service Worker '
+      + 'and clears Cache Storage first (use for a stale-while-revalidate SW after editing a file). Both reply BEFORE '
+      + 'the real navigation fires - waitReconnect:true blocks until the agent is seen to disconnect then reconnect '
+      + '(default timeout 15000ms) instead of the caller guessing a sleep and retrying on "no agent connected"\n'
       + '  fresh {localPath, urlPath?} - fetches localPath THROUGH THE PAGE (its real cache/SW stack) and compares its hash to the on-disk file - "is the tab actually running what\'s on disk"\n'
       + 'Both take optional `agent` (multi-tab target name).',
     actions: {
-      reload: (p) => sendCmd(p?.hard ? 'page.hardReload' : 'page.reload', {}, p?.agent),
+      reload: async (p) => {
+        const result = await sendCmd(p?.hard ? 'page.hardReload' : 'page.reload', {}, p?.agent);
+        if (p?.waitReconnect) result.reconnect = await waitForReconnect({ agent: p?.agent, timeoutMs: numOrUndef(p?.timeoutMs) });
+        return result;
+      },
       fresh: (p) => pageFresh({ localPath: requireField(p, 'localPath'), urlPath: p?.urlPath, agent: p?.agent }),
     },
   },

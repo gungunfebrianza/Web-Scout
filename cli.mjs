@@ -10,7 +10,9 @@
 
 import fs from 'node:fs';
 import http from 'node:http';
-import { request, BASE, netHistory, pageFresh, buildVerityScenarioStub, runSuite } from './client.mjs';
+import {
+  request, BASE, netHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect,
+} from './client.mjs';
 
 // Set once near the top of main() from a `--agent <name>` flag found
 // anywhere in the subcommand's own arguments; every dom/idb(snapshot)/eval
@@ -45,6 +47,14 @@ function usage() {
   console.log(`Usage: node tools/web-scout/cli.mjs <command> [args...]
 
   status                          relay health, connected agents, and active session
+  db version-check [--agent <name>]
+                                   compares js/db.js's own DB_VERSION (on disk) against the
+                                   connected tab's LIVE IndexedDB version - same check "session
+                                   start" makes as a warning, but callable standalone/on demand.
+                                   On drift, also PROBES whether opening at the source version is
+                                   blocked RIGHT NOW (another tab - web-scout-connected or not -
+                                   holding a connection at the older version), and by what, instead
+                                   of only reporting THAT a version-bump "page reload" hasn't taken.
   session start "<goal>" ["<context>"] [--strict-crv] [--tags a,b,c] [--agent <name>]
                                    declare context/goal - REQUIRED before any action.
                                    --strict-crv auto-snapshots+diffs before/after every
@@ -103,6 +113,14 @@ function usage() {
   dom wait <selector> [--text <substr>] [--timeout <ms>]
                                    poll until the selector matches (and, if given, its text
                                    contains <substr>) or timeout (default 10000ms) elapses
+  dom wait <selector> --changed [--timeout <ms>]
+                                   poll until the selector's textContent DIFFERS from what it was
+                                   at call time - use this (not --text) for "a placeholder gets
+                                   swapped for a real result" (e.g. every AI-review button in this
+                                   app: "Asking AI to review..." -> the real result), where the
+                                   placeholder element already exists so a bare selector-exists
+                                   wait resolves instantly and tells you nothing, and predicting
+                                   the eventual result text ahead of time isn't always possible
   dom pick [--timeout <ms>]       arm a one-time click listener and BLOCK until a HUMAN clicks
                                    something in the real browser tab - not a programmatic
                                    selector finder, there is no way to feed it a target
@@ -152,7 +170,10 @@ function usage() {
                                    just the key, so a caller never has to assume/re-dump to
                                    learn what autoIncrement actually assigned
   idb delete <store> <json-key>   delete one row by key
-  idb delete-many <store> <json-array-of-keys>   delete many rows by key, one transaction
+  idb delete-many <store> <json-array-of-keys>   delete many rows by key, one transaction -
+                                   response includes deletedKeys/failedKeys (not just counts), so
+                                   a caller never has to re-idb-dump/snapshot just to confirm which
+                                   rows actually went away
   idb clear <store>                delete every row in a store
   idb wait <store> --count-gte <n> [--timeout <ms>]
                                    poll a store's row count until >= n or timeout (default 10000ms)
@@ -196,6 +217,13 @@ function usage() {
                                    serving OLD cached bytes across several plain reloads while
                                    silently refreshing its cache in the background, making a real
                                    fix look like it "didn't take" for no visible reason.
+  page reload [--hard] --wait-reconnect [--timeout <ms>]
+                                   both forms above reply BEFORE the real navigation fires, with no
+                                   signal for "the reload actually finished" - a click right after
+                                   used to fail with "no web-scout agent named 'default' connected"
+                                   on a guessed sleep that was too short. --wait-reconnect blocks
+                                   until the agent is seen to DISCONNECT then RECONNECT (default
+                                   timeout 15000ms, longer for --hard on a large cache to clear).
   page fresh <local-file-path> [--url </served/path>]
                                    fetches that path THROUGH THE PAGE (its real cache/SW stack,
                                    not a plain disk read) and hashes it, then hashes the same
@@ -218,6 +246,11 @@ function usage() {
                                    use it for any multi-line payload; shell-quoting one inline
                                    (nested quotes, heredoc-to-var, "unexpected EOF") is the
                                    single biggest time-sink a real session hit with this command.
+                                   KNOWN GOTCHA (Windows/Git Bash): --file /dev/stdin with a
+                                   heredoc fails with "ENOENT ... open 'D:\proc\self\fd\0'" -
+                                   /dev/stdin does not resolve correctly for this CLI's file read
+                                   on Windows. Write the script to a real temp file and pass THAT
+                                   path instead.
                                    Races a page-side timeout (default 10000ms) - if expr contains
                                    an unresolved 'await', you get a diagnostic message instead of
                                    a generic relay timeout. Cannot interrupt a SYNCHRONOUS
@@ -421,6 +454,16 @@ async function handleSession(sub, rawArgs) {
   throw new Error(`unknown 'session ${sub || ''}'`);
 }
 
+async function handleDb(sub, rawArgs) {
+  if (sub === 'version-check') {
+    let args = rawArgs;
+    ({ args, value: agentFlag } = extractFlag(args, '--agent'));
+    printResult(await dbVersionCheck({ agent: agentFlag }));
+    return;
+  }
+  throw new Error(`unknown 'db ${sub || ''}'`);
+}
+
 async function handleMacro(sub, rawArgs) {
   if (sub === 'record') {
     let args = rawArgs;
@@ -584,6 +627,11 @@ async function main() {
     return;
   }
 
+  if (command === 'db') {
+    await handleDb(rest[0], rest.slice(1));
+    return;
+  }
+
   if (command === 'macro') {
     await handleMacro(rest[0], rest.slice(1));
     return;
@@ -638,6 +686,10 @@ async function main() {
   let sortValue;
   let limitValue;
   let sessionValue;
+  let changedValue;
+  let waitReconnectValue;
+  ({ args, value: changedValue } = extractBooleanFlag(args, '--changed'));
+  ({ args, value: waitReconnectValue } = extractBooleanFlag(args, '--wait-reconnect'));
   ({ args, value: nthValue } = extractFlag(args, '--nth'));
   ({ args, value: textValue } = extractFlag(args, '--text'));
   ({ args, value: timeoutValue } = extractFlag(args, '--timeout'));
@@ -657,7 +709,11 @@ async function main() {
     let a = args.slice(1);
     let hard;
     ({ args: a, value: hard } = extractBooleanFlag(a, '--hard'));
-    printResult(await send(hard ? 'page.hardReload' : 'page.reload', {}));
+    const result = await send(hard ? 'page.hardReload' : 'page.reload', {});
+    if (waitReconnectValue) {
+      result.reconnect = await waitForReconnect({ agent: agentFlag, timeoutMs: timeoutValue });
+    }
+    printResult(result);
     return;
   }
 
@@ -720,7 +776,7 @@ async function main() {
       fill: () => send('dom.fill', { selector: subArgs[0], value: subArgs[1], nth: nthValue !== undefined ? Number(nthValue) : undefined }),
       rect: () => send('dom.rect', { selector: subArgs[0] }),
       style: () => send('dom.computedStyle', { selector: subArgs[0], properties: subArgs[1] ? subArgs[1].split(',').map((s) => s.trim()) : undefined }),
-      wait: () => send('dom.wait', { selector: subArgs[0], text: textValue, timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined }),
+      wait: () => send('dom.wait', { selector: subArgs[0], text: textValue, timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined, changed: changedValue }),
       pick: () => send('dom.pick', { timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined }),
       // Generic "wait until quiet" - pass a selector to scope it (default:
       // document.body). Use after a click/rebuild and before the next

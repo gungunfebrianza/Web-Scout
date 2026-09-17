@@ -1233,6 +1233,96 @@ Exit criteria:
 - a reader hits a definition of "CRV" before its first use in the README,
   not 250 lines after.
 
+## V18 - CRV friction fixes from a real P4.3 session (implemented)
+
+Not a self-audit this time - every item here traces to a specific, named
+friction point hit during one real CRV pass (Shadow Model Integration
+Readiness, P4.3), reviewed and turned into proposals immediately afterward
+rather than guessed at in the abstract.
+
+- **`db version-check` (new CLI command) + `db.probeUpgrade` (new inject.js
+  command):** `db.version` already reported the live tab's IndexedDB
+  version, but nothing answered *why* a version-bump upgrade wasn't taking -
+  that CRV pass stalled on exactly this (`indexedDB.open` returned
+  `blocked`, diagnosed only by hand-rolling an `onblocked` probe via `eval`).
+  `db.probeUpgrade` is that probe made reusable: opens at a target version,
+  aborts its own `upgradeneeded` transaction immediately (never commits a
+  real migration), and resolves fast with `blocked:true/false` instead of
+  waiting out the blocking tab's own close. `db version-check` wraps it:
+  reads `js/db.js`'s `DB_VERSION` off disk, compares to the live version,
+  and on drift runs the probe automatically - one command instead of a
+  session-start-only passive warning plus a manual `eval` fallback.
+- **`dom wait --changed` (new mode on an existing command):** every
+  AI-review button in the app this was built against swaps a loading
+  placeholder for a real result - the placeholder element already exists,
+  so a bare selector-exists `dom.wait` resolves instantly and proves
+  nothing; the caller previously had to predict the eventual result text
+  ahead of time just to wait correctly. `--changed` snapshots the
+  selector's `textContent` at call time and resolves as soon as it differs,
+  with no prediction required.
+- **`page reload [--hard] --wait-reconnect` (new flag):** both reload
+  primitives reply *before* the real navigation fires, by design (so the
+  reply isn't dropped mid-reload) - but that left no signal for "the reload
+  actually finished." A real session hit `no web-scout agent named
+  'default' connected` on the very next command, on a guessed sleep that
+  was too short. `--wait-reconnect` polls `GET /agents` client-side (in
+  `client.mjs`, shared by both `cli.mjs` and `mcp-server.mjs`) until the
+  target agent is seen to *disconnect* then *reconnect* - not just
+  "present," which could still be the pre-reload connection, not yet torn
+  down.
+- **`idb.deleteMany` response detail:** was `{deleted, failed}` (counts
+  only); a real session grepped for a count field that didn't match what it
+  expected and fell back to a follow-up `idb snapshot` just to confirm the
+  delete actually happened. Now returns `deletedKeys`/`failedKeys` arrays
+  alongside the counts, so a caller can confirm exactly which rows went
+  away without a second round trip.
+- **`eval` timeout message fix:** the message already suggested "pass a
+  larger timeoutMs" but named the internal param (`timeoutMs`), not the
+  actual CLI flag (`--timeout`) or MCP param path a caller would type -
+  reworded to name both, and to state plainly that the default (10000ms)
+  is unrelated to any server/provider-side timeout, since a real
+  ~180-second AI-provider call hit this twice before the flag was found.
+- **Windows `/dev/stdin` gotcha, documented (not fixed - it's a Git Bash
+  limitation, not a bug in this tool):** `eval --file /dev/stdin` with a
+  heredoc fails with `ENOENT ... open 'D:\proc\self\fd\0'` on Windows -
+  `/dev/stdin` doesn't resolve correctly for this CLI's file read there.
+  Added directly next to the `eval --file` usage text and the README's
+  scripting example: write the payload to a real temp file instead.
+- **MCP parity:** `webscout_dom.wait` gained `changed`, `webscout_page.reload`
+  gained `waitReconnect`/`timeoutMs`, and `webscout_meta` gained
+  `db_version_check` - all three implemented as calls into the same
+  `client.mjs` helpers (`dbVersionCheck`, `waitForReconnect`) `cli.mjs`
+  uses, per this file's own stated reason for `client.mjs`'s existence
+  (shared logic, not copy-pasted-and-drifting). `SERVER_VERSION` bumped to
+  `0.17.0`.
+
+**Considered and explicitly not done:** capturing response bodies in `net
+history`/`net log` (the original motivating gap - diagnosing an
+`AI_RESPONSE_INVALID` failure needed the raw provider response text, which
+net capture doesn't store, forcing a second, real ~180s provider call by
+hand via `eval` just to see it). Rejected because the only way to read a
+response body is `res.clone().text()`, which must fully drain the body
+before resolving - doing that before returning `res` to the real page code
+delays every real fetch, including a long-running or streaming one,
+directly violating this tool's own stated invariant (Product principle 6,
+above): never silently change the page's own behavior while observing it.
+No fire-and-forget variant was found that avoids this without either
+racing the real response or requiring `net log`/`net history` entries to be
+mutated after the fact. Left as a known, documented gap rather than shipped
+half-safe.
+
+Exit criteria:
+
+- `node --test --test-concurrency=1` on all 3 test files: 20/20 pass, no
+  regressions from any of the above;
+- `db version-check` correctly reports `blocked:true` against a real
+  cross-tab version lock (the exact scenario that motivated it) and
+  `blocked:false` once the blocking tab is closed;
+- `dom wait --changed` resolves on a real placeholder-swap render without
+  the caller supplying an expected substring;
+- `page reload --wait-reconnect` returns only after the agent is
+  genuinely back, not on the first (possibly stale) `GET /agents` poll.
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

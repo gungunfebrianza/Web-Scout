@@ -156,6 +156,22 @@ be done" can mean:
 Both reject with a diagnostic message (not a bare timeout) if nothing
 settles/matches in time.
 
+### Waiting for changed content, not predicted content
+
+`dom wait <selector> --changed [--timeout <ms>]` is a third mode on the same
+command as the plain `--text <substr>` form above, for a specific recurring
+shape: an element that already exists in a "pending" state and later gets
+its content replaced with a real result - every AI-review button in the app
+this was built against does exactly this ("Asking AI to review..." ->
+the real result). A bare `dom wait <selector>` resolves the instant it sees
+the placeholder, since the placeholder element already exists - it proves
+nothing about completion. The `--text` form works, but only if the caller
+can predict the eventual substring ahead of time, which isn't always
+possible. `--changed` snapshots the selector's `textContent` at call time
+and resolves as soon as a later poll sees it differ - no prediction
+required, at the cost of not being able to assert anything about what the
+new content actually says (pair it with a follow-up `dom query` for that).
+
 ### Reload, not re-init
 
 `page reload` calls a real `location.reload()`. The activation flag
@@ -167,6 +183,26 @@ init-function re-calls have been confirmed, in a real session, to stack
 duplicate `document`-level event listeners (no removal/dedup guard exists
 in the app for this), causing a single real click to fire a handler 3-4x
 and write duplicate rows. A true reload doesn't have that failure mode.
+
+### Waiting for the reload itself (`--wait-reconnect`)
+
+Both `page.reload` and `page.hardReload` resolve their own request
+**before** the real navigation fires (`resolve({reloading:true})`, then
+`location.reload()` on the next macrotask) - deliberately, so the relay
+reply is sent while the WebSocket connection is still alive instead of
+being dropped mid-navigation. That leaves a real gap for a caller: no
+signal for "the reload actually finished and the agent is back." A real
+session hit `no web-scout agent named 'default' connected` on the very
+next command, on a guessed sleep that turned out too short. `page reload
+[--hard] --wait-reconnect [--timeout <ms>]` (implemented client-side, in
+`client.mjs`'s `waitForReconnect`, shared by `cli.mjs` and
+`mcp-server.mjs` - no relay/inject.js change needed, since `GET /agents`
+already existed) polls `GET /agents` until it has seen the target agent
+name (default `'default'`) **disconnect, then reconnect** - not just
+"present" on the first poll, which could still be the pre-reload
+connection that hasn't torn down yet, giving a false-positive an instant
+too early. Default timeout 15000ms; a hard reload clearing a large cache
+can legitimately need longer, via `--timeout`.
 
 ### Hard reload (Service Worker + Cache Storage busting)
 
@@ -645,6 +681,37 @@ Friction Analytics so every open tab's 3s poll doesn't force a real
 `sourceVersion:liveVersion` pair - a genuinely NEW drift (a further
 migration bump before the old one was ever fixed) re-shows the banner
 instead of staying silently dismissed forever.
+
+### `db version-check` and `db.probeUpgrade` - drift, plus WHY it's stuck
+
+The startup warning and dashboard banner above both answer "is there
+drift" - neither answers "why hasn't a `page reload` fixed it yet," which
+matters because a version-bump `indexedDB.open` genuinely **hangs
+indefinitely** if any other tab on the origin (web-scout-connected or not)
+still holds a connection at the older version; this is standard IndexedDB
+behavior, not a bug. A real session hit exactly this: `page reload --hard`
+came back, `db.version` still reported the old version, and the only way
+to learn *why* was hand-rolling `indexedDB.open(name, targetVersion)` with
+an `onblocked` listener directly via `eval`.
+
+`db.probeUpgrade({targetVersion})` (`inject.js`) is that probe made
+reusable and safe to call any time: opens at `targetVersion`, and if
+`onupgradeneeded` ever fires, immediately aborts its own versionchange
+transaction (`req.transaction.abort()`) - this call can never actually
+commit a real migration, diagnostics only. If `onblocked` fires, the
+in-page agent does **not** wait for the blocking connection to eventually
+close (which is precisely the hang this exists to diagnose, not
+reproduce) - a 1500ms internal deadline resolves `{blocked:true, ...}` on
+its own, independent of the underlying `open()` request's own eventual
+settlement.
+
+`db version-check` (`cli.mjs`, and `webscout_meta.db_version_check` on the
+MCP server; both call the same `client.mjs` `dbVersionCheck` helper) is the
+CLI-facing wrapper: reads `js/db.js`'s `DB_VERSION` off disk, compares to
+the live `db.version`, and - only on drift - also calls `db.probeUpgrade`
+and folds the result into one reply with a plain-English `hint` ("close
+other tabs" vs. "should complete cleanly"), instead of the caller needing
+to know to run a second, separate diagnostic command by hand.
 
 ## Ask AI (optional feature - needs a backend of your own)
 

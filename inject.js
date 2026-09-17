@@ -398,17 +398,34 @@
     // contains `text`) or `timeoutMs` elapses. Replaces the hand-rolled
     // bash polling loops every prior session reached for when waiting on
     // an async AI-review render or a debounced UI update.
-    'dom.wait': ({ selector, text, timeoutMs }) => new Promise((resolve, reject) => {
+    // `changed` mode: instead of requiring the caller to predict the
+    // eventual substring, snapshot the selector's current textContent at
+    // call time and resolve as soon as it differs. Exists for the
+    // "placeholder swapped for a real result" pattern this app repeats
+    // identically across every cognitive-layer AI-review button ("Asking
+    // AI to review..." -> the real result) - the placeholder div already
+    // exists, so a bare selector-exists wait resolves instantly on it and
+    // tells the caller nothing; without `changed`, the caller has no choice
+    // but to guess the eventual result text ahead of time just to wait
+    // correctly.
+    'dom.wait': ({ selector, text, timeoutMs, changed }) => new Promise((resolve, reject) => {
       const limit = Number(timeoutMs) || 10000;
       const start = Date.now();
+      const baseline = changed ? (document.querySelector(selector)?.textContent ?? null) : null;
       const check = () => {
         const el = document.querySelector(selector);
-        if (el && (text === undefined || text === null || (el.textContent ?? '').includes(text))) {
+        if (changed) {
+          const current = el ? (el.textContent ?? '') : null;
+          if (current !== baseline) {
+            resolve({ found: true, changed: true, waitedMs: Date.now() - start, outerHTML: el ? el.outerHTML.slice(0, 2000) : null });
+            return;
+          }
+        } else if (el && (text === undefined || text === null || (el.textContent ?? '').includes(text))) {
           resolve({ found: true, waitedMs: Date.now() - start, outerHTML: el.outerHTML.slice(0, 2000) });
           return;
         }
         if (Date.now() - start >= limit) {
-          reject(new Error(`dom.wait timed out after ${limit}ms waiting for '${selector}'${text ? ` containing "${text}"` : ''}`));
+          reject(new Error(`dom.wait timed out after ${limit}ms waiting for '${selector}'${changed ? ' to change from its baseline content' : text ? ` containing "${text}"` : ''}`));
           return;
         }
         setTimeout(check, 150);
@@ -519,14 +536,17 @@
         if (!db.objectStoreNames.contains(store)) { db.close(); reject(new Error(`no such store: ${store}`)); return; }
         const tx = db.transaction(store, 'readwrite');
         const os = tx.objectStore(store);
-        let deleted = 0;
-        let failed = 0;
-        tx.oncomplete = () => { db.close(); resolve({ deleted, failed }); };
+        // deletedKeys/failedKeys (not just counts) so a caller can confirm
+        // exactly which rows went away without a follow-up idb.dump/
+        // snapshot just to double-check the delete actually happened.
+        const deletedKeys = [];
+        const failedKeys = [];
+        tx.oncomplete = () => { db.close(); resolve({ deleted: deletedKeys.length, failed: failedKeys.length, deletedKeys, failedKeys }); };
         tx.onerror = () => { db.close(); reject(tx.error); };
         for (const key of keys || []) {
           const req = os.delete(key);
-          req.onsuccess = () => { deleted += 1; };
-          req.onerror = () => { failed += 1; };
+          req.onsuccess = () => { deletedKeys.push(key); };
+          req.onerror = () => { failedKeys.push(key); };
         }
       }, reject);
     }),
@@ -596,6 +616,63 @@
         db.close();
         resolve({ name: DB_NAME, version });
       }, reject);
+    }),
+    // Answers "is an IndexedDB version-upgrade to targetVersion blocked
+    // RIGHT NOW, and by what" - db.version alone only reports the CURRENT
+    // live version, it can't tell a caller why a later "page reload" hangs.
+    // Confirmed live: an upgrade hangs indefinitely (`blocked` fires, then
+    // nothing) if ANY other tab on this origin - web-scout-connected or
+    // not - still holds a connection at an older version; previously the
+    // only way to see this was hand-rolling this exact indexedDB.open +
+    // onblocked probe via `eval`. This IS that probe, made reusable.
+    // Deliberately never commits a real upgrade: onupgradeneeded aborts its
+    // own versionchange transaction immediately, so this call cannot change
+    // the schema itself even when nothing is blocking it - it's read-only
+    // diagnostics, not a migration trigger. Resolves fast (own short
+    // internal wait, not the open() request's own eventual settlement,
+    // which could otherwise hang exactly as long as the real blockage
+    // would) - `blocked:true` without waiting for the blocking tab to close.
+    'db.probeUpgrade': ({ targetVersion }) => new Promise((resolve, reject) => {
+      if (targetVersion === undefined || targetVersion === null) { reject(new Error('db.probeUpgrade requires targetVersion')); return; }
+      const start = Date.now();
+      let settled = false;
+      let blocked = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        resolve({ blocked, waitedMs: Date.now() - start, ...result });
+      };
+      let req;
+      try {
+        req = indexedDB.open(DB_NAME, Number(targetVersion));
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      req.onblocked = () => { blocked = true; };
+      req.onupgradeneeded = () => {
+        // Never actually run the app's own migration logic here - abort the
+        // versionchange transaction immediately, this call is a probe only.
+        try { req.transaction.abort(); } catch { /* already aborting */ }
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        db.close();
+        finish({ opened: true, note: blocked ? 'was blocked but opened during the probe window (the blocking tab closed just in time)' : 'opened immediately - no other connection is holding an older version' });
+      };
+      req.onerror = () => {
+        // Expected path when onupgradeneeded aborts the transaction (an
+        // AbortError, not a real failure) - the probe still answers the
+        // question either way.
+        finish({ opened: false, note: blocked ? 'blocked by another connection (see blocked:true) - the probe request is still pending in the background and will resolve on its own once that connection closes, but this reply does not wait for it' : 'probe transaction aborted as designed - not blocked' });
+      };
+      // Own short deadline, independent of the open() request's own
+      // eventual settlement - a real blockage can last as long as the
+      // blocking tab stays open, and this call must not hang that long
+      // just to answer "is it blocked right now".
+      setTimeout(() => {
+        if (blocked) finish({ opened: false, note: 'still blocked after the probe window - another connection (likely another open tab) is holding an older version; close it, then "page reload"' });
+      }, 1500);
     }),
     // Attach-and-wait for a specific in-flight/about-to-fire request,
     // matched by substring against its URL. Exists because a long request
@@ -746,7 +823,7 @@
       let timer;
       const timeout = new Promise((_, reject) => {
         timer = setTimeout(() => reject(new Error(
-          `eval did not resolve within ${limit}ms. If this expression contains an unresolved 'await' (e.g. a Promise that never settles), that is the likely cause. If instead it contains a SYNCHRONOUS infinite loop, this message will never actually arrive - the tab is frozen, not just slow; reload the page. Pass a larger timeoutMs if this is expected to take longer.`,
+          `eval did not resolve within ${limit}ms. If this expression contains an unresolved 'await' (e.g. a Promise that never settles), that is the likely cause. If instead it contains a SYNCHRONOUS infinite loop, this message will never actually arrive - the tab is frozen, not just slow; reload the page. If this call is EXPECTED to take longer (e.g. a real AI-provider round trip), pass --timeout <ms> on the CLI (or timeoutMs in the MCP tool params) - the default is only ${limit}ms and is NOT related to any server-side/provider timeout.`,
         )), limit);
       });
       let result;
