@@ -2188,6 +2188,141 @@ draws it, so "is the strategy improving" has an answer. Storage-dedup ledgers
 cannot be bucketed by day (they derive from ref counts), so the trend covers
 delivery only. `session end` prints its own line (scoped reads, cache hits).
 
+## V31 - visible staleness, measured scoping, and test hygiene (implemented)
+
+Ten lessons from V30, each a gap it left open or exposed.
+
+**A tab that runs old code says so (lesson 1).** V30 changed `inject.js`, but the
+app pins the script with `?v=4`, so a tab would keep running the old agent and every
+new behaviour would silently be missing. `inject.js` now carries `AGENT_BUILD`, a
+hash of the file with the stamp blanked (`build-id.mjs --stamp` writes it,
+`agent-build.test.mjs` fails while it is out of date, the scaffold restamps). A tab
+sends it on connect; `/health` lists `stale_agents`, every reply carries
+`x-webscout-agent-stale`, the CLI/MCP client prints a one-time reload warning, and the
+dashboard marks the tab. A tab that sent no build predates stamps and counts as stale.
+The `?v=` bump in the app is still manual: the stamp says a tab is stale, the query
+string is what makes a browser fetch the new file.
+
+**The relay already knew (lesson 2).** Stale relay code was detected in V21
+(`stale_source_files`, a header, a dashboard badge). What was missing was breadth:
+`build-id.mjs` and `relay-control.mjs` are now on the watch list, and `relay status`
+reports stale tabs next to stale files.
+
+**A kill loop shows (lesson 3).** Autostart recovered from another session's blanket
+`relay.mjs` kill so quietly that the kills went unnoticed. A relay that boots and finds
+the previous one's pidfile left behind records an `unclean-exit` (`relay stop` removes
+the pidfile, so an intentional stop never counts); the client records each
+`autostart`. Both sit in a small log next to the pidfile and surface as
+`events_24h` in `/health`, in `relay status`, and as a dashboard badge.
+
+**Sync script (lessons 4 and 5).** The temp worktree delete retries and never fails
+a run, and a run sweeps stale `web-scout-sync-*` directories first. `--hint` prints
+one line when commits are unpushed (local refs only) and `--install-hook` wires it
+into a post-commit hook that fires only for commits touching `tools/web-scout`.
+
+**Skips are visible (lesson 6).** `WEBSCOUT_REQUIRE_BROWSER=1` (set in CI) turns a
+missing browser into a failure. A skipped test proves nothing, and a runner that lost
+its browser would keep reporting green.
+
+**Encoding traps are tests (lesson 7).** `text-hygiene.test.mjs` fails on any CR,
+control character or U+FFFD in a source, doc or help file - the accidents that used
+to surface through manual byte checks.
+
+**Test traps live in helpers (lesson 8).** `spawnClean` (strips `NODE_TEST_CONTEXT`)
+and `isUp` (a raw-socket probe) in `test-relay.mjs`; the autostart and scaffold tests
+use them.
+
+**Scoping is judged by what the caller does next (lesson 9).** The scoped-read figure
+is an upper bound: the caller may never have made the unscoped call, or may have made
+it right after. A scoped read followed within 90s by the same read on the same tab
+without the narrowing params is now counted as a re-read; `token-report`
+`savings.readStrategy.reRead` gives the rate and the dashboard prints it under the
+trend. A high rate means the bytes were "saved" and then spent.
+
+**The outline is measured, not assumed (lesson 10).** For each whole-page outline the
+page reports the size of the reply it replaced; the relay records both sizes and what
+the caller did next: a different selector (the outline worked as a map) or the same
+selector with `--full` (it was not enough). The storage-dedup total, which cannot be
+bucketed by event, is now sampled (token-report, session end, every six hours) so the
+14-day trend can show its day-to-day change.
+
+## V32 - the ledgers measured disk and round trips; these measure what the caller reads (implemented)
+
+V31 ended on an uncomfortable fact: every saving ledger except scoped reads counts
+bytes not stored or a page trip not made. The figure that is the real spend - what a
+caller's context actually receives - barely moved. V32 is ten changes aimed at
+delivery, built on one rule: the relay logs and caches the FULL result, and only the
+reply changes, and only when the caller asked or the session budget forced it.
+Default replies are unchanged.
+
+**A repeat read can be a pointer (1) or a delta (2).** A cache hit used to re-send the
+whole body, so it saved a page round trip and no tokens. `--if-changed` answers an
+unchanged repeat with `{unchanged:true, sameAs:<action id>, omittedBytes}`; `--delta`
+also answers a changed page with only what changed (per array: rows added, changed and
+removed by id; `net.log`/`console.log` entries have no id, so they are matched by
+content and removed ones are counted, not listed). Both are opt-in because they are only
+correct while the earlier result is still in the caller's context. The relay tracks what
+was actually DELIVERED per session and call, by object identity, so a pointer is never
+offered against a body the caller only saw a peek of, and a delta falls back to the
+full body unless it is at least 30% smaller.
+
+**No indentation (3), keys once (4).** stdout was `JSON.stringify(result, null, 2)`:
+indentation and newlines are tokens on every call. It is compact when piped now (a
+terminal, `--pretty` or `WEBSCOUT_PRETTY=1` keeps the indented form; MCP text is
+compact). `--table` returns rows as `{columns, rows:[[...]]}`; it is presentation only
+(the ledger, cache and DB keep objects), applies to 3+ row-objects that share keys, is
+lossless (`sparse:true` marks a missing column) and is only used when smaller.
+
+**Ask for the shape first (5).** `--peek` returns counts, columns, one sample row, the
+byte size and an estimated-token band instead of the body. The full result is cached,
+so the follow-up read costs the caller the body and the page nothing. What the caller
+does next is measured: a narrowed read (the peek worked as a map) or the whole body
+anyway (`peekThenFull`, whose bytes are taken back out of the peek's saving).
+
+**The budget acts (6).** `--token-budget` only warned when a session ended over it. It
+now arms a guard: past 60% of the budget a read over ~3000 estimated tokens returns its
+shape (`guarded:true`, `--no-guard` forces the body) and rows come back tabular; past
+85% the limit is ~1000. One stderr note per level. The running total the budget follows
+counts bytes delivered after shaping, not bytes logged. `WEBSCOUT_READ_GUARD_TOKENS`
+arms the same guard with no budget.
+
+**Hints from behaviour, and whether they worked (7).** The relay watches how a session
+reads and says one line: a full read right after the same target was scoped (naming the
+scope the caller used), repeated full reads after scoping (use `--delta`/`--table`),
+an identical read re-delivered in full from cache twice (add `--if-changed`). Each once
+per target per session. `readStrategy.hints.adopted` counts the ones followed, so a
+hint that nobody acts on shows up as noise instead of staying in the product.
+
+**CI catches a change that makes replies bigger (8).** `token-benchmark.test.mjs` runs a
+scripted baseline -> action -> verify session twice against a fixture: default reads and
+the documented strategy. Default replies are pinned to a byte budget; the strategy has to
+stay under a fraction of them. The fixture is a best case for the strategy, so the ratio is
+a ceiling on the effect, not a forecast for real sessions. Doing this exposed a real bug
+first: `inject.js`'s `openDb()` created an empty database when the app had not, so the
+new automatic briefing would have left the app's own first `open(name, 1)` without its
+upgrade. It now rolls the creation back, and the briefing skips a tab on an older agent.
+
+**The estimator says how sure it is (9).** chars/4 remains the ledger unit (every past
+number stays comparable) but is one ratio for JSON, markup and prose. `savings.estimator`
+carries a low..high band per kind and `spend.estTokensBand` brackets the total. The band
+is a rule of thumb until `calibrate-tokens.mjs --write` measures real ratios with the
+token-counting endpoint (needs `ANTHROPIC_API_KEY`; it was not run for this release, so the
+shipped bands are labelled uncalibrated).
+
+**A briefing at session start (10).** `session start` returns store row counts, the DB
+version and whether the tab and relay are current, from one bounded read - the 5-8
+exploratory `idb list` / `db version-check` calls that open most sessions. Best-effort:
+no tab, a slow page or a stale agent yields `{available:false, reason}`, never a failed
+start; not a logged action; `--no-briefing` skips it.
+
+**Honest limits.** Shaping savings are measured against the full result the same call
+would have returned, so unlike scoped reads they are not an upper bound, but they are
+still not "tokens saved": the per-session `token-report` ("Read by callers") counts full
+results as logged, and the new `deliveryShaping` ledger and the receipt carry the
+difference. A pointer or delta trusts the caller's word that it still holds the earlier
+result. The tight thresholds (60% / 85%, 3000 / 1000 tokens, 30% delta margin) are
+judgement, not measured optima.
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

@@ -16,6 +16,12 @@
 // params: { '--flag': 'mcpParamName' }. cliOnly: { '--flag': 'why' }.
 // lenient: true = an unknown --flag is treated as data (eval's expression).
 
+// Reply shaping every cacheable read accepts (see read-pipeline.mjs): rows as
+// {columns, rows}, a pointer/delta instead of a repeat body, a shape-only peek, and
+// the override for the session-budget guard.
+const SHAPE_BOOL = ['--table', '--if-changed', '--delta', '--peek', '--no-guard'];
+const SHAPE_PARAMS = { '--table': 'table', '--if-changed': 'ifChanged', '--delta': 'delta', '--peek': 'peek', '--no-guard': 'noGuard' };
+
 const NOMCP_PROCESS = 'process control of the relay itself - not something an MCP tool call should be able to do to its own backend';
 
 export const CLI_SPEC = [
@@ -35,9 +41,9 @@ export const CLI_SPEC = [
   { cmd: 'relay status', pos: [0, 0], mcp: null, mcpExempt: NOMCP_PROCESS },
 
   {
-    cmd: 'session start', pos: [1, 2], bool: ['--strict-crv', '--auto-snapshot'], val: ['--tags', '--stores', '--token-budget', '--agent'],
+    cmd: 'session start', pos: [1, 2], bool: ['--strict-crv', '--auto-snapshot', '--no-briefing'], val: ['--tags', '--stores', '--token-budget', '--agent'],
     mcp: 'webscout_session.start',
-    params: { '--strict-crv': 'strictCrv', '--stores': 'strictCrvStores', '--tags': 'tags', '--token-budget': 'tokenBudget' },
+    params: { '--strict-crv': 'strictCrv', '--stores': 'strictCrvStores', '--tags': 'tags', '--token-budget': 'tokenBudget', '--no-briefing': 'noBriefing' },
     cliOnly: { '--auto-snapshot': 'convenience wrapper - an MCP caller takes an explicit webscout_idb snapshot action' },
   },
   { cmd: 'session end', pos: [0, 1], mcp: 'webscout_session.end' },
@@ -56,15 +62,15 @@ export const CLI_SPEC = [
   { cmd: 'verity import', pos: [2, 2], val: ['--label'], mcp: 'webscout_session.verity_import', params: { '--label': 'label' } },
 
   {
-    cmd: 'dom query', pos: [0, 1], bool: ['--full', '--meta'], val: ['--selector-file', '--agent'], mcp: 'webscout_dom.query',
-    params: { '--full': 'full', '--meta': 'meta' }, cliOnly: { '--selector-file': 'shell-quoting workaround - an MCP caller passes the selector as a JSON string' },
+    cmd: 'dom query', pos: [0, 1], bool: ['--full', '--meta', ...SHAPE_BOOL], val: ['--selector-file', '--agent'], mcp: 'webscout_dom.query',
+    params: { '--full': 'full', '--meta': 'meta', ...SHAPE_PARAMS }, cliOnly: { '--selector-file': 'shell-quoting workaround - an MCP caller passes the selector as a JSON string' },
   },
   { cmd: 'dom click', pos: [0, 1], val: ['--nth', '--selector-file', '--agent'], mcp: 'webscout_dom.click', params: { '--nth': 'nth' }, cliOnly: { '--selector-file': 'shell-quoting workaround' } },
   { cmd: 'dom fill', pos: [1, 2], val: ['--nth', '--selector-file', '--agent'], mcp: 'webscout_dom.fill', params: { '--nth': 'nth' }, cliOnly: { '--selector-file': 'shell-quoting workaround' } },
-  { cmd: 'dom rect', pos: [0, 1], val: ['--selector-file', '--agent'], mcp: 'webscout_dom.rect', cliOnly: { '--selector-file': 'shell-quoting workaround' } },
-  { cmd: 'react inspect', pos: [0, 1], val: ['--nth', '--selector-file', '--agent'], mcp: 'webscout_react.inspect', params: { '--nth': 'nth' }, cliOnly: { '--selector-file': 'shell-quoting workaround' } },
-  { cmd: 'react tree', pos: [0, 2], val: ['--nth', '--selector-file', '--agent'], mcp: 'webscout_react.tree', params: { '--nth': 'nth' }, cliOnly: { '--selector-file': 'shell-quoting workaround' } },
-  { cmd: 'dom style', pos: [0, 2], val: ['--selector-file', '--agent'], mcp: 'webscout_dom.style', cliOnly: { '--selector-file': 'shell-quoting workaround' } },
+  { cmd: 'dom rect', pos: [0, 1], bool: SHAPE_BOOL, val: ['--selector-file', '--agent'], mcp: 'webscout_dom.rect', params: SHAPE_PARAMS, cliOnly: { '--selector-file': 'shell-quoting workaround' } },
+  { cmd: 'react inspect', pos: [0, 1], bool: SHAPE_BOOL, val: ['--nth', '--selector-file', '--agent'], mcp: 'webscout_react.inspect', params: { '--nth': 'nth', ...SHAPE_PARAMS }, cliOnly: { '--selector-file': 'shell-quoting workaround' } },
+  { cmd: 'react tree', pos: [0, 2], bool: SHAPE_BOOL, val: ['--nth', '--selector-file', '--agent'], mcp: 'webscout_react.tree', params: { '--nth': 'nth', ...SHAPE_PARAMS }, cliOnly: { '--selector-file': 'shell-quoting workaround' } },
+  { cmd: 'dom style', pos: [0, 2], bool: SHAPE_BOOL, val: ['--selector-file', '--agent'], mcp: 'webscout_dom.style', params: SHAPE_PARAMS, cliOnly: { '--selector-file': 'shell-quoting workaround' } },
   {
     cmd: 'dom wait', pos: [0, 1], bool: ['--changed', '--stable'], val: ['--text', '--timeout', '--stable-count', '--selector-file', '--agent'], mcp: 'webscout_dom.wait',
     params: { '--changed': 'changed', '--stable': 'stable', '--text': 'text', '--timeout': 'timeoutMs', '--stable-count': 'stableCount' }, cliOnly: { '--selector-file': 'shell-quoting workaround' },
@@ -77,9 +83,9 @@ export const CLI_SPEC = [
   { cmd: 'dom settle', pos: [0, 1], val: ['--quiet-ms', '--timeout', '--agent'], mcp: 'webscout_dom.settle', params: { '--quiet-ms': 'quietMs', '--timeout': 'timeoutMs' } },
   { cmd: 'dom screenshot', pos: [0, 1], val: ['--out', '--agent'], mcp: 'webscout_dom.screenshot', params: { '--out': 'outPath' } },
 
-  { cmd: 'idb list', pos: [0, 0], val: ['--agent'], mcp: 'webscout_idb.list' },
-  { cmd: 'idb dump', pos: [1, 1], val: ['--where', '--fields', '--limit', '--agent'], mcp: 'webscout_idb.dump', params: { '--where': 'where', '--fields': 'fields', '--limit': 'limit' } },
-  { cmd: 'idb get', pos: [2, 2], val: ['--agent'], mcp: 'webscout_idb.get' },
+  { cmd: 'idb list', pos: [0, 0], bool: SHAPE_BOOL, val: ['--agent'], mcp: 'webscout_idb.list', params: SHAPE_PARAMS },
+  { cmd: 'idb dump', pos: [1, 1], bool: SHAPE_BOOL, val: ['--where', '--fields', '--limit', '--agent'], mcp: 'webscout_idb.dump', params: { '--where': 'where', '--fields': 'fields', '--limit': 'limit', ...SHAPE_PARAMS } },
+  { cmd: 'idb get', pos: [2, 2], bool: SHAPE_BOOL, val: ['--agent'], mcp: 'webscout_idb.get', params: SHAPE_PARAMS },
   {
     cmd: 'idb snapshot', pos: [0, 0], val: ['--stores', '--where', '--golden', '--since', '--agent'], mcp: 'webscout_idb.snapshot',
     params: { '--stores': 'stores', '--where': 'where', '--golden': 'golden', '--since': 'since' },
@@ -96,7 +102,7 @@ export const CLI_SPEC = [
   { cmd: 'idb wait', pos: [1, 1], val: ['--count-gte', '--timeout', '--agent'], mcp: 'webscout_idb.wait', params: { '--count-gte': 'countGte', '--timeout': 'timeoutMs' } },
   { cmd: 'idb watch', pos: [1, 1], val: ['--count-gte', '--timeout', '--agent'], mcp: null, mcpExempt: 'an indefinite streaming poll with no single request/response mapping - MCP callers use "idb wait" for a bounded check' },
 
-  { cmd: 'net log', pos: [0, 0], val: ['--limit', '--url', '--agent'], mcp: 'webscout_net.log', params: { '--limit': 'limit', '--url': 'urlContains' } },
+  { cmd: 'net log', pos: [0, 0], bool: SHAPE_BOOL, val: ['--limit', '--url', '--agent'], mcp: 'webscout_net.log', params: { '--limit': 'limit', '--url': 'urlContains', ...SHAPE_PARAMS } },
   { cmd: 'net wait', pos: [1, 1], val: ['--timeout', '--grace', '--agent'], mcp: 'webscout_net.wait', params: { '--timeout': 'timeoutMs', '--grace': 'graceMs' } },
   {
     cmd: 'net history', pos: [0, 0], val: ['--filter', '--min-duration', '--sort', '--limit', '--session'], mcp: 'webscout_net.history',
@@ -104,7 +110,7 @@ export const CLI_SPEC = [
   },
   { cmd: 'net capture', pos: [0, 1], bool: ['--off'], val: ['--agent'], mcp: 'webscout_net.capture', params: { '--off': 'off' } },
   { cmd: 'net clear', pos: [0, 0], val: ['--agent'], mcp: 'webscout_net.clear' },
-  { cmd: 'console log', pos: [0, 0], val: ['--limit', '--agent'], mcp: 'webscout_console.log', params: { '--limit': 'limit' } },
+  { cmd: 'console log', pos: [0, 0], bool: SHAPE_BOOL, val: ['--limit', '--agent'], mcp: 'webscout_console.log', params: { '--limit': 'limit', ...SHAPE_PARAMS } },
   { cmd: 'console wait', pos: [1, 1], val: ['--timeout', '--grace', '--agent'], mcp: 'webscout_console.wait', params: { '--timeout': 'timeoutMs', '--grace': 'graceMs' } },
   { cmd: 'console clear', pos: [0, 0], val: ['--agent'], mcp: 'webscout_console.clear' },
 
@@ -128,6 +134,9 @@ export const CLI_SPEC = [
   { cmd: 'suite run', pos: [1, 1], bool: ['--continue-on-error'], mcp: 'webscout_suite.run', params: { '--continue-on-error': 'continueOnError' } },
 ];
 
+// Output formatting, accepted by every command and never sent to the relay.
+export const UNIVERSAL_BOOL = new Set(['--pretty']);
+
 const BY_CMD = new Map(CLI_SPEC.map((s) => [s.cmd, s]));
 
 // Longest match first: "dom click-wait" before "dom click" is not an issue
@@ -148,7 +157,7 @@ export function validateArgs(command, rest) {
   const unknown = [];
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
-    if (bool.has(a)) continue;
+    if (bool.has(a) || UNIVERSAL_BOOL.has(a)) continue;
     if (val.has(a)) { i += 1; continue; }
     // Only a bare --word counts as a flag: a fill value like "-- Choose --" (has spaces) is data.
     if (!spec.lenient && /^--[a-z][a-z0-9-]*$/i.test(a)) unknown.push(a);

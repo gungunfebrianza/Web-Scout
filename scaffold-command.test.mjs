@@ -2,11 +2,11 @@
 // parse, and command-coverage.test.mjs refuses the result until it is finished.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnClean } from './test-relay.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -17,9 +17,7 @@ function copyTool() {
   }
   return tmp;
 }
-// NODE_TEST_CONTEXT would make a nested `node --test` behave as a child of this runner and always exit 0
-const { NODE_TEST_CONTEXT, ...cleanEnv } = process.env;
-const run = (cwd, ...args) => spawnSync(process.execPath, args, { cwd, encoding: 'utf8', timeout: 60000, env: cleanEnv });
+const run = (cwd, ...args) => spawnClean(args, { cwd });
 const touched = ['inject.js', 'command-registry.mjs', 'cli.mjs', 'cli-spec.mjs', 'usage.txt', 'mcp-server.mjs'];
 
 test('scaffolding dom.hover stubs all six files, each still parses, and the coverage test then fails on the markers', () => {

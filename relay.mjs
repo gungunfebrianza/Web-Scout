@@ -40,14 +40,18 @@ import {
   STRICT_CRV_TYPES, LONG_POLL_TYPES, DEFAULT_MACRO_TYPES, TIMEOUT_VERIFIABLE_TYPES,
   AUTO_SCREENSHOT_ON_FAILURE_TYPES, READ_CACHEABLE_TYPES, MUTATING_TYPES, COMMAND_TYPES,
 } from './command-registry.mjs';
-import { RELAY_SOURCE_FILES, writePidfile, removePidfile } from './relay-control.mjs';
+import { RELAY_SOURCE_FILES, writePidfile, removePidfile, readPidfile, pidAlive, recordRelayEvent, readRelayEvents, summarizeRelayEvents } from './relay-control.mjs';
+import { currentInjectBuild } from './build-id.mjs';
+import { createReadPipeline, readTargetKey, SCOPING_PARAM_KEYS, FOLLOW_UP_WINDOW_MS, budgetLevel, BUDGET_TIGHTEN_PCT, BUDGET_STRICT_PCT } from './read-pipeline.mjs';
+import { sizeOf } from './read-shape.mjs';
+import { estimatorInfo, baselineBand } from './token-estimate.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
 // Bumped alongside docs/web-scout-roadmap.md's latest "## VN" entry - purely
 // informational (the dashboard's About panel), never read by any behavior.
-const WEBSCOUT_VERSION = '0.18.0'; // bumped alongside docs/web-scout-roadmap.md's V29 entry
+const WEBSCOUT_VERSION = '0.19.0'; // bumped alongside docs/web-scout-roadmap.md's V32 entry
 const COMMAND_TIMEOUT_MS = 15000; // interactive dom/net/eval round trips
 const SNAPSHOT_TIMEOUT_MS = 60000; // bulk idb.snapshot reads can be large
 // Short, independent budgets for two round trips that must never inherit
@@ -112,23 +116,86 @@ const replyEpochs = new WeakMap();
 let readCachePageStaleMisses = 0; // hits the page-change probe turned into misses (this relay run)
 
 const replyAvoided = new WeakMap(); // reply result -> bytes a scoped read left out (inject.js ctx.avoidedBytes)
-const sessionSavingsTally = new Map(); // sessionId -> { scopedCalls, avoidedBytes, cacheHits, cacheBytes } for the end-of-session receipt
+const sessionSavingsTally = new Map(); // sessionId -> { scopedCalls, avoidedBytes, cacheHits, cacheBytes, shapedCalls, shapedBytes } for the end-of-session receipt
 
 function tally(sessionId) {
-  if (!sessionSavingsTally.has(sessionId)) sessionSavingsTally.set(sessionId, { scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0 });
+  if (!sessionSavingsTally.has(sessionId)) sessionSavingsTally.set(sessionId, { scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0, shapedCalls: 0, shapedBytes: 0 });
   return sessionSavingsTally.get(sessionId);
 }
 
-function noteCacheHit(sessionId, bytes) {
+// `bytes` is the size of the cached result (the page round trip skipped);
+// `deliveredBytes` is what the caller actually received, which is smaller when a
+// pointer/peek/table replaced the body - and is what the running total counts.
+function noteCacheHit(sessionId, bytes, deliveredBytes = bytes) {
   dbApi.bumpReadCacheSavings(bytes);
-  sessionCacheHitBytes.set(sessionId, (sessionCacheHitBytes.get(sessionId) || 0) + bytes);
+  sessionCacheHitBytes.set(sessionId, (sessionCacheHitBytes.get(sessionId) || 0) + deliveredBytes);
   const t = tally(sessionId);
   t.cacheHits += 1;
   t.cacheBytes += bytes;
 }
 
-function noteScopedRead(sessionId, result) {
-  const avoided = result && typeof result === 'object' ? replyAvoided.get(result) : undefined;
+// A logged action always records the FULL result; when a shaped reply (peek,
+// table, delta) sent the caller less, the difference is taken off the session's
+// running total so the header and the token budget follow what was delivered.
+const sessionDeliveryAdjust = new Map(); // sessionId -> bytes (<= 0)
+function noteWithheld(sessionId, bytes) {
+  if (bytes > 0) sessionDeliveryAdjust.set(sessionId, (sessionDeliveryAdjust.get(sessionId) || 0) - bytes);
+}
+
+// The session's running estimated-token total, as the client prints it: logged
+// results + cache-hit deliveries - what shaping withheld.
+function sessionRunningTokens(sessionId) {
+  const extraBytes = (sessionCacheHitBytes.get(sessionId) || 0) + (sessionDeliveryAdjust.get(sessionId) || 0);
+  return Math.max(0, dbApi.getSessionTokensSoFar(sessionId) + Math.round(extraBytes / dbApi.CHARS_PER_TOKEN_ESTIMATE));
+}
+
+const readPipeline = createReadPipeline({ bump: (key, bytes) => dbApi.bumpSavingsDaily(key, bytes) });
+const READ_GUARD_ENV_TOKENS = Number(process.env.WEBSCOUT_READ_GUARD_TOKENS);
+
+const replyOutlineOld = new WeakMap(); // reply result -> bytes the pre-outline default reply would have been (inject.js ctx.outlineOldBytes)
+
+// Was scoping enough? See SCOPING_PARAM_KEYS in read-pipeline.mjs: a scoped read
+// followed within the window by the same read on the same tab WITHOUT the
+// narrowing params means the caller paid for the rest anyway.
+const UNSCOPED_FOLLOW_UP_WINDOW_MS = FOLLOW_UP_WINDOW_MS;
+const recentScopedReads = new Map(); // `${agent}::${type}::${target}` -> ms
+const recentOutlines = new Map(); // agent -> { selector, at }
+
+function prune(map, now) {
+  if (map.size < 200) return;
+  for (const [k, v] of map) if (now - (typeof v === 'number' ? v : v.at) > UNSCOPED_FOLLOW_UP_WINDOW_MS) map.delete(k);
+}
+
+function noteScopedRead(sessionId, result, { agentName = DEFAULT_AGENT, type, params } = {}) {
+  const isObj = result && typeof result === 'object';
+  const avoided = isObj ? replyAvoided.get(result) : undefined;
+  const now = Date.now();
+  if (type === 'dom.query' && isObj) {
+    const selector = String(params?.selector ?? '');
+    const prev = recentOutlines.get(agentName);
+    if (prev && now - prev.at <= UNSCOPED_FOLLOW_UP_WINDOW_MS && !Array.isArray(result.outline)) {
+      // the next dom.query on this tab after an outline: the same selector with --full says the outline was not enough, any other selector says it worked as a map
+      if (selector === prev.selector && params?.full) dbApi.bumpSavingsDaily('outlineFollowFull', 0);
+      else if (selector !== prev.selector) dbApi.bumpSavingsDaily('outlineFollowDrill', 0);
+      recentOutlines.delete(agentName);
+    }
+    if (Array.isArray(result.outline)) {
+      dbApi.bumpSavingsDaily('outline', JSON.stringify(result).length);
+      dbApi.bumpSavingsDaily('outlineOldDefault', replyOutlineOld.get(result) ?? 0);
+      recentOutlines.set(agentName, { selector, at: now });
+      prune(recentOutlines, now);
+    }
+  }
+  if (type && SCOPING_PARAM_KEYS[type] && isObj) {
+    const target = `${agentName}::${type}::${readTargetKey(type, params)}`;
+    if (avoided) {
+      recentScopedReads.set(target, now);
+      prune(recentScopedReads, now);
+    } else if (now - (recentScopedReads.get(target) ?? -Infinity) <= UNSCOPED_FOLLOW_UP_WINDOW_MS) {
+      recentScopedReads.delete(target);
+      dbApi.bumpSavingsDaily('reReadAfterScoped', JSON.stringify(result).length);
+    }
+  }
   if (!avoided) return;
   dbApi.bumpSavingsDaily('scopedReads', avoided);
   const t = tally(sessionId);
@@ -155,10 +222,16 @@ async function lookupReadCache(sessionId, cacheKey, agentName) {
   return null;
 }
 
-function storeReadCache(sessionId, cacheKey, result) {
+function storeReadCache(sessionId, cacheKey, result, actionId) {
   if (!readResultCache.has(sessionId)) readResultCache.set(sessionId, new Map());
   const pageEpoch = result && typeof result === 'object' ? replyEpochs.get(result) : undefined;
-  readResultCache.get(sessionId).set(cacheKey, { result, mutationCounter: getMutationCounter(sessionId), pageEpoch, cachedAt: new Date().toISOString() });
+  readResultCache.get(sessionId).set(cacheKey, { result, actionId, mutationCounter: getMutationCounter(sessionId), pageEpoch, cachedAt: new Date().toISOString() });
+}
+
+// Token budget for the active session (--token-budget): its level drives the read
+// guard and tabular output in read-pipeline.mjs. null when no budget was declared.
+function currentBudget(session) {
+  return budgetLevel(session.token_budget, sessionRunningTokens(session.id));
 }
 
 function goalWordSet(goal) {
@@ -374,6 +447,7 @@ function handleAgentMessage(text, agentName) {
       if (msg.result && typeof msg.result === 'object') {
         if (typeof msg.epoch === 'number') replyEpochs.set(msg.result, msg.epoch);
         if (typeof msg.avoided === 'number' && msg.avoided > 0) replyAvoided.set(msg.result, msg.avoided);
+        if (typeof msg.outlineOld === 'number') replyOutlineOld.set(msg.result, msg.outlineOld);
       }
       entry.resolve(msg.result);
     }
@@ -463,6 +537,50 @@ function summarizeByStore(list) {
   }
   for (const store of Object.keys(byStore)) byStore[store].estTokens = Math.round(byStore[store].estBytes / dbApi.CHARS_PER_TOKEN_ESTIMATE);
   return { total: list.length, totalEstTokens: Math.round(totalBytes / dbApi.CHARS_PER_TOKEN_ESTIMATE), byStore };
+}
+
+// ---------- Warm-start briefing ----------
+//
+// The first minutes of a session are nearly always the same handful of reads:
+// which stores exist, how many rows, what DB version, is the tab current. One
+// bounded call at `session start` answers them all, so the caller does not spend
+// 5-8 exploratory round trips (and their tokens) finding out. Best-effort by
+// design: no connected tab, a slow page or a handler error just yields
+// {available:false, reason}, never a failed session start. Not a logged action.
+const BRIEFING_MAX_STORES = 60;
+const BRIEFING_TIMEOUT_MS = PING_TIMEOUT_MS * 2;
+
+async function buildBriefing(agentName) {
+  const entry = agents.get(agentName);
+  if (!entry?.socket || entry.socket.destroyed) return { available: false, reason: `no tab connected as '${agentName}' - open the app, then "status" shows it` };
+  const build = agentBuildStatus(entry);
+  // A tab on an older inject.js may still create an empty database when asked to list one
+  // that does not exist yet; an automatic call must not risk that, so it waits for a reload.
+  if (build.agentStale) return { available: false, reason: 'this tab runs an older in-page agent than inject.js on disk - reload it ("page reload --hard"), then briefing works; nothing was asked of the page' };
+  try {
+    const [list, version] = await Promise.all([
+      dispatchCommand('idb.list', {}, BRIEFING_TIMEOUT_MS, agentName),
+      dispatchCommand('db.version', {}, BRIEFING_TIMEOUT_MS, agentName),
+    ]);
+    const counts = list?.counts ?? {};
+    const nonEmpty = Object.entries(counts).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+    const shown = nonEmpty.slice(0, BRIEFING_MAX_STORES);
+    const staleFiles = getStaleSourceFiles();
+    return {
+      available: true,
+      agent: agentName,
+      db: { name: version?.name ?? null, version: version?.version ?? null },
+      storeCount: (list?.stores ?? Object.keys(counts)).length,
+      stores: Object.fromEntries(shown),
+      ...(nonEmpty.length > shown.length ? { storesOmitted: nonEmpty.length - shown.length } : {}),
+      emptyStores: (list?.stores ?? Object.keys(counts)).length - nonEmpty.length,
+      tab: { build: build.build, agentStale: build.agentStale },
+      ...(staleFiles.length ? { relayStaleSourceFiles: staleFiles } : {}),
+      note: 'this answers "idb list" and "db version-check" for now; row counts are as of session start',
+    };
+  } catch (err) {
+    return { available: false, reason: `briefing skipped: ${err.message}` };
+  }
 }
 
 // ---------- Action logging wrapper (requirement 1: every action recorded) ----------
@@ -695,7 +813,23 @@ function agentsDetail() {
       // comment. waitForReconnect uses a CHANGED loadId, not just a later
       // connectedAt, as its proof of an actual reload.
       loadId: a.loadId ?? null,
+      ...agentBuildStatus(a),
     }));
+}
+
+// A tab keeps the inject.js it loaded until it navigates. `build` is the hash it
+// reported on connect; a tab that sent none predates build stamps, so it is older
+// than any inject.js this relay could compare against.
+function agentBuildStatus(agent) {
+  const expected = currentInjectBuild();
+  const build = agent.build || null;
+  return { build, expectedBuild: expected, agentStale: expected !== null && build !== expected };
+}
+
+function staleAgentNames() {
+  return [...agents.entries()]
+    .filter(([, a]) => a.socket && !a.socket.destroyed && agentBuildStatus(a).agentStale)
+    .map(([name]) => name);
 }
 
 async function gatherReportBundle(sessionId) {
@@ -1030,9 +1164,9 @@ const routes = [
     method: 'GET',
     pattern: /^\/health$/,
     handler: async () => ({
-      status: 'ok', agents_connected: connectedAgentNames(), agents_detail: agentsDetail(), active_session: dbApi.getCurrentSession(), db_version_drift: await getDbVersionDrift(), pending_command_count: pending.size,
+      status: 'ok', agents_connected: connectedAgentNames(), agents_detail: agentsDetail(), stale_agents: staleAgentNames(), active_session: dbApi.getCurrentSession(), db_version_drift: await getDbVersionDrift(), pending_command_count: pending.size,
       // stale_source_files non-empty = this process is running OLDER code than what is on disk - restart it (`relay restart`).
-      relay: { pid: process.pid, started_at: RELAY_STARTED_AT.toISOString(), uptime_seconds: Math.round((Date.now() - RELAY_STARTED_AT.getTime()) / 1000), stale_source_files: getStaleSourceFiles() },
+      relay: { pid: process.pid, started_at: RELAY_STARTED_AT.toISOString(), uptime_seconds: Math.round((Date.now() - RELAY_STARTED_AT.getTime()) / 1000), stale_source_files: getStaleSourceFiles(), events_24h: summarizeRelayEvents(readRelayEvents(PORT)) },
     }),
   },
   {
@@ -1122,7 +1256,11 @@ const routes = [
       });
       broadcastUpdate('session', null);
       openDashboardInBrowser();
-      return session;
+      const briefing = body.briefing === false ? undefined : await buildBriefing(body.agent || DEFAULT_AGENT);
+      const budget = session.token_budget
+        ? { tokens: session.token_budget, tightenAtTokens: Math.round(session.token_budget * BUDGET_TIGHTEN_PCT / 100), strictAtTokens: Math.round(session.token_budget * BUDGET_STRICT_PCT / 100), note: 'past the first mark, reads over ~3000 tokens return their shape (--no-guard forces the body) and rows come back as {columns, rows}; past the second the guard drops to ~1000 tokens' }
+        : undefined;
+      return { ...session, ...(briefing ? { briefing } : {}), ...(budget ? { budget } : {}) };
     },
   },
   {
@@ -1137,6 +1275,7 @@ const routes = [
       // `macro record` (which already exists) has no prompt pointing at it.
       const replayableActionCount = dbApi.listActions(sessionId).filter((a) => a.ok && DEFAULT_MACRO_TYPES.has(a.type)).length;
       const session = dbApi.endSession(sessionId);
+      const deliveredEstTokens = sessionRunningTokens(sessionId); // what the caller actually received, after shaping
       // Nothing under an ended session can change again - an unbounded relay
       // process would otherwise keep every past session's read-result cache
       // and mutation counter alive in memory forever for no benefit.
@@ -1144,8 +1283,11 @@ const routes = [
       sessionMutationCounters.delete(sessionId);
       sessionCacheAwarenessNudged.delete(sessionId);
       sessionCacheHitBytes.delete(sessionId);
+      sessionDeliveryAdjust.delete(sessionId);
+      readPipeline.endSession(sessionId);
       lastReportedSessionTokens.delete(sessionId);
-      const savingsReceipt = sessionSavingsTally.get(sessionId) ?? { scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0 };
+      try { dbApi.snapshotSavings('storage', dbApi.getTokenSavingsReport().byKind.storage.bytesSaved); } catch { /* the receipt never depends on it */ }
+      const savingsReceipt = { ...(sessionSavingsTally.get(sessionId) ?? { scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0, shapedCalls: 0, shapedBytes: 0 }), deliveredEstTokens };
       sessionSavingsTally.delete(sessionId);
       broadcastUpdate('session', null);
       return { ...session, replayableActionCount, savingsReceipt };
@@ -1224,6 +1366,9 @@ const routes = [
       };
       const cost = dbApi.getActionCostReport();
       const scoped = dbApi.getScopedReadSavings();
+      const strategy = dbApi.getReadStrategyStats();
+      const shapedBytes = strategy.shaping.netBytesSaved;
+      const shapedTokens = Math.round(shapedBytes / dbApi.CHARS_PER_TOKEN_ESTIMATE);
       // Storage-side context for the "storage" ledgers: how big the database
       // actually is on disk (main file + write-ahead log) and what it would
       // have been without dedup. Approximate by nature (SQLite does not
@@ -1235,13 +1380,14 @@ const routes = [
         try { dbFileBytes += fs.statSync(`${dbPath}-wal`).size; } catch { /* no WAL file right now */ }
       } catch { /* db path unreadable - leave null */ }
       const storageSaved = dbSavings.byKind.storage.bytesSaved;
+      dbApi.snapshotSavings('storage', storageSaved); // sampled so the trend can show day-to-day storage savings
       return {
         ...cost,
         byTarget: dbApi.getActionCostByTarget(),
         savings: {
           ...dbSavings,
           runtimeReadCache: runtimeCache,
-          totalEstTokensSaved: dbSavings.totalEstTokensSaved + runtimeCache.estTokensSaved + scoped.estTokensSaved,
+          totalEstTokensSaved: dbSavings.totalEstTokensSaved + runtimeCache.estTokensSaved + scoped.estTokensSaved + shapedTokens,
           // The cache skips a page round trip and an action-log row, but the
           // result is still delivered to the caller - a roundtrip saving,
           // not a storage or delivery one.
@@ -1257,13 +1403,21 @@ const routes = [
             bytesSaved: scoped.bytesSaved, estTokensSaved: scoped.estTokensSaved, uniqueBytes: null, logicalBytes: null, reductionPct: null,
             refs: { unique: null, total: scoped.calls, unit: 'scoped reads' },
             note: 'measured against an unscoped call the caller may never have made - an upper bound on what scoping saved them',
+          }, {
+            key: 'deliveryShaping', label: 'Shaped replies', kind: 'delivery', countedInTotal: true,
+            what: 'Replies the caller asked to be smaller (--if-changed / --delta pointers, --peek, --table) or the session budget made smaller (guard, tabular rows). Counted against the full result this same call would have delivered, so unlike scoped reads it is not an upper bound; a peek that was then followed by the full read gets that spend taken back out.',
+            bytesSaved: shapedBytes, estTokensSaved: shapedTokens, uniqueBytes: null, logicalBytes: null, reductionPct: null,
+            refs: { unique: null, total: strategy.shaping.pointer.calls + strategy.shaping.delta.calls + strategy.shaping.peek.calls + strategy.shaping.table.calls, unit: 'shaped replies' },
+            note: 'a pointer or delta is only offered when the caller says it still holds the earlier result - if its context was compacted since, it must repeat the call without the flag',
           }],
           byKind: {
             ...dbSavings.byKind,
             roundtrip: { bytesSaved: runtimeCache.bytesSaved, estTokensSaved: runtimeCache.estTokensSaved },
-            delivery: { bytesSaved: scoped.bytesSaved, estTokensSaved: scoped.estTokensSaved },
+            delivery: { bytesSaved: scoped.bytesSaved + shapedBytes, estTokensSaved: scoped.estTokensSaved + shapedTokens },
           },
           readCache: { pageStaleMisses: readCachePageStaleMisses, note: 'hits the page-change probe turned into misses since this relay started' },
+          readStrategy: strategy,
+          estimator: estimatorInfo(),
           trend: dbApi.getSavingsTrend(14),
           storageContext: {
             dbFileBytes,
@@ -1274,7 +1428,7 @@ const routes = [
           // Spend is what the CALLER read; every ledger above is storage or
           // round-trip. They share a unit (chars/4) but not a meaning - the
           // dashboard shows them side by side, never as a ratio.
-          spend: { calls: cost.totalCalls, estTokens: cost.totalEstTokens },
+          spend: { calls: cost.totalCalls, estTokens: cost.totalEstTokens, estTokensBand: baselineBand(cost.totalEstTokens * dbApi.CHARS_PER_TOKEN_ESTIMATE, 'json') },
         },
       };
     },
@@ -1610,7 +1764,7 @@ const routes = [
           // closes that correctness gap, not just enables the cache-hit
           // path above.
           if (MUTATING_TYPES.has(step.type)) bumpMutationCounter(session.id);
-          noteScopedRead(session.id, result);
+          noteScopedRead(session.id, result, { agentName, type: step.type, params: step.params });
           if (cacheKey) storeReadCache(session.id, cacheKey, result);
           results.push({ type: step.type, ok: true, result, durationMs: Date.now() - stepStartedAt });
         } catch (err) {
@@ -1704,16 +1858,32 @@ const routes = [
       const dispatchTimeoutMs = LONG_POLL_TYPES.has(type) ? (Number(params?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS;
 
       const cacheKey = readCacheKey(agentName, type, params);
+      const budget = cacheKey ? currentBudget(session) : null;
+      // What the caller receives for a read (pointer/delta/peek/table/full) is
+      // decided by read-pipeline.mjs; the FULL result is what gets logged and cached.
+      const deliverRead = ({ full, hit, entry, actionId }) => {
+        const shaped = readPipeline.shape({
+          sessionId: session.id, type, agentName, params, cacheKey, full, hit, entry, actionId, opts: body.opts, budget,
+          envGuardTokens: Number.isFinite(READ_GUARD_ENV_TOKENS) && READ_GUARD_ENV_TOKENS > 0 ? READ_GUARD_ENV_TOKENS : null,
+        });
+        if (hit) noteCacheHit(session.id, sizeOf(full), shaped.outBytes);
+        else noteWithheld(session.id, shaped.fullBytes - shaped.outBytes);
+        if (shaped.mode !== 'full') { const t = tally(session.id); t.shapedCalls += 1; t.shapedBytes += shaped.spared; }
+        const budgetNote = readPipeline.budgetNote(session.id, budget);
+        if (budgetNote) res.setHeader('x-webscout-budget', budgetNote);
+        if (shaped.hint) res.setHeader('x-webscout-hint', shaped.hint);
+        return shaped.out;
+      };
       if (cacheKey) {
         const cached = await lookupReadCache(session.id, cacheKey, agentName);
         if (cached) {
-          noteCacheHit(session.id, JSON.stringify(cached.result).length);
           maybeCacheAwarenessNudge(session.id, res);
-          return { ...cached.result, __cacheHit: true, __cachedAt: cached.cachedAt };
+          return deliverRead({ full: cached.result, hit: true, entry: cached, actionId: cached.actionId });
         }
       }
 
       let resultOut;
+      let freshActionId;
       // idb.put/idb.putMany --dry-run write nothing (readonly transaction,
       // no .put() call in inject.js) - wrapping either in a before/after
       // auto-snapshot+diff pair would pay real snapshot cost to prove a
@@ -1749,15 +1919,19 @@ const routes = [
           crv: { before_snapshot_id: beforeSnap.id, after_snapshot_id: afterSnap.id, diff_id: savedDiff.id, diff_summary: savedDiff.summary },
         };
       } else {
-        const { result } = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
-        noteScopedRead(session.id, result);
+        const { result, actionId } = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
+        noteScopedRead(session.id, result, { agentName, type, params });
         broadcastUpdate('action', session.id);
         maybeMidSessionNudge(session.id, res);
         resultOut = result;
+        freshActionId = actionId;
       }
 
       if (MUTATING_TYPES.has(type)) bumpMutationCounter(session.id);
-      if (cacheKey) storeReadCache(session.id, cacheKey, resultOut);
+      if (cacheKey) {
+        storeReadCache(session.id, cacheKey, resultOut, freshActionId);
+        return deliverRead({ full: resultOut, hit: false, actionId: freshActionId });
+      }
       return resultOut;
     },
   },
@@ -2021,14 +2195,15 @@ const server = http.createServer(async (req, res) => {
     try {
       const staleFiles = getStaleSourceFiles();
       if (staleFiles.length) res.setHeader('x-webscout-relay-stale', staleFiles.join(','));
+      const staleAgents = staleAgentNames();
+      if (staleAgents.length) res.setHeader('x-webscout-agent-stale', staleAgents.join(','));
       const activeSession = dbApi.getCurrentSession();
       if (activeSession) {
         // + cache-hit bytes: see sessionCacheHitBytes above - a cache hit
         // never writes an actions row, so the DB-side sum alone would
         // silently undercount the bytes this reply (and every earlier
         // cache-hit reply this session) actually put in front of the agent.
-        const cacheHitTokens = Math.round((sessionCacheHitBytes.get(activeSession.id) || 0) / dbApi.CHARS_PER_TOKEN_ESTIMATE);
-        const totalTokens = dbApi.getSessionTokensSoFar(activeSession.id) + cacheHitTokens;
+        const totalTokens = sessionRunningTokens(activeSession.id);
         res.setHeader('x-webscout-session-tokens', String(totalTokens));
         // What THIS call added to the running total. Known only once a first
         // total was seen for the session by this process (a relay restarted
@@ -2063,6 +2238,7 @@ server.on('upgrade', (req, socket) => {
   }
   const agentName = searchParams.get('name') || DEFAULT_AGENT;
   const loadId = searchParams.get('loadId') || null;
+  const build = searchParams.get('build') || null;
   const accept = crypto.createHash('sha1').update(key + WS_MAGIC).digest('base64');
   socket.write(
     'HTTP/1.1 101 Switching Protocols\r\n'
@@ -2078,7 +2254,7 @@ server.on('upgrade', (req, socket) => {
     log(`replacing previously connected agent '${agentName}'`);
     existing.socket.destroy();
   }
-  agents.set(agentName, { socket, buffer: Buffer.alloc(0), connectedAt: Date.now(), lastAckAt: null, loadId });
+  agents.set(agentName, { socket, buffer: Buffer.alloc(0), connectedAt: Date.now(), lastAckAt: null, loadId, build });
   log(`agent '${agentName}' connected from`, req.socket.remoteAddress);
   broadcastUpdate('agent', null);
 
@@ -2119,9 +2295,15 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, HOST, () => {
+  // A pidfile left behind by a dead process means the previous relay never ran its
+  // clean shutdown - it was killed (`relay stop` removes the pidfile itself).
+  const previous = readPidfile(PORT);
+  if (previous && previous.pid !== process.pid && !pidAlive(previous.pid)) recordRelayEvent(PORT, { kind: 'unclean-exit', pid: previous.pid, startedAt: previous.startedAt ?? null });
   writePidfile(PORT);
   for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { removePidfile(PORT); process.exit(0); });
   process.on('exit', () => removePidfile(PORT));
+  // sample the storage-dedup total once a day-ish even if nobody asks for a report
+  setInterval(() => { try { dbApi.snapshotSavings('storage', dbApi.getTokenSavingsReport().byKind.storage.bytesSaved); } catch { /* best effort */ } }, 6 * 3600 * 1000).unref();
   log(`listening on http://${HOST}:${PORT} (bound to localhost only)`);
   log('waiting for the in-page agent to connect at /agent ...');
   const current = dbApi.getCurrentSession();

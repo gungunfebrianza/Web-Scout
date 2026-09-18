@@ -12,8 +12,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { startTestRelay } from './test-relay.mjs';
-import { findBrowser, launchBrowser, sleep } from './browser-harness.mjs';
+import { connectFakeAgent, startTestRelay } from './test-relay.mjs';
+import { browserSkip, findBrowser, launchBrowser, sleep } from './browser-harness.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const html = fs.readFileSync(path.join(__dirname, 'dashboard.html'), 'utf8');
@@ -113,7 +113,7 @@ describe('dashboard panel registry (static)', () => {
 describe('dashboard in a headless browser', () => {
   const browser = findBrowser();
 
-  test('shell wraps every panel with no page errors', { skip: browser ? false : 'no Chromium/Edge binary found (set WEBSCOUT_BROWSER)', timeout: 90000 }, async () => {
+  test('shell wraps every panel with no page errors', { skip: browserSkip(), timeout: 90000 }, async () => {
     const panelIds = Object.keys(panelEntries());
     const relay = await startTestRelay();
     let page;
@@ -148,6 +148,46 @@ describe('dashboard in a headless browser', () => {
       assert.ok(probe.savingsCount.text.trim().length > 0, 'savingsSection count pill is empty');
       assert.deepEqual(errors, [], `page errors:\n${errors.join('\n')}`);
     } finally {
+      await page?.close();
+      await relay.stop();
+    }
+  });
+
+  test('the savings panel shows whether scoping is working (re-read and outline rates)', { skip: browserSkip() || (process.env.WEBSCOUT_TEST_LIVE === '1' ? 'needs its own relay' : false), timeout: 90000 }, async () => {
+    const relay = await startTestRelay();
+    let page;
+    let tab;
+    try {
+      const api = async (method, route, body) => (await (await fetch(`http://127.0.0.1:${relay.port}${route}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined })).json()).result;
+      tab = await connectFakeAgent(relay.port, {
+        'idb.dump': (p) => (p.store === 'big' ? { rows: Array.from({ length: 60 }, (_, i) => ({ id: i, pad: 'x'.repeat(50) })) } : { rows: p.where ? [1] : [1, 2, 3] }),
+        'dom.query': (p) => (p.full ? { found: true, outerHTML: '<x/>' } : { found: true, outline: ['body [1 children]'] }),
+      }, { name: 'default', epoch: 0 });
+      await api('POST', '/sessions', { goal: 'dashboard.test.mjs', context: 'automated' });
+      tab.state.avoided = 2000;
+      await api('POST', '/command', { type: 'idb.dump', params: { store: 's', where: { id: 1 } } });
+      await api('POST', '/command', { type: 'idb.dump', params: { store: 's' } });
+      tab.state.outlineOld = 3000;
+      await api('POST', '/command', { type: 'dom.query', params: { selector: 'body' } });
+      await api('POST', '/command', { type: 'dom.query', params: { selector: 'body', full: true } });
+      await api('POST', '/command', { type: 'idb.dump', params: { store: 'big' }, opts: { table: true } });
+
+      page = await launchBrowser(browser);
+      await page.navigate(`http://127.0.0.1:${relay.port}/dashboard`);
+      let text = '';
+      const deadline = Date.now() + 25000;
+      while (Date.now() < deadline && !/whole-page outlines/.test(text)) {
+        text = (await page.evaluate(`(() => { const n = document.getElementById('readStrategyNote'); return n && !n.hidden ? n.textContent : ''; })()`)) || '';
+        if (!/whole-page outlines/.test(text)) await sleep(300);
+      }
+      assert.match(text, /100% of 1 scoped reads were followed by the same read unscoped/);
+      assert.match(text, /1 whole-page outlines: 0% drilled into a child, 100% needed --full/);
+      assert.match(text, /0 pointers, 0 deltas, 1 tables, 0 peeks/);
+      assert.match(text, /kept off the caller's screen/);
+      assert.match(text, /token figures are chars\/4/);
+      assert.deepEqual(page.errors, [], `page errors: ${page.errors.join(' | ')}`);
+    } finally {
+      tab?.close();
       await page?.close();
       await relay.stop();
     }

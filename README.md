@@ -110,6 +110,19 @@ The core discipline, nicknamed **"CRV"** in this codebase:
 - Pre-call cost hints: a whole-page selector, or a store with real
   historical cost, warns BEFORE you pay for it - with a learned number, not
   a guess
+- Reply shaping for reads: `--peek` (shape + size instead of the body),
+  `--table` (keys stated once), `--if-changed` / `--delta` (a pointer or only
+  what changed instead of a repeat body), all tracked against what the caller
+  actually holds; a `--token-budget` arms a guard that turns large reads into
+  peeks as the budget burns; `session start` returns a warm-start briefing;
+  replies are compact JSON when piped
+- The relay watches HOW a session reads (scoped then unscoped, identical full
+  re-deliveries) and says one line when it sees waste, then measures whether the
+  hint was followed; peeks are measured the same way (narrowed next, or read in
+  full anyway)
+- Token estimates carry a labelled error band (`savings.estimator`), and
+  `token-benchmark.test.mjs` runs a scripted CRV session against a fixture in CI so
+  a change that makes replies bigger fails there
 
 **Dashboard**
 - A realtime, no-refresh-needed web dashboard showing every session's
@@ -174,7 +187,10 @@ the full explanation behind any of these.
 ```bash
 relay status                  # works even when the relay is down; reports pid, start time and
                                # staleSourceFiles - non-empty means the running relay is OLDER than
-                               # relay.mjs/db.mjs/... on disk (an edit is invisible until restart)
+                               # relay.mjs/db.mjs/... on disk (an edit is invisible until restart);
+                               # staleAgents names tabs still running an older inject.js (reload them);
+                               # events24h counts client autostarts and unclean exits - a non-zero
+                               # uncleanExits means something killed the relay from outside
 relay restart                 # stop + start (also: relay start, relay stop). Replaces `pkill` -
                                # which silently does nothing against a Windows-native node process
 ```
@@ -183,13 +199,15 @@ than what is on disk, so a green run can't quietly be validating stale code.
 
 **Sessions** (required before anything else)
 ```bash
-session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--auto-snapshot] [--token-budget N]
+session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--auto-snapshot] [--token-budget N] [--no-briefing]
                                # --stores scopes every strict-crv auto-snapshot to those
                                # stores - omitting it against a real-size db WILL time out.
                                # --auto-snapshot (needs --stores) takes+persists a snapshot
                                # right at start, so "session cleanup --since-snapshot" has a
                                # baseline without a separate manual "idb snapshot" call first
-                               # --token-budget is advisory only - warns once crossed, never blocks
+                               # --token-budget never blocks, but arms the read guard (see "Reading
+                               # with fewer tokens") and warns at the end when the DELIVERED total crossed it
+                               # --no-briefing skips the warm-start briefing in the reply
 session end [id]              # defaults to the active session; nudges "macro record" if the
                                # session logged 5+ replayable actions and never saved one
 session current
@@ -356,6 +374,42 @@ tokens so far (+66 this call).` The CLI prints it on stderr; over MCP it is
 appended to the tool reply as an extra text item, because an MCP host does
 not show a server's stderr to the model.
 
+**Reading with fewer tokens** - what a call *returns* is what you pay for, so
+cacheable reads take flags that change only the reply (the relay still logs and
+caches the full result):
+```bash
+idb dump my_store --peek      # the SHAPE: counts, columns, one sample row, byte size, an
+                               # estimated-token band. The full result is cached - repeating the
+                               # call without --peek is answered with no page round trip
+idb dump my_store --table     # rows as {columns, rows:[[...]]}: each key said once
+idb dump my_store --if-changed  # unchanged since you last RECEIVED it? -> {unchanged, sameAs}
+idb dump my_store --delta     # ... and when it did change, only what changed (rows added /
+                               # changed / removed by id; net.log and console.log by content)
+dom query "#panel" --peek --no-guard   # (--no-guard overrides the budget guard below)
+```
+`--if-changed` and `--delta` are only correct while the earlier result is still in
+your context - after a context compaction, repeat the call without them. The relay
+tracks what you were actually handed, so it never offers a pointer or delta against
+a result you only saw a `--peek` of. A session started with `--token-budget N` arms a
+**read guard**: past 60% of N, a read over ~3000 estimated tokens returns its shape
+and rows come back tabular; past 85% the limit drops to ~1000 (a one-time stderr note
+announces each level; `WEBSCOUT_READ_GUARD_TOKENS=<n>` arms it without a budget). The
+running total, the budget and the end-of-session receipt count bytes *delivered*,
+not bytes logged. `session start` also returns a **briefing** (row count per store,
+DB version, whether the tab and the relay are current) so the exploratory `idb list`
+/ `db version-check` opening most sessions is not needed - `--no-briefing` skips it.
+The relay also watches how you read and says one line when it sees waste (a full read
+right after scoping the same target, repeated full reads, an identical read
+re-delivered in full from cache); `token-report` counts whether you then acted on it.
+Output is compact JSON when piped; a terminal, `--pretty` or `WEBSCOUT_PRETTY=1` gets
+the indented form.
+
+Token figures everywhere are chars/4 - one ratio for JSON, markup and prose, which
+tokenize very differently. `token-report` labels them: `savings.estimator` gives a
+low..high band per kind and `spend.estTokensBand` brackets the total. The band is a
+rule of thumb until `node tools/web-scout/calibrate-tokens.mjs --write` (needs
+`ANTHROPIC_API_KEY`) measures real ratios from your own sessions.
+
 The dashboard's **Token savings** panel shows the all-time ledgers behind
 `token-report`, split into what they actually measure: bytes never stored
 twice on disk (dedup) versus bytes never sent to the caller.
@@ -452,7 +506,11 @@ startup unless noted:
 | `WEBSCOUT_AI_BACKEND_URL` | none | Where the optional `ask` command sends its prompt - see "Ask AI" in the architecture doc. Live-editable from the dashboard's Settings dialog with no restart. |
 | `WEBSCOUT_DB_PATH` | `tools/web-scout/webscout.db` | Relocates the SQLite file that stores everything. |
 | `WEBSCOUT_TOKEN_THRESHOLD` | `5000` | Running-total token ticker prints only once a session's total passes this (read by the CLI/MCP client). |
+| `WEBSCOUT_READ_GUARD_TOKENS` | unset | Arms the read guard without a session budget: a read over this many estimated tokens returns its shape (`--no-guard` per call overrides). Read by the relay. |
+| `WEBSCOUT_PRETTY` / `WEBSCOUT_COMPACT` | unset | The CLI prints compact JSON when piped and indented JSON on a terminal; `WEBSCOUT_PRETTY=1` (or `--pretty`) forces indented, `WEBSCOUT_COMPACT=1` forces compact even on a terminal. |
+| `WEBSCOUT_TOKEN_CALIBRATION` | `tools/web-scout/token-calibration.json` | Where measured chars-per-token ratios (written by `calibrate-tokens.mjs --write`) are read from. |
 | `WEBSCOUT_NO_AUTOSTART` | unset | Set to `1` to stop the CLI/MCP client from starting a relay when the port refuses connections (it retries the call once after starting one, at most once per 30s). |
+| `WEBSCOUT_REQUIRE_BROWSER` | unset | Set to `1` (CI does) to make the headless-browser tests fail instead of skip when no Chromium/Edge is found. |
 | `WEBSCOUT_PID_PATH` | `<tmpdir>/webscout-relay-<port>.pid` | Where the relay writes its pidfile, used by `relay stop/restart`. |
 | `WEBSCOUT_TEST_LIVE` | unset | Set to `1` to run the relay-touching tests against the already-running relay (needed only for tests that require a connected browser tab). |
 
@@ -554,8 +612,20 @@ start a relay with a tab connected and set `WEBSCOUT_TEST_LIVE=1` (and
 missing, and a refusal of unfinished `scaffold-command.mjs` stubs).
 `inject-browser.test.mjs` and `dashboard.test.mjs` drive a real headless
 Chromium/Edge (`browser-harness.mjs`; set `WEBSCOUT_BROWSER` if none is found -
-they skip themselves without one) to check the page-change counter, the
-whole-page outline, the scoped-read accounting and the dashboard's panel shell.
+they skip themselves without one, unless `WEBSCOUT_REQUIRE_BROWSER=1`) to check the
+page-change counter, the whole-page outline, the scoped-read accounting, the build
+stamp and the dashboard's panel shell. `agent-build.test.mjs` (the build stamp),
+`read-strategy.test.mjs` (re-read and outline rates), `relay-events.test.mjs`
+(autostart and unclean-exit log) and `text-hygiene.test.mjs` (no CR, control
+characters or U+FFFD in any tracked text file) need no browser, and neither do
+the read-shaping ones: `read-shape.test.mjs` and `read-pipeline.test.mjs` (pure
+reshaping and the state machine around it), `read-shaping.test.mjs` (the same
+through a real relay and a stand-in tab) and `token-estimate.test.mjs`.
+`token-benchmark.test.mjs` runs a scripted baseline -> action -> verify session
+against a fixture twice - default reads and the documented read strategy - and
+prints the delivered bytes per phase; it fails if default replies grow past a
+budget or the strategy stops beating them by its margin (the fixture is a best
+case for the strategy, so read the ratio as a ceiling on the effect, not a forecast).
 See `.github/workflows/web-scout-tests.yml`.
 
 ## Relationship to Verity UI Relay

@@ -20,7 +20,7 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { startRelay } from './relay-control.mjs';
+import { startRelay, recordRelayEvent } from './relay-control.mjs';
 
 export const HOST = process.env.WEBSCOUT_HOST || '127.0.0.1';
 export const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
@@ -64,6 +64,7 @@ function emitNote(text, key = text) {
 }
 
 const staleRelayWarned = new Set();
+const staleAgentWarned = new Set();
 
 // A relay that died (another session's blanket `relay.mjs` kill did this
 // twice) used to be noticed only when a call failed, then restarted by hand.
@@ -83,7 +84,10 @@ async function autostartRelay() {
   lastAutostartAt = Date.now();
   try {
     const started = await startRelay({ port: PORT, host: HOST });
-    if (started.started) return started;
+    if (started.started) {
+      recordRelayEvent(PORT, { kind: 'autostart', pid: started.pid ?? null });
+      return started;
+    }
   } catch { /* fall through to the ordinary unreachable error */ }
   return null;
 }
@@ -127,6 +131,21 @@ export async function request(method, pathName, body, { autostart = true } = {})
     staleRelayWarned.add(staleFiles);
     emitNote(`WARNING: the relay is running code older than what is on disk (${staleFiles} changed since it started) - results may not reflect your edits. Restart it: node tools/web-scout/cli.mjs relay restart`, 'relay-stale');
   }
+  // Same idea one level down: a TAB still running an older inject.js than the one
+  // on disk (a tab keeps its script until it navigates). Tabs the relay names here
+  // either predate build stamps or reported a different hash.
+  const staleAgents = res.headers.get('x-webscout-agent-stale');
+  if (staleAgents && !staleAgentWarned.has(staleAgents)) {
+    staleAgentWarned.add(staleAgents);
+    emitNote(`WARNING: tab(s) ${staleAgents} run an older in-page agent than tools/web-scout/inject.js on disk - new commands may be missing or behave differently. Reload the tab ("page reload --hard"); if index.html pins the script with ?v=, bump it first.`, 'agent-stale');
+  }
+  // What the relay noticed about HOW this session reads (a re-read after scoping,
+  // an identical full re-delivery) and its token-budget level: both are one-liners
+  // the caller can act on next call, so they ride as notes like the rest.
+  const hint = res.headers.get('x-webscout-hint');
+  if (hint) emitNote(`hint: ${hint}`, 'read-hint');
+  const budgetNote = res.headers.get('x-webscout-budget');
+  if (budgetNote) emitNote(budgetNote, 'token-budget');
   // Running session token total (see relay.mjs's generic response wrapper) -
   // same header-not-body convention as the nudge above, for the same reason
   // (never change the shape of a command's own real result). Printed on

@@ -653,6 +653,89 @@ export function bumpSavingsDaily(key, bytes) {
   stmtBumpSavingsDaily.run(new Date().toISOString().slice(0, 10), key, Math.max(0, Number(bytes) || 0));
 }
 
+// One row per (day, kind): the LAST value seen that day. The storage-dedup
+// ledgers are derived from ref counts, not events, so they cannot be bucketed
+// like savings_daily; instead the running total is sampled (token-report, session
+// end, a periodic timer) and the trend shows the day-to-day delta.
+db.exec(`
+CREATE TABLE IF NOT EXISTS savings_snapshots (
+  day   TEXT NOT NULL,
+  kind  TEXT NOT NULL,
+  bytes INTEGER NOT NULL,
+  PRIMARY KEY (day, kind)
+);
+`);
+const stmtSnapshotUpsert = db.prepare(`
+  INSERT INTO savings_snapshots (day, kind, bytes) VALUES (?, ?, ?)
+  ON CONFLICT (day, kind) DO UPDATE SET bytes = excluded.bytes
+`);
+const stmtSnapshotsByKind = db.prepare('SELECT day, bytes FROM savings_snapshots WHERE kind = ? ORDER BY day');
+
+export function snapshotSavings(kind, bytes) {
+  stmtSnapshotUpsert.run(new Date().toISOString().slice(0, 10), kind, Math.max(0, Math.round(Number(bytes) || 0)));
+}
+
+const pct = (part, whole) => (whole ? Math.round((part / whole) * 1000) / 10 : null);
+
+// How well scoping is working for the caller, not just how many bytes it left
+// out. A scoped read followed by the same read unscoped means the scoping did
+// not answer the question (the avoided bytes were then spent after all), and an
+// outline followed by the same selector with --full means the outline was not
+// enough. All counts are per relay lifetime summed over days (savings_daily).
+export function getReadStrategyStats() {
+  const total = (key) => stmtSavingsDailyTotal.get(key);
+  const scoped = total('scopedReads');
+  const reRead = total('reReadAfterScoped');
+  const outline = total('outline');
+  const outlineOld = total('outlineOldDefault');
+  const full = total('outlineFollowFull');
+  const drill = total('outlineFollowDrill');
+  const pointer = total('unchangedPointer');
+  const delta = total('deltaRead');
+  const peek = total('peek');
+  const guard = total('guardedPeek');
+  const table = total('tabular');
+  const peekFull = total('peekThenFull');
+  const peekNarrow = total('peekThenNarrowed');
+  const hintScope = total('hintScope');
+  const hintReuse = total('hintReuse');
+  const hintAdopted = total('hintAdopted');
+  const peekCalls = peek.calls + guard.calls;
+  // Bytes each shaping mode kept off the caller's screen. A peek only defers the
+  // body: when the same read then came back in full, those bytes were spent after
+  // all, so they are taken back out of the peek's saving.
+  const grossPeekBytes = peek.bytes + guard.bytes;
+  const netBytesSaved = pointer.bytes + delta.bytes + table.bytes + Math.max(0, grossPeekBytes - peekFull.bytes);
+  return {
+    shaping: {
+      pointer: { calls: pointer.calls, bytesSaved: pointer.bytes },
+      delta: { calls: delta.calls, bytesSaved: delta.bytes },
+      table: { calls: table.calls, bytesSaved: table.bytes },
+      peek: {
+        calls: peekCalls, guardedCalls: guard.calls, grossBytesSaved: grossPeekBytes, bytesSpentAfterwards: peekFull.bytes,
+        followedByFull: peekFull.calls, followedByNarrowed: peekNarrow.calls,
+        fullRatePct: pct(peekFull.calls, peekCalls), narrowedRatePct: pct(peekNarrow.calls, peekCalls),
+      },
+      netBytesSaved,
+    },
+    hints: {
+      scope: hintScope.calls, reuse: hintReuse.calls, adopted: hintAdopted.calls,
+      adoptedRatePct: pct(hintAdopted.calls, hintScope.calls + hintReuse.calls),
+    },
+    reRead: { scopedCalls: scoped.calls, reReads: reRead.calls, reReadBytes: reRead.bytes, ratePct: pct(reRead.calls, scoped.calls) },
+    outline: {
+      calls: outline.calls,
+      deliveredBytes: outline.bytes,
+      oldDefaultBytes: outlineOld.bytes,
+      netBytesVsOldDefault: outlineOld.bytes - outline.bytes,
+      followedByFull: full.calls,
+      followedByDrillIn: drill.calls,
+      fullRatePct: pct(full.calls, outline.calls),
+      drillRatePct: pct(drill.calls, outline.calls),
+    },
+  };
+}
+
 export function getScopedReadSavings() {
   const row = stmtSavingsDailyTotal.get('scopedReads');
   return { calls: row.calls, bytesSaved: row.bytes, estTokensSaved: Math.round(row.bytes / CHARS_PER_TOKEN_ESTIMATE) };
@@ -661,11 +744,13 @@ export function getScopedReadSavings() {
 // Is the read strategy improving? Per day: what callers were actually handed
 // (delivered), what scoped reads left out (avoided), and how much of the
 // would-have-been total that is. Days with no activity are omitted.
+const SHAPING_SAVING_KEYS = new Set(['unchangedPointer', 'deltaRead', 'tabular', 'peek', 'guardedPeek']);
+
 export function getSavingsTrend(days = 14) {
   const since = new Date(Date.now() - (Math.max(1, days) - 1) * 86400000).toISOString().slice(0, 10);
   const byDay = new Map();
   const slot = (day) => {
-    if (!byDay.has(day)) byDay.set(day, { day, calls: 0, deliveredBytes: 0, scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0 });
+    if (!byDay.has(day)) byDay.set(day, { day, calls: 0, deliveredBytes: 0, scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0, reReads: 0, shapedBytes: 0, storageBytesSaved: null, storageDeltaBytes: null });
     return byDay.get(day);
   };
   for (const r of stmtDeliveredPerDay.all(`${since}T00:00:00`)) { const s = slot(r.day); s.calls = r.calls; s.deliveredBytes = r.bytes || 0; }
@@ -673,6 +758,14 @@ export function getSavingsTrend(days = 14) {
     const s = slot(r.day);
     if (r.key === 'scopedReads') { s.scopedCalls = r.calls; s.avoidedBytes = r.bytes; }
     if (r.key === 'readCache') { s.cacheHits = r.calls; s.cacheBytes = r.bytes; }
+    if (r.key === 'reReadAfterScoped') s.reReads = r.calls;
+    if (SHAPING_SAVING_KEYS.has(r.key)) s.shapedBytes += r.bytes;
+    if (r.key === 'peekThenFull') s.shapedBytes -= r.bytes;
+  }
+  let previousStorage = null;
+  for (const r of stmtSnapshotsByKind.all('storage')) {
+    if (r.day >= since) { const s = slot(r.day); s.storageBytesSaved = r.bytes; s.storageDeltaBytes = previousStorage === null ? null : r.bytes - previousStorage; }
+    previousStorage = r.bytes;
   }
   return [...byDay.values()].sort((a, b) => (a.day < b.day ? -1 : 1)).map((s) => {
     const wouldHave = s.deliveredBytes + s.avoidedBytes;

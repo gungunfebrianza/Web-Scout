@@ -1021,3 +1021,61 @@ passes through `withLoggedAction` by reference), so no return shape changes.
 `avoided` feeds `savings_daily` (`scopedReads`); cache hits feed the same table
 (`readCache`) plus the persisted single-row counter.
 
+## Build stamp, lifecycle events and read-strategy accounting (V31)
+
+`inject.js` holds `AGENT_BUILD`: the first 12 hex digits of the SHA-256 of the file
+with that constant blanked and CRLF folded to LF (`build-id.mjs`). The tab sends it
+as `&build=` on the WebSocket URL; the relay keeps it on the agent entry and compares
+it with `currentInjectBuild()` (the disk hash, cached by mtime). `agentsDetail()`
+adds `build`, `expectedBuild` and `agentStale`; a tab with no build is stale by
+definition.
+
+Relay lifecycle events (`autostart`, `unclean-exit`) are appended to
+`<pidfile>.events.jsonl` (200 lines kept). `unclean-exit` is inferred at boot from a
+pidfile whose pid is dead - a clean shutdown and `relay stop` both remove it.
+
+`noteScopedRead` in the relay does three jobs on each read reply: it counts the
+avoided bytes (V30), it tracks scoped reads per `agent::type::target` (the target is
+the params minus the narrowing keys in `SCOPING_PARAM_KEYS`, now in `read-pipeline.mjs`) and counts an unscoped
+repeat inside `UNSCOPED_FOLLOW_UP_WINDOW_MS` as `reReadAfterScoped`, and for an
+outline reply it records delivered bytes, the replaced reply's bytes (`outlineOld` on
+the WebSocket reply, from `ctx.outlineOldBytes`) and the next `dom.query` on that tab
+(`outlineFollowDrill` / `outlineFollowFull`). All of it lands in `savings_daily`;
+storage-dedup totals go in `savings_snapshots` (last value per day) and
+`getSavingsTrend` derives the daily delta.
+
+## Read shaping, the budget guard and the briefing (V32)
+
+`POST /command` for a `readCacheable` type ends in `deliverRead`, which hands the FULL
+result (fresh dispatch or cache hit) to `read-pipeline.mjs`'s `shape()`. Order of
+decisions: pointer (cache hit, caller asked, and `held[cacheKey].result === full` - the
+caller was handed exactly this object in full) -> delta (fresh dispatch, `--delta`, a held
+older result, and `computeReadDelta` smaller than 70% of the full) -> peek (`--peek`, or
+the guard: the smaller of the budget level's threshold and
+`WEBSCOUT_READ_GUARD_TOKENS`, unless `--no-guard`; declined when the summary is not
+smaller) -> table (`--table`, or any budget level past `ok`; declined when not smaller) ->
+full. "Held" is set only after a full, tabular or delta delivery, never after a peek or
+pointer. Each mode books its `spared` bytes to `savings_daily` (`unchangedPointer`,
+`deltaRead`, `peek`, `guardedPeek`, `tabular`); a peek followed inside 90s by the same
+target read narrowed books `peekThenNarrowed`, read whole books `peekThenFull` with the
+delivered bytes, and `getReadStrategyStats().shaping.netBytesSaved` subtracts those.
+
+The running session total (the `x-webscout-session-tokens` header, the budget level and the
+session receipt) is `getSessionTokensSoFar` + cache-hit bytes actually delivered - bytes a
+shaped reply withheld (`sessionDeliveryAdjust`); the logged action row still holds the full
+result, so `getActionCostReport` ("Read by callers") is unchanged by design.
+
+`behaviourHint` inside the pipeline keeps a per-session trail (scoped-at, last scope
+params, re-read counts, full cache re-deliveries) and emits at most one hint per target
+and kind, as the `x-webscout-hint` header; `hintScope` / `hintReuse` count emissions and
+`hintAdopted` counts the next call that did what the hint said. `x-webscout-budget`
+carries the once-per-level budget note. Both are surfaced by `client.mjs` as notes (stderr
+for the CLI, extra text content over MCP).
+
+`POST /sessions` builds a briefing (`buildBriefing`) with `dispatchCommand` directly - two
+concurrent reads (`idb.list`, `db.version`), a 6s bound, no action row - unless
+`briefing:false`, the agent is absent or the tab's build is stale. `SCOPING_PARAM_KEYS` and
+`readTargetKey` now live in `read-pipeline.mjs` (the relay imports them for
+`noteScopedRead`). `token-estimate.mjs` holds the per-kind ratios and reads
+`token-calibration.json` when present; all three new modules are on `RELAY_SOURCE_FILES`, so
+an edit to one flags the running relay as stale.

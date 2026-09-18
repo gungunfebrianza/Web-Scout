@@ -8,12 +8,13 @@
 // for tests that require a connected browser tab, which an ephemeral relay
 // never has - those tests skip themselves when no agent is connected).
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { currentInjectBuild } from './build-id.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -78,6 +79,25 @@ export async function startTestRelay({ script = path.join(__dirname, 'relay.mjs'
   return { port, env, stop, live: false };
 }
 
+// Is anything accepting connections on this port? A raw socket, not fetch: a
+// fetch left pending (its abort timer armed) when --test-force-exit fires trips a
+// libuv assertion on Windows.
+export function isUp(port, host = '127.0.0.1') {
+  return new Promise((resolve) => {
+    const socket = net.connect(port, host);
+    socket.once('connect', () => { socket.destroy(); resolve(true); });
+    socket.once('error', () => resolve(false));
+  });
+}
+
+// Run node as a child from inside a test. NODE_TEST_CONTEXT would make a nested
+// `node --test` behave as a child of this runner and always exit 0, so it is
+// stripped; `env` is merged over the cleaned environment.
+export function spawnClean(args, { env = {}, cwd, timeout = 60000 } = {}) {
+  const { NODE_TEST_CONTEXT, ...clean } = process.env;
+  return spawnSync(process.execPath, args, { cwd, encoding: 'utf8', timeout, env: { ...clean, ...env } });
+}
+
 // A stand-in for the in-page agent (inject.js): speaks the relay's real
 // WebSocket protocol - the relay sends {kind:'command', id, type, params} and
 // expects {kind:'reply', id, ok, result|error} - so relay behavior that needs
@@ -86,10 +106,10 @@ export async function startTestRelay({ script = path.join(__dirname, 'relay.mjs'
 // (params) => result; an unhandled type replies {}. Opt in to the page-change
 // counter with `epoch: 0`: replies then carry `epoch: state.epoch`, `page.epoch`
 // answers it, and a test bumps `state.epoch` to simulate the page changing on
-// its own. `state.avoided = n` stamps n avoided bytes on the next reply only.
-export async function connectFakeAgent(port, handlers = {}, { name = 'default', epoch } = {}) {
-  const state = { epoch, avoided: undefined };
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(name)}&loadId=fake-agent`);
+// its own. `state.avoided = n` stamps n avoided bytes on the next reply only (`state.outlineOld` likewise stamps the size of the reply an outline replaced).
+export async function connectFakeAgent(port, handlers = {}, { name = 'default', epoch, build = currentInjectBuild() } = {}) {
+  const state = { epoch, avoided: undefined, outlineOld: undefined };
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(name)}&loadId=fake-agent${build ? `&build=${build}` : ''}`);
   const seen = [];
   ws.onmessage = async (ev) => {
     const msg = JSON.parse(ev.data);
@@ -100,8 +120,10 @@ export async function connectFakeAgent(port, handlers = {}, { name = 'default', 
       const epochBefore = state.epoch;
       const result = handler ? await handler(msg.params ?? {}, msg) : {};
       const avoided = state.avoided;
+      const outlineOld = state.outlineOld;
       state.avoided = undefined;
-      ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: true, result, ...(epochBefore !== undefined ? { epoch: epochBefore } : {}), ...(avoided ? { avoided } : {}) }));
+      state.outlineOld = undefined;
+      ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: true, result, ...(epochBefore !== undefined ? { epoch: epochBefore } : {}), ...(avoided ? { avoided } : {}), ...(outlineOld !== undefined ? { outlineOld } : {}) }));
     } catch (err) {
       ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: false, error: err.message }));
     }

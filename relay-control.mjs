@@ -19,7 +19,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Files the relay process loads once at boot. An edit to any of them is
 // invisible to a running relay until it restarts.
-export const RELAY_SOURCE_FILES = ['relay.mjs', 'db.mjs', 'ai.mjs', 'report.mjs', 'command-registry.mjs'];
+export const RELAY_SOURCE_FILES = ['relay.mjs', 'db.mjs', 'ai.mjs', 'report.mjs', 'command-registry.mjs', 'build-id.mjs', 'relay-control.mjs', 'read-pipeline.mjs', 'read-shape.mjs', 'token-estimate.mjs'];
 
 export function pidfilePath(port) {
   return process.env.WEBSCOUT_PID_PATH || path.join(os.tmpdir(), `webscout-relay-${port}.pid`);
@@ -43,8 +43,48 @@ export function readPidfile(port) {
   try { return JSON.parse(fs.readFileSync(pidfilePath(port), 'utf8')); } catch { return null; }
 }
 
-function pidAlive(pid) {
+export function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (err) { return err.code === 'EPERM'; }
+}
+
+// A small append-only log of relay lifecycle events, next to the pidfile. It
+// exists because the client's autostart recovers from a kill so quietly that a
+// process blanket-killing `relay.mjs` (another session did, twice) went unnoticed.
+//   autostart    - a CLI/MCP call found the relay down and started one
+//   unclean-exit - a relay booted and found the previous one's pidfile still there
+//                  with a dead pid: it never ran its clean shutdown, i.e. it was
+//                  killed (`relay stop` removes the pidfile, so it never counts)
+const EVENT_LOG_MAX_LINES = 200;
+const NL = String.fromCharCode(10);
+export const eventsPath = (port) => `${pidfilePath(port)}.events.jsonl`;
+
+export function recordRelayEvent(port, event) {
+  try {
+    const file = eventsPath(port);
+    let lines = [];
+    try { lines = fs.readFileSync(file, 'utf8').split(NL).filter(Boolean); } catch { /* first event */ }
+    lines.push(JSON.stringify({ at: new Date().toISOString(), ...event }));
+    fs.writeFileSync(file, lines.slice(-EVENT_LOG_MAX_LINES).join(NL) + NL, 'utf8');
+  } catch { /* best effort - never blocks a start */ }
+}
+
+export function readRelayEvents(port, sinceMs = 24 * 3600 * 1000) {
+  let raw = '';
+  try { raw = fs.readFileSync(eventsPath(port), 'utf8'); } catch { return []; }
+  const cutoff = Date.now() - sinceMs;
+  const out = [];
+  for (const line of raw.split(NL)) {
+    try { const e = JSON.parse(line); if (Date.parse(e.at) >= cutoff) out.push(e); } catch { /* skip a torn line */ }
+  }
+  return out;
+}
+
+export function summarizeRelayEvents(events) {
+  return {
+    autostarts: events.filter((e) => e.kind === 'autostart').length,
+    uncleanExits: events.filter((e) => e.kind === 'unclean-exit').length,
+    recent: events.slice(-5),
+  };
 }
 
 // OS-level "who is listening on this port" - the fallback for a relay with no
