@@ -24,6 +24,16 @@ export const HOST = process.env.WEBSCOUT_HOST || '127.0.0.1';
 export const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
 export const BASE = `http://${HOST}:${PORT}`;
 
+// Same rough chars/4 estimate as everywhere else in this tool - only worth
+// printing once a session's real cumulative spend is large enough to think
+// about; on every trivial "idb list"/"ping" call this would be pure noise.
+// Overridable via WEBSCOUT_TOKEN_THRESHOLD - a hardcoded 5000 meant a token-
+// sensitive CRV (want to know the moment it's getting expensive) couldn't
+// lower it, and a deliberately heavy session (bulk-seeding fixtures) couldn't
+// raise it to cut the noise. Invalid/non-positive values fall back to 5000.
+const envThreshold = Number(process.env.WEBSCOUT_TOKEN_THRESHOLD);
+const SESSION_TOKENS_SOFAR_PRINT_THRESHOLD = Number.isFinite(envThreshold) && envThreshold > 0 ? envThreshold : 5000;
+
 export async function request(method, pathName, body) {
   const opts = { method };
   if (body !== undefined) {
@@ -48,6 +58,16 @@ export async function request(method, pathName, body) {
   // stdout-only, so a stderr line here can never corrupt a JSON-RPC reply.
   const nudge = res.headers.get('x-webscout-nudge');
   if (nudge) console.error(`[web-scout] ${nudge}`);
+  // Running session token total (see relay.mjs's generic response wrapper) -
+  // same header-not-body convention as the nudge above, for the same reason
+  // (never change the shape of a command's own real result). Printed on
+  // stderr only past a threshold - a running total after every single cheap
+  // "idb list"/"ping" call would be pure noise; it matters once a session's
+  // real spend is getting large enough to think about.
+  const tokensSoFar = Number(res.headers.get('x-webscout-session-tokens'));
+  if (Number.isFinite(tokensSoFar) && tokensSoFar > SESSION_TOKENS_SOFAR_PRINT_THRESHOLD) {
+    console.error(`[web-scout] session running total: ~${tokensSoFar} estimated tokens so far.`);
+  }
   const json = await res.json();
   if (!json.ok) {
     const err = new Error(json.error || `request to ${pathName} failed`);
