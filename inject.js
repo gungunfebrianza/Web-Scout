@@ -54,6 +54,31 @@
   // once the "Relay connection" section below runs, which happens
   // synchronously before this timer's first tick. ----------
 
+  // Page change counter. The relay's read cache only knew about mutations IT
+  // issued, so a page that changed on its own (a fetch landing, a timer
+  // re-render, the app writing IndexedDB) kept getting a stale net.log /
+  // dom.query / idb.dump. Every reply carries the counter as it was BEFORE the
+  // handler ran (conservative: a change during the handler makes the next
+  // probe differ), and `page.epoch` lets the relay re-check it on a cache hit.
+  let pageEpoch = 0;
+  new MutationObserver((records) => { pageEpoch += records.length; })
+    .observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+  for (const name of ['put', 'add', 'delete', 'clear']) {
+    const original = IDBObjectStore.prototype[name];
+    if (typeof original !== 'function') continue;
+    IDBObjectStore.prototype[name] = function webScoutEpochWrap(...args) {
+      pageEpoch += 1;
+      // the write is only readable once its transaction commits
+      try { this.transaction.addEventListener('complete', () => { pageEpoch += 1; }, { once: true }); } catch { /* transaction already finished */ }
+      return original.apply(this, args);
+    };
+  }
+  for (const name of ['update', 'delete']) {
+    const original = IDBCursor.prototype[name];
+    if (typeof original !== 'function') continue;
+    IDBCursor.prototype[name] = function webScoutEpochWrap(...args) { pageEpoch += 1; return original.apply(this, args); };
+  }
+
   let ws = null; // assigned in "Relay connection" below; referenced here by closure
   const EVENT_BATCH_CAP = 25;
   const MAX_PENDING_EVENTS = 1000;
@@ -108,6 +133,7 @@
     return false;
   }
   function recordNet(entry) {
+    pageEpoch += 1;
     netLog.push(entry);
     if (netLog.length > MAX_NET_LOG) netLog.shift();
     queueEvent(pendingNet, entry);
@@ -185,6 +211,7 @@
     try { return JSON.stringify(a); } catch { return String(a); }
   }
   function recordConsole(entry) {
+    pageEpoch += 1;
     consoleLog.push(entry);
     if (consoleLog.length > MAX_CONSOLE_LOG) consoleLog.shift();
     queueEvent(pendingConsole, entry);
@@ -298,6 +325,42 @@
   function isRendered(el) {
     return el === document.body || el.offsetParent !== null || el.getClientRects().length > 0;
   }
+
+  const BROAD_QUERY_SELECTORS = new Set(['body', 'html', '#app', '#root', 'main', '#main', '*']);
+  const OUTLINE_SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'LINK', 'META']);
+
+  // Depth-limited structural summary; each line ends with the size of what it
+  // hides so the caller can pick the child worth a second query.
+  function outlineOf(root, maxDepth = 3, maxChildren = 12, maxLines = 60) {
+    const lines = [];
+    const walk = (el, depth) => {
+      if (lines.length >= maxLines) return;
+      const kids = [...el.children].filter((k) => !OUTLINE_SKIP_TAGS.has(k.tagName));
+      const cls = typeof el.className === 'string' && el.className.trim() ? `.${el.className.trim().split(/\s+/).slice(0, 2).join('.')}` : '';
+      lines.push(`${'  '.repeat(depth)}${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ''}${cls} [${kids.length} children, ${(el.textContent ?? '').length} chars${isRendered(el) ? '' : ', hidden'}]`);
+      if (depth >= maxDepth) return;
+      for (const kid of kids.slice(0, maxChildren)) walk(kid, depth + 1);
+      if (kids.length > maxChildren) lines.push(`${'  '.repeat(depth + 1)}... +${kids.length - maxChildren} more children`);
+    };
+    walk(root, 0);
+    if (lines.length >= maxLines) lines.push('... outline truncated');
+    return lines;
+  }
+
+  // Scoped reads report what the same call would have returned unscoped
+  // (`ctx.avoidedBytes` -> reply `avoided` -> the relay's scopedReads ledger).
+  // Exact up to 2000 rows, otherwise a 200-row sample scaled up.
+  function estimateBytes(rows) {
+    if (rows.length <= 2000) return JSON.stringify(rows).length;
+    const step = Math.ceil(rows.length / 200);
+    let sample = 0;
+    let n = 0;
+    for (let i = 0; i < rows.length; i += step) { sample += JSON.stringify(rows[i]).length; n += 1; }
+    return Math.round((sample / n) * rows.length);
+  }
+  const noteAvoided = (ctx, unscopedBytes, deliveredBytes) => {
+    if (ctx && unscopedBytes > deliveredBytes) ctx.avoidedBytes = (ctx.avoidedBytes || 0) + (unscopedBytes - deliveredBytes);
+  };
 
   function previewOf(el, i) {
     const cls = el.className ? `.${String(el.className).trim().split(/\s+/).join('.')}` : '';
@@ -592,6 +655,7 @@
     // already answer, confirmed real friction during a session where every
     // diagnostic paid its own full ~15-20s timeout in serial.
     ping: () => ({ pong: Date.now() }),
+    'page.epoch': () => ({ epoch: pageEpoch }),
     // Biased, not hard-scoped, toward the same "prefer a rendered match"
     // rule as dom.click/dom.fill: `querySelector`'s own first-DOM-order
     // match can easily be a hidden tab/page's element (same cross-page id
@@ -615,7 +679,7 @@
     // that never reads the markup at all. A stronger lever than the
     // htmlCap/textCap default below: those still PAY for (capped) content
     // by default, this opts OUT of paying for it at all.
-    'dom.query': ({ selector, full, meta }) => {
+    'dom.query': ({ selector, full, meta }, ctx) => {
       const all = document.querySelectorAll(selector);
       if (all.length === 0) return { found: false };
       let el = all[0];
@@ -623,8 +687,10 @@
         const visible = [...all].filter(isRendered);
         if (visible.length === 1) el = visible[0];
       }
+      // the default-shaped reply is what an unscoped call would have cost
+      const defaultBytes = () => Math.min(el.outerHTML.length, 2000) + Math.min((el.textContent ?? '').length, 1000);
       if (meta) {
-        return {
+        const metaReply = {
           found: true,
           tag: el.tagName,
           id: el.id || null,
@@ -632,6 +698,28 @@
           matchCount: all.length,
           renderedMatchCount: all.length > 1 ? [...all].filter(isRendered).length : undefined,
         };
+        noteAvoided(ctx, defaultBytes(), JSON.stringify(metaReply).length);
+        return metaReply;
+      }
+      // A whole-page container returns a depth-limited outline instead of its
+      // first 2000 chars of markup: those chars are almost always <head>/nav
+      // boilerplate, so the caller pays for the query and still has to ask
+      // again. --full keeps the raw markup.
+      if (!full && (el === document.body || el === document.documentElement || BROAD_QUERY_SELECTORS.has(String(selector).trim().toLowerCase()))) {
+        const outline = outlineOf(el);
+        const outlineReply = {
+          found: true,
+          tag: el.tagName,
+          id: el.id || null,
+          className: el.className || null,
+          outline,
+          outlineNote: 'whole-page selector: depth-limited outline (tag#id.class [children, text chars]) instead of raw markup. Query a listed child selector to drill in, or pass full to get the markup.',
+          textLength: (el.textContent ?? '').length,
+          matchCount: all.length,
+          renderedMatchCount: all.length > 1 ? [...all].filter(isRendered).length : undefined,
+        };
+        noteAvoided(ctx, defaultBytes(), JSON.stringify(outlineReply).length);
+        return outlineReply;
       }
       const htmlCap = full ? 20000 : 2000;
       const textCap = full ? 5000 : 1000;
@@ -894,7 +982,7 @@
     // `limit` caps rows AFTER filtering (matchedCount still reports the
     // real total so a truncated result is never silently mistaken for a
     // complete one).
-    'idb.dump': async ({ store, where, fields, limit } = {}) => {
+    'idb.dump': async ({ store, where, fields, limit } = {}, ctx) => {
       const db = await openDb();
       if (!db.objectStoreNames.contains(store)) {
         db.close();
@@ -914,6 +1002,7 @@
       if (Array.isArray(fields) && fields.length) {
         rows = rows.map((r) => Object.fromEntries(fields.filter((f) => r && Object.prototype.hasOwnProperty.call(r, f)).map((f) => [f, r[f]])));
       }
+      if (where || fields || lim !== undefined) noteAvoided(ctx, estimateBytes(allRows), JSON.stringify(rows).length);
       return {
         store, keyPath, totalCount: allRows.length, matchedCount, count: rows.length, rows,
         ...(where ? { where } : {}),
@@ -1327,12 +1416,13 @@
     // N most recent of those. Filtered here, in the page, so a 500-entry ring
     // buffer never crosses the wire when the caller wanted three entries.
     // With neither param the reply is unchanged (count === entries.length).
-    'net.log': ({ limit, urlContains } = {}) => {
+    'net.log': ({ limit, urlContains } = {}, ctx) => {
       let entries = netLog.slice();
       const filtered = typeof urlContains === 'string' && urlContains !== '';
       if (filtered) entries = entries.filter((e) => String(e.url ?? '').includes(urlContains));
       const capped = Number.isFinite(limit) && limit >= 0 && entries.length > limit;
       if (capped) entries = limit === 0 ? [] : entries.slice(-limit);
+      if (filtered || capped) noteAvoided(ctx, JSON.stringify(netLog).length, JSON.stringify(entries).length);
       return filtered || capped ? { count: entries.length, total: netLog.length, entries } : { count: entries.length, entries };
     },
     'net.clear': () => {
@@ -1352,9 +1442,10 @@
       else if (typeof filter === 'string' && filter.trim()) captureBodyFilters.add(filter.trim());
       return { active: captureBodyFilters.size > 0, filters: [...captureBodyFilters], limit: NET_BODY_CAPTURE_LIMIT };
     },
-    'console.log': ({ limit } = {}) => {
+    'console.log': ({ limit } = {}, ctx) => {
       const capped = Number.isFinite(limit) && limit >= 0 && consoleLog.length > limit;
       const entries = capped ? (limit === 0 ? [] : consoleLog.slice(-limit)) : consoleLog.slice();
+      if (capped) noteAvoided(ctx, JSON.stringify(consoleLog).length, JSON.stringify(entries).length);
       return capped ? { count: entries.length, total: consoleLog.length, entries } : { count: entries.length, entries };
     },
     'console.clear': () => {
@@ -1597,9 +1688,11 @@
         ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: false, error: `unknown command: ${msg.type}` }));
         return;
       }
+      const epochBefore = pageEpoch;
+      const ctx = { avoidedBytes: 0 };
       try {
-        const result = await handler(msg.params || {});
-        ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: true, result }));
+        const result = await handler(msg.params || {}, ctx);
+        ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: true, result, epoch: epochBefore, ...(ctx.avoidedBytes > 0 ? { avoided: ctx.avoidedBytes } : {}) }));
       } catch (err) {
         ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: false, error: err?.message || String(err) }));
       }

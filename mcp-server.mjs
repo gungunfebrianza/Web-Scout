@@ -101,7 +101,7 @@ const TOOLS = [
       + '  token_report {sessionId?} - estimated tokens read per command type (+ byTarget/loops/redundantCalls/byMacro when sessionId is given); omit sessionId for the ALL-TIME report including the savings ledgers\n'
       + '  debug_state {agent?} - this tool\'s own live in-page runtime state (WebSocket readyState, queue sizes, reconnect backoff)',
     actions: {
-      status: () => request('GET', '/health'),
+      status: () => request('GET', '/health', undefined, { autostart: false }),
       ping: (p) => request('POST', '/ping', { agent: p?.agent }),
       token_report: (p) => request('GET', p?.sessionId ? `/sessions/${p.sessionId}/token-report` : '/token-report'),
       debug_state: (p) => sendCmd('debug.state', {}, p?.agent),
@@ -199,7 +199,7 @@ const TOOLS = [
     name: 'webscout_dom',
     description: 'DOM read/write against the active session\'s connected tab.\n'
       + 'Actions:\n'
-      + '  query {selector, full?, meta?} - outerHTML + basic attrs for the first match; outerHTML/text are truncated by default (full:true lifts that), meta:true returns only tag/id/class/matchCount\n'
+      + '  query {selector, full?, meta?} - outerHTML + basic attrs for the first match; outerHTML/text are truncated by default (full:true lifts that), meta:true returns only tag/id/class/matchCount; a whole-page selector (body/html/#app/#root/main/*) returns a depth-limited outline unless full:true\n'
       + '  click {selector, nth?} - dispatch a real click (native .click())\n'
       + '  fill {selector, value, nth?} - set a form field + dispatch input/change\n'
       + '  rect {selector} - getBoundingClientRect\n'

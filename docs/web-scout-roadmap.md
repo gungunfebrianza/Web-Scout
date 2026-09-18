@@ -2111,11 +2111,82 @@ golden-diff cache overlaps result dedup, so it is shown, not added);
 counters, which reset on every relay restart, are now persisted
 (`read_cache_savings`) - restarts are routine now.
 
-**Known gap, not fixed.** The same-session read cache invalidates only on a
+**Known gap, closed in V30.** The same-session read cache invalidates only on a
 mutating command. A page can change on its own (background traffic,
 async renders), so an identical `net log`/`console log`/`dom query` repeated with no
 command in between can return a stale cached result. `__cacheHit:true` and
 `__cachedAt` in the reply say so; a short TTL on the volatile types would close it.
+
+## V30 - measured scoping, a cache that notices page changes, and sync/relay recovery (implemented)
+
+Ten lessons from merging V29 with the standalone repo's five commits, each
+closing a gap that session left visible.
+
+**Scoped reads are measured (lesson 1).** The V29 savings panel said what
+scoping (`--where`, `--fields`, `--limit`, `--url-contains`, `--meta`) saves was
+"unmeasured", yet that is the saving a caller actually feels. The page knows the
+unscoped size, so each scoping handler in `inject.js` reports `avoided` bytes on
+its reply (exact up to 2000 rows, a 200-row sample above); the relay records it
+in a new `savings_daily` table. It shows as a `delivery` ledger (`scopedReads`)
+and a tile. It is an upper bound - the caller may never have made the unscoped
+call - and the ledger says so.
+
+**The read cache validates against the page (lesson 2).** Invalidating only on
+our own mutating commands served a stale `net log`/`dom query`/`idb dump` from a
+page that changed by itself. `inject.js` keeps a change counter (a
+MutationObserver on the document, every fetch/XHR and console entry, and
+`IDBObjectStore`/`IDBCursor` writes, counted again when their transaction
+commits); each reply carries it as it was BEFORE the handler ran, and a cache
+hit costs one tiny `page.epoch` probe. A changed counter is a miss. This beats a
+TTL, which is either too short to help or too long to be safe. The cache key now
+includes the tab: the same query on two tabs used to share an entry.
+
+**Whole-page selectors return an outline (lesson 3).** `dom query body|html|main|
+#app|#root|*` used to answer with the first 2000 characters of markup - almost
+always `<head>`/nav boilerplate - so the caller paid and asked again. It now
+returns a depth-limited outline (`tag#id.class [children, text chars]`, at most
+60 lines) unless `--full`. Checking the history first: the 50 broad calls that
+made this look like a 237K-token hotspot ran before the default caps existed,
+so the outline is about making the first answer useful, not a demonstrated
+size cut. The CLI's pre-call warning is gone; the outline is the warning.
+
+**Dashboard smoke test (lesson 4).** `dashboard.test.mjs` fails when a
+`<section class="hud-section">` has no `PANELS` entry (it silently gets no
+chrome) or the reverse, and loads the real dashboard in headless Chromium/Edge
+(`browser-harness.mjs`) asserting every panel is wrapped and there are no page
+errors. `inject-browser.test.mjs` does the same for the in-page agent.
+
+**Sync script (lessons 5 and 6).** `scripts/sync-web-scout.mjs --check` predicts
+conflicts for pending work in both directions without touching the tree;
+`--pull` sets uncommitted `tools/web-scout` work aside and restores it, listing
+conflicts if the restore collides (a `git stash pop` that prints "FAILED" has
+still applied - it is never popped twice). Replayed commits carry a
+`Synced-From: <sha>` trailer and matching prefers it over the subject, which
+breaks on a reworded or squashed commit. The script now has tests against local
+bare repositories; it shipped with an untested crash after a successful push.
+
+**Line endings (lesson 7).** `tools/web-scout/.gitattributes` (`* text=auto
+eol=lf`) keeps the index and every checkout LF. The "mixed endings" that forced
+byte-level patch scripts were mostly Windows tooling: a Python text-mode write
+turns `\n` into `\r\n`.
+
+**Relay recovery (lesson 8).** A blanket `relay.mjs` kill by another session
+took the relay down twice and nothing noticed until a call failed. On
+ECONNREFUSED against a loopback relay the client now starts one, says so, and
+retries once (at most once per 30s; `WEBSCOUT_NO_AUTOSTART=1` opts out; `relay
+status` and `status` never start one). Sessions live in the database and tabs
+reconnect on their own.
+
+**Add-a-command scaffold (lesson 9).** `scaffold-command.mjs <ns.action>` stubs
+the six files a command touches, each marked `SCAFFOLD(type)`;
+`command-coverage.test.mjs` reports every surface a command is missing in one
+failure and refuses unfinished markers.
+
+**Savings over time (lesson 10).** `token-report` carries a 14-day `trend` (per
+day: tokens delivered, tokens left out, `avoidedPct`, cache hits) and the panel
+draws it, so "is the strategy improving" has an answer. Storage-dedup ledgers
+cannot be bucketed by day (they derive from ref counts), so the trend covers
+delivery only. `session end` prints its own line (scoped reads, cache hits).
 
 ## Explicit non-goals
 

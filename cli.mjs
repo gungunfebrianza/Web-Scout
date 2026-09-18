@@ -94,7 +94,7 @@ async function handleRelay(sub) {
   if (sub === 'status') {
     const found = resolveRelayPid(PORT);
     let health = null;
-    try { health = await request('GET', '/health'); } catch { /* not reachable */ }
+    try { health = await request('GET', '/health', undefined, { autostart: false }); } catch { /* not reachable */ }
     printResult({
       running: !!health, port: PORT, pid: health?.relay?.pid ?? found?.pid ?? null,
       pidSource: found?.via ?? null, startedAt: health?.relay?.started_at ?? null, uptimeSeconds: health?.relay?.uptime_seconds ?? null,
@@ -179,6 +179,11 @@ async function handleSession(sub, rawArgs) {
       const tokenReport = await request('GET', `/sessions/${ended.id}/token-report`);
       const top = tokenReport.byType[0];
       console.error(`session #${ended.id} cost: ${tokenReport.totalCalls} call(s), ~${tokenReport.totalEstTokens} estimated tokens${top ? ` (top: ${top.type} ~${top.estTokens})` : ''}.`);
+      const receipt = ended.savingsReceipt;
+      if (receipt && (receipt.scopedCalls || receipt.cacheHits)) {
+        const tok = (bytes) => Math.round(bytes / 4);
+        console.error(`session #${ended.id} savings: ${receipt.scopedCalls} scoped read(s) left out ~${tok(receipt.avoidedBytes)} tokens vs unscoped; ${receipt.cacheHits} cache hit(s) skipped a page round trip (~${tok(receipt.cacheBytes)} tokens still delivered).`);
+      }
       if (ended.token_budget && tokenReport.totalEstTokens > ended.token_budget) {
         console.error(`WARNING: session #${ended.id} used ~${tokenReport.totalEstTokens} estimated tokens, over its declared --token-budget of ${ended.token_budget}.`);
       }
@@ -600,7 +605,7 @@ async function main() {
   }
 
   if (command === 'status') {
-    printResult(await request('GET', '/health'));
+    printResult(await request('GET', '/health', undefined, { autostart: false }));
     return;
   }
 
@@ -874,20 +879,11 @@ async function main() {
   // take a selector as their first positional arg.
   const domSelector = selectorFileValue ? fs.readFileSync(selectorFileValue, 'utf8').trim() : subArgs[0];
 
-  // Pre-call, not post-call: warns BEFORE spend, based on the selector
-  // string alone (no relay round trip needed) - a whole-page/root container
-  // selector is very likely a huge subtree, worth flagging before paying
-  // outerHTML cost for it (printResult's own token-warn note below only
-  // fires AFTER the result is already back and paid for).
-  const BROAD_DOM_QUERY_SELECTORS = new Set(['body', 'html', '#app', '#root', 'main', '#main', '*']);
   const table = {
     dom: {
-      query: () => {
-        if (!fullValue && !metaValue && BROAD_DOM_QUERY_SELECTORS.has(String(domSelector).trim().toLowerCase())) {
-          console.error(`NOTE: selector "${domSelector}" looks like a whole-page/root container - likely a huge subtree. Consider a more specific selector (id/class/data-attribute), --meta if you only need tag/id/class/matchCount, or --full only if the whole subtree is genuinely needed.`);
-        }
-        return send('dom.query', { selector: domSelector, full: fullValue, meta: metaValue });
-      },
+      // A whole-page selector (body/html/#app/...) is answered with an outline
+      // by inject.js itself, so the CLI no longer needs a pre-call warning.
+      query: () => send('dom.query', { selector: domSelector, full: fullValue, meta: metaValue }),
       click: () => send('dom.click', { selector: domSelector, nth: nthValue !== undefined ? Number(nthValue) : undefined }),
       fill: () => send('dom.fill', { selector: domSelector, value: subArgs[1], nth: nthValue !== undefined ? Number(nthValue) : undefined }),
       rect: () => send('dom.rect', { selector: domSelector }),

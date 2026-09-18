@@ -20,6 +20,7 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { startRelay } from './relay-control.mjs';
 
 export const HOST = process.env.WEBSCOUT_HOST || '127.0.0.1';
 export const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
@@ -64,7 +65,30 @@ function emitNote(text, key = text) {
 
 const staleRelayWarned = new Set();
 
-export async function request(method, pathName, body) {
+// A relay that died (another session's blanket `relay.mjs` kill did this
+// twice) used to be noticed only when a call failed, then restarted by hand.
+// On ECONNREFUSED against a loopback relay the client now starts one and
+// retries once. Not more than once per 30s per process, so a relay that
+// crashes on boot cannot turn every call into a spawn; WEBSCOUT_NO_AUTOSTART=1
+// opts out. Sessions live in the DB, and open tabs reconnect by themselves.
+const AUTOSTART_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+const AUTOSTART_COOLDOWN_MS = 30000;
+let lastAutostartAt = 0;
+
+const isConnectionRefused = (err) => (err?.cause?.code ?? err?.code) === 'ECONNREFUSED';
+
+async function autostartRelay() {
+  if (process.env.WEBSCOUT_NO_AUTOSTART === '1' || !AUTOSTART_HOSTS.has(HOST)) return null;
+  if (Date.now() - lastAutostartAt < AUTOSTART_COOLDOWN_MS) return null;
+  lastAutostartAt = Date.now();
+  try {
+    const started = await startRelay({ port: PORT, host: HOST });
+    if (started.started) return started;
+  } catch { /* fall through to the ordinary unreachable error */ }
+  return null;
+}
+
+export async function request(method, pathName, body, { autostart = true } = {}) {
   const opts = { method };
   if (body !== undefined) {
     opts.headers = { 'Content-Type': 'application/json' };
@@ -74,7 +98,14 @@ export async function request(method, pathName, body) {
   try {
     res = await fetch(`${BASE}${pathName}`, opts);
   } catch (err) {
-    throw new Error(`cannot reach the web-scout relay at ${BASE} - is it running? Start it with "node tools/web-scout/relay.mjs". (${err.message})`);
+    const started = isConnectionRefused(err) && autostart ? await autostartRelay() : null;
+    if (!started) throw new Error(`cannot reach the web-scout relay at ${BASE} - is it running? Start it with "node tools/web-scout/cli.mjs relay start". (${err.message})`);
+    emitNote(`the relay was not running - started a fresh one (pid ${started.pid}, log ${started.log}). Open tabs reconnect within a few seconds; the active session is kept in the database. Set WEBSCOUT_NO_AUTOSTART=1 to disable this.`, 'relay-autostart');
+    try {
+      res = await fetch(`${BASE}${pathName}`, opts);
+    } catch (retryErr) {
+      throw new Error(`started a relay at ${BASE} but it still cannot be reached (${retryErr.message}) - see ${started.log}`);
+    }
   }
   // Mid-session macro nudge (see relay.mjs's /command handler): carried as a
   // response HEADER, not folded into the JSON body, because /command's body

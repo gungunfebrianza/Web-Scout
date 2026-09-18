@@ -96,3 +96,77 @@ test('the read-cache hit still counts toward the running total (it is still read
   assert.ok(miss >= before);
   assert.ok(hit >= miss, 'a cache hit must not lower the total');
 });
+
+// A tab that reports its own change counter (inject.js's pageEpoch).
+async function connectEpochTab() {
+  let domQueryCalls = 0;
+  const tab = await connectFakeAgent(relay.port, {
+    'dom.query': () => { domQueryCalls += 1; return { found: true, call: domQueryCalls }; },
+    'idb.dump': (p) => ({ store: p.store, rows: [{ id: 1 }], count: 1 }),
+  }, { name: 'epoch-tab', epoch: 0 });
+  return { tab, calls: () => domQueryCalls };
+}
+const tabQuery = (type, params) => api('POST', '/command', { type, params, agent: 'epoch-tab' });
+
+test('a page that changed on its own is no longer answered from the cache', { skip: skipLive }, async () => {
+  const { tab, calls } = await connectEpochTab();
+  try {
+    const first = await tabQuery('dom.query', { selector: '#x' });
+    const second = await tabQuery('dom.query', { selector: '#x' });
+    assert.equal(first.json.result.__cacheHit, undefined);
+    assert.equal(second.json.result.__cacheHit, true, 'nothing changed - still a hit');
+    assert.equal(calls(), 1);
+
+    tab.state.epoch = 5; // the page changed without any command from us
+    const third = await tabQuery('dom.query', { selector: '#x' });
+    assert.notEqual(third.json.result.__cacheHit, true, 'a changed page must not be served the stale read');
+    assert.equal(third.json.result.call, 2);
+
+    const fourth = await tabQuery('dom.query', { selector: '#x' });
+    assert.equal(fourth.json.result.__cacheHit, true, 'the fresh read is cached against the new epoch');
+
+    const report = (await api('GET', '/token-report')).json.result;
+    assert.ok(report.savings.readCache.pageStaleMisses >= 1);
+  } finally {
+    tab.close();
+  }
+});
+
+test('the read cache is per tab: the same query on another tab is not a hit', { skip: skipLive }, async () => {
+  const { tab } = await connectEpochTab();
+  try {
+    await tabQuery('dom.query', { selector: '#per-tab' });
+    const other = await command('dom.query', { selector: '#per-tab' }); // the default tab, different answer
+    assert.notEqual(other.json.result.__cacheHit, true);
+    assert.equal(other.json.result.found, undefined, 'must come from the default tab, not the epoch tab');
+  } finally {
+    tab.close();
+  }
+});
+
+test('a scoped read is counted in the scopedReads ledger and the daily trend', { skip: skipLive }, async () => {
+  const { tab } = await connectEpochTab();
+  try {
+    const before = (await api('GET', '/token-report')).json.result.savings;
+    const beforeBytes = before.ledgers.find((l) => l.key === 'scopedReads').bytesSaved;
+    tab.state.avoided = 4000;
+    await tabQuery('idb.dump', { store: 'widgets', where: { id: 1 } });
+    const after = (await api('GET', '/token-report')).json.result.savings;
+    const ledger = after.ledgers.find((l) => l.key === 'scopedReads');
+    assert.equal(ledger.kind, 'delivery');
+    assert.equal(ledger.bytesSaved - beforeBytes, 4000);
+    assert.ok(after.byKind.delivery.bytesSaved >= 4000);
+    const today = after.trend.find((t) => t.day === new Date().toISOString().slice(0, 10));
+    assert.ok(today && today.avoidedBytes >= 4000, 'the daily trend carries the avoided bytes');
+    assert.ok(today.avoidedPct > 0);
+  } finally {
+    tab.close();
+  }
+});
+
+test('session end returns a savings receipt for this session', { skip: skipLive }, async () => {
+  const { json } = await api('POST', `/sessions/${sessionId}/end`);
+  assert.ok(json.result.savingsReceipt.scopedCalls >= 1);
+  assert.ok(json.result.savingsReceipt.avoidedBytes >= 4000);
+  assert.ok(json.result.savingsReceipt.cacheHits >= 1);
+});

@@ -84,9 +84,15 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   (`x-webscout-session-tokens` header, printed past a threshold - override
   with `WEBSCOUT_TOKEN_THRESHOLD=<n>`) - correctly counts same-session
   cache hits too, not just freshly-dispatched calls
-- Same-session read-result cache (identical read, nothing mutated since ->
-  answered from cache, never re-dispatched), wired into both `/command` and
-  `macro run`'s own replay loop
+- Same-session read-result cache (identical read on the same tab, nothing
+  mutated since -> answered from cache, never re-dispatched), wired into both
+  `/command` and `macro run`'s own replay loop. A hit is first checked against
+  the page's own change counter (DOM mutations, fetch/XHR and console entries,
+  IndexedDB writes), so a page that changed by itself is re-read, not served stale
+- Scoped reads are measured: `--where`/`--fields`/`--limit`/`--url-contains`/
+  `--meta` and whole-page outlines report what they left out (a `scopedReads`
+  ledger plus a 14-day trend in `token-report` and the dashboard), and
+  `session end` prints a per-session savings line
 - Content-addressed dedup, at seven different granularities: whole action
   results, params, individual snapshot rows, individual macro steps, console
   messages/stacks, net URLs, and verity/diff results - each stored physically
@@ -446,6 +452,7 @@ startup unless noted:
 | `WEBSCOUT_AI_BACKEND_URL` | none | Where the optional `ask` command sends its prompt - see "Ask AI" in the architecture doc. Live-editable from the dashboard's Settings dialog with no restart. |
 | `WEBSCOUT_DB_PATH` | `tools/web-scout/webscout.db` | Relocates the SQLite file that stores everything. |
 | `WEBSCOUT_TOKEN_THRESHOLD` | `5000` | Running-total token ticker prints only once a session's total passes this (read by the CLI/MCP client). |
+| `WEBSCOUT_NO_AUTOSTART` | unset | Set to `1` to stop the CLI/MCP client from starting a relay when the port refuses connections (it retries the call once after starting one, at most once per 30s). |
 | `WEBSCOUT_PID_PATH` | `<tmpdir>/webscout-relay-<port>.pid` | Where the relay writes its pidfile, used by `relay stop/restart`. |
 | `WEBSCOUT_TEST_LIVE` | unset | Set to `1` to run the relay-touching tests against the already-running relay (needed only for tests that require a connected browser tab). |
 
@@ -542,8 +549,14 @@ start a relay with a tab connected and set `WEBSCOUT_TEST_LIVE=1` (and
 `WEBSCOUT_PORT` if it is not 8973). Static checks that need no relay at all:
 `command-registry.test.mjs` (every `inject.js` handler is classified),
 `cli-spec.test.mjs` (argument validation), `cli-parity.test.mjs` (CLI <-> MCP)
-and `docs-drift.test.mjs` (every command and flag is documented). See
-`.github/workflows/web-scout-tests.yml`.
+`docs-drift.test.mjs` (every command and flag is documented) and
+`command-coverage.test.mjs` (one report of every surface a command is still
+missing, and a refusal of unfinished `scaffold-command.mjs` stubs).
+`inject-browser.test.mjs` and `dashboard.test.mjs` drive a real headless
+Chromium/Edge (`browser-harness.mjs`; set `WEBSCOUT_BROWSER` if none is found -
+they skip themselves without one) to check the page-change counter, the
+whole-page outline, the scoped-read accounting and the dashboard's panel shell.
+See `.github/workflows/web-scout-tests.yml`.
 
 ## Relationship to Verity UI Relay
 
