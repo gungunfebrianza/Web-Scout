@@ -182,6 +182,10 @@ ensureColumn('sessions', 'token_budget', 'token_budget INTEGER');
 // NULL on a pre-migration row (or a row whose result was never deduped)
 // simply means "read result_json directly", same as always.
 ensureColumn('actions', 'result_hash', 'result_hash TEXT');
+// Content-addressed dedup for actions.params_json (see params_blobs table
+// below) - same NULL-means-look-it-up-by-hash convention as result_hash
+// above.
+ensureColumn('actions', 'params_hash', 'params_hash TEXT');
 // Content hash of a snapshot's own stores_json - lets a diff be recognized
 // as "identical content to a diff already computed" across DIFFERENT
 // snapshot ids (every idb.snapshot takes a fresh id even when nothing
@@ -199,6 +203,29 @@ ensureColumn('macros', 'steps_cost_est', 'steps_cost_est INTEGER');
 // How many consecutive-duplicate steps compactMacroSteps removed at
 // record/update time - 0 for a macro with no such noise.
 ensureColumn('macros', 'compacted_steps_removed', 'compacted_steps_removed INTEGER NOT NULL DEFAULT 0');
+// How many steps templatizeMacroSteps folded into a template entry at
+// record/update time (group size minus the one template row that replaces
+// it) - 0 for a macro with no near-duplicate run worth templating.
+ensureColumn('macros', 'templated_steps_removed', 'templated_steps_removed INTEGER NOT NULL DEFAULT 0');
+// Content-addressed dedup for the two highest-volume never-pruned tables -
+// see text_blobs below.
+ensureColumn('console_entries', 'message_hash', 'message_hash TEXT');
+ensureColumn('console_entries', 'stack_hash', 'stack_hash TEXT');
+ensureColumn('net_entries', 'url_hash', 'url_hash TEXT');
+// verity_runs.result_json is NOT NULL, same '' sentinel as console_entries.
+// message below - reuses result_blobs (already generic hash->JSON content
+// storage, no reason for a THIRD table when the mechanism is identical).
+ensureColumn('verity_runs', 'result_hash', 'result_hash TEXT');
+// state_diffs.diff_json is NOT NULL - same '' sentinel, reuses result_blobs
+// (see saveDiff below). Was the one JSON blob in this whole file with zero
+// content-addressing despite the golden-diff CACHE already existing - a
+// cache hit still wrote the full diff_json again, every time.
+ensureColumn('state_diffs', 'diff_hash', 'diff_hash TEXT');
+// Points at the ORIGINAL state_snapshots row whose stores_json (the
+// row-hash reference list, not the rows themselves - those already dedup
+// via snapshot_rows) this row's own stores_json was byte-identical to. NULL
+// for a genuinely fresh/first-seen snapshot content. See saveSnapshot.
+ensureColumn('state_snapshots', 'served_from_snapshot_id', 'served_from_snapshot_id INTEGER');
 
 // ---------- content-addressed result storage ----------
 //
@@ -264,6 +291,131 @@ export function getResultDedupSavings() {
   };
 }
 
+// ---------- content-addressed PARAMS storage ----------
+//
+// result_blobs above dedups actions.result_json; actions.params_json was the
+// one asymmetric gap left in that pattern - the very field
+// findRepeatedActionLoops/redundancyKey already group calls BY (same type +
+// same params = a loop/redundant-call candidate) was still stored as a full
+// physical copy on every single row, even for the tight-polling-loop shape
+// those detectors exist to find (the same params string, repeated verbatim,
+// dozens of times in a row). Same intern-on-write/resolve-on-read/ref_count
+// shape as result_blobs, own table since the two are logically distinct
+// content domains even though the mechanism is identical.
+db.exec(`
+CREATE TABLE IF NOT EXISTS params_blobs (
+  hash          TEXT PRIMARY KEY,
+  json          TEXT NOT NULL,
+  byte_length   INTEGER NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  ref_count     INTEGER NOT NULL DEFAULT 0
+);
+`);
+const stmtGetParamsBlob = db.prepare('SELECT json FROM params_blobs WHERE hash = ?');
+const stmtInsertParamsBlob = db.prepare('INSERT INTO params_blobs (hash, json, byte_length, first_seen_at, ref_count) VALUES (?, ?, ?, ?, 1)');
+const stmtBumpParamsBlob = db.prepare('UPDATE params_blobs SET ref_count = ref_count + 1 WHERE hash = ?');
+const stmtHasParamsBlob = db.prepare('SELECT 1 FROM params_blobs WHERE hash = ?');
+
+function internParams(paramsJson) {
+  const hash = crypto.createHash('sha256').update(paramsJson).digest('hex');
+  if (stmtHasParamsBlob.get(hash)) {
+    stmtBumpParamsBlob.run(hash);
+    return { hash, dedup: true };
+  }
+  stmtInsertParamsBlob.run(hash, paramsJson, paramsJson.length, new Date().toISOString());
+  return { hash, dedup: false };
+}
+
+function resolveParamsJson(paramsJson, paramsHash) {
+  if (paramsJson !== null && paramsJson !== undefined) return paramsJson;
+  if (!paramsHash) return null;
+  return stmtGetParamsBlob.get(paramsHash)?.json ?? null;
+}
+
+// ---------- generic content-addressed TEXT storage ----------
+//
+// console_entries/net_entries are explicitly NOT pruned (see their own
+// section below) and net_entries alone already holds 60K+ real rows - the
+// one place in this whole file with meaningful volume and ZERO dedup of any
+// kind until now. A noisy page logging the same warning hundreds of times,
+// or the same endpoint failing on every poll, pays full message/url bytes
+// on every single occurrence. Same intern-on-write/resolve-on-read/
+// ref_count shape as result_blobs/params_blobs, generic (plain text, not
+// JSON) since a console message or a URL is not itself a JSON value.
+db.exec(`
+CREATE TABLE IF NOT EXISTS text_blobs (
+  hash          TEXT PRIMARY KEY,
+  text          TEXT NOT NULL,
+  byte_length   INTEGER NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  ref_count     INTEGER NOT NULL DEFAULT 0
+);
+`);
+const stmtGetTextBlob = db.prepare('SELECT text FROM text_blobs WHERE hash = ?');
+const stmtInsertTextBlob = db.prepare('INSERT INTO text_blobs (hash, text, byte_length, first_seen_at, ref_count) VALUES (?, ?, ?, ?, 1)');
+const stmtBumpTextBlob = db.prepare('UPDATE text_blobs SET ref_count = ref_count + 1 WHERE hash = ?');
+const stmtHasTextBlob = db.prepare('SELECT 1 FROM text_blobs WHERE hash = ?');
+
+function internText(text) {
+  const hash = crypto.createHash('sha256').update(text).digest('hex');
+  if (stmtHasTextBlob.get(hash)) {
+    stmtBumpTextBlob.run(hash);
+    return { hash, dedup: true };
+  }
+  stmtInsertTextBlob.run(hash, text, text.length, new Date().toISOString());
+  return { hash, dedup: false };
+}
+
+// console_entries.message is NOT NULL (pre-existing schema, real production
+// rows) - rebuilding that table just to allow NULL is a needless-risk table
+// rewrite against 60K+ live net_entries-scale data, so a deduped message is
+// stored as '' (empty string, satisfies NOT NULL) instead of NULL, resolved
+// back via the hash exactly like a NULL sentinel would be. A genuinely empty
+// console message is not a realistic case (nothing meaningful to log); even
+// if it happened, resolving '' as "look it up" still returns the correct
+// (also empty) interned text, so there is no real ambiguity.
+function resolveTextEmptySentinel(text, hash) {
+  if (text !== '') return text;
+  if (!hash) return text;
+  return stmtGetTextBlob.get(hash)?.text ?? text;
+}
+
+// net_entries.url and console_entries.stack are already nullable columns -
+// real NULL sentinel, same convention as result_hash/params_hash.
+function resolveTextNullSentinel(text, hash) {
+  if (text !== null && text !== undefined) return text;
+  if (!hash) return null;
+  return stmtGetTextBlob.get(hash)?.text ?? null;
+}
+
+export function getTextDedupSavings() {
+  const row = db.prepare(
+    'SELECT COUNT(*) AS uniqueBlobs, SUM(ref_count) AS totalReferences, SUM(byte_length) AS uniqueBytes, SUM((ref_count - 1) * byte_length) AS bytesSaved FROM text_blobs',
+  ).get();
+  const bytesSaved = row.bytesSaved || 0;
+  return {
+    uniqueBlobs: row.uniqueBlobs || 0,
+    totalReferences: row.totalReferences || 0,
+    uniqueBytes: row.uniqueBytes || 0,
+    bytesSaved,
+    estTokensSaved: Math.round(bytesSaved / CHARS_PER_TOKEN_ESTIMATE),
+  };
+}
+
+export function getParamsDedupSavings() {
+  const row = db.prepare(
+    'SELECT COUNT(*) AS uniqueBlobs, SUM(ref_count) AS totalReferences, SUM(byte_length) AS uniqueBytes, SUM((ref_count - 1) * byte_length) AS bytesSaved FROM params_blobs',
+  ).get();
+  const bytesSaved = row.bytesSaved || 0;
+  return {
+    uniqueBlobs: row.uniqueBlobs || 0,
+    totalReferences: row.totalReferences || 0,
+    uniqueBytes: row.uniqueBytes || 0,
+    bytesSaved,
+    estTokensSaved: Math.round(bytesSaved / CHARS_PER_TOKEN_ESTIMATE),
+  };
+}
+
 // ---------- content-addressed snapshot ROW storage ----------
 //
 // result_blobs above dedups a whole action result; a snapshot's stores_json
@@ -315,7 +467,8 @@ function resolveStores(storesJson) {
   const stores = {};
   for (const [name, entry] of Object.entries(parsed)) {
     if (entry && Array.isArray(entry.rowHashes)) {
-      stores[name] = { rows: entry.rowHashes.map((h) => JSON.parse(resolveSnapshotRow(h))) };
+      const rawRows = entry.rowHashes.map((h) => JSON.parse(resolveSnapshotRow(h)));
+      stores[name] = { rows: expandColumnDictionary(rawRows, entry.dict || null) };
     } else {
       stores[name] = entry;
     }
@@ -335,6 +488,92 @@ export function getSnapshotRowDedupSavings() {
     bytesSaved,
     estTokensSaved: Math.round(bytesSaved / CHARS_PER_TOKEN_ESTIMATE),
   };
+}
+
+// ---------- columnar field-dictionary compaction (pre-row-hash pass) ----------
+//
+// snapshot_rows above dedups a WHOLE row repeating across snapshots/stores -
+// it does nothing for a field VALUE repeating across ROWS of the SAME store
+// in one single snapshot (e.g. 500 rows all sharing status:'active'), since
+// that repetition is present even the FIRST time a store is ever
+// snapshotted, before row-hash dedup has a second occurrence to catch. This
+// is a pre-pass applied BEFORE internSnapshotRow: any field whose value
+// repeats across >= COLUMN_DICT_MIN_REPEATS rows of the same store is
+// factored into a small per-store dictionary, and each row keeps only a
+// {$dictRef: index} in that field's place - so the interned row's own JSON
+// (and its hash) is smaller too, compounding with row-hash dedup instead of
+// competing with it.
+const COLUMN_DICT_MIN_REPEATS = 2;
+
+function buildColumnDictionary(rows) {
+  const valueCounts = new Map(); // field -> Map(JSON value -> count)
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    for (const [k, v] of Object.entries(row)) {
+      let m = valueCounts.get(k);
+      if (!m) { m = new Map(); valueCounts.set(k, m); }
+      const vj = JSON.stringify(v);
+      m.set(vj, (m.get(vj) || 0) + 1);
+    }
+  }
+  const candidateFields = new Set(
+    [...valueCounts.entries()]
+      .filter(([, m]) => [...m.values()].some((c) => c >= COLUMN_DICT_MIN_REPEATS))
+      .map(([k]) => k),
+  );
+  if (!candidateFields.size) return null;
+  const dict = {};
+  const indexOf = {};
+  for (const field of candidateFields) {
+    const values = [...valueCounts.get(field).keys()].map((vj) => JSON.parse(vj));
+    dict[field] = values;
+    indexOf[field] = new Map(values.map((v, i) => [JSON.stringify(v), i]));
+  }
+  const compactRows = rows.map((row) => {
+    if (!row || typeof row !== 'object') return row;
+    const out = {};
+    for (const [k, v] of Object.entries(row)) {
+      out[k] = candidateFields.has(k) ? { $d: indexOf[k].get(JSON.stringify(v)) } : v;
+    }
+    return out;
+  });
+  // A {$d:N} reference has real overhead of its own (~7-8 bytes) - a
+  // short/low-cardinality repeated value (e.g. a 3-char status enum
+  // repeated twice) can end up costing MORE as a reference than it ever did
+  // inline. Only apply when the WHOLE store's rows + the one-time
+  // dictionary genuinely serialize smaller than the raw rows would have -
+  // never a "compaction" that makes storage bigger.
+  const rawBytes = JSON.stringify(rows).length;
+  const compactBytes = JSON.stringify(compactRows).length + JSON.stringify(dict).length;
+  if (compactBytes >= rawBytes) return null;
+  return { dict, rows: compactRows };
+}
+
+function expandColumnDictionary(rows, dict) {
+  if (!dict) return rows;
+  return rows.map((row) => {
+    if (!row || typeof row !== 'object') return row;
+    const out = {};
+    for (const [k, v] of Object.entries(row)) {
+      out[k] = (v && typeof v === 'object' && v.$d !== undefined) ? dict[k][v.$d] : v;
+    }
+    return out;
+  });
+}
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS column_dict_savings (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  bytes_saved INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO column_dict_savings (id, bytes_saved) VALUES (1, 0);
+`);
+const stmtBumpColumnDictSavings = db.prepare('UPDATE column_dict_savings SET bytes_saved = bytes_saved + ? WHERE id = 1');
+const stmtGetColumnDictSavings = db.prepare('SELECT bytes_saved FROM column_dict_savings WHERE id = 1');
+
+export function getColumnDictSavings() {
+  const bytesSaved = stmtGetColumnDictSavings.get()?.bytes_saved || 0;
+  return { bytesSaved, estTokensSaved: Math.round(bytesSaved / CHARS_PER_TOKEN_ESTIMATE) };
 }
 
 // ---------- sessions ----------
@@ -395,8 +634,8 @@ export function listSessions() {
 // ---------- actions ----------
 
 const stmtInsertAction = db.prepare(`
-  INSERT INTO actions (session_id, type, params_json, result_json, result_hash, ok, error, started_at, ended_at, duration_ms, agent_name)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO actions (session_id, type, params_json, params_hash, result_json, result_hash, ok, error, started_at, ended_at, duration_ms, agent_name)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtListActions = db.prepare('SELECT * FROM actions WHERE session_id = ? ORDER BY id DESC');
 const stmtListActionsAsc = db.prepare('SELECT * FROM actions WHERE session_id = ? ORDER BY id ASC');
@@ -406,6 +645,7 @@ const stmtGetActionById = db.prepare('SELECT * FROM actions WHERE id = ?');
 export function logAction({ sessionId, type, params, result, ok, error, startedAt, endedAt, agentName }) {
   const durationMs = new Date(endedAt).getTime() - new Date(startedAt).getTime();
   const resultJson = result === undefined ? null : JSON.stringify(result);
+  const paramsJson = params === undefined ? null : JSON.stringify(params);
   // Content-addressed dedup (see result_blobs above): a duplicate result is
   // stored ONCE, ever - this row just points at it by hash and stores NULL
   // for its own result_json.
@@ -416,9 +656,19 @@ export function logAction({ sessionId, type, params, result, ok, error, startedA
     resultHash = interned.hash;
     if (interned.dedup) storedResultJson = null;
   }
+  // Same dedup for params_json (see params_blobs above) - the tight-loop
+  // shape (same call, same params, dozens of times) is exactly where this
+  // pays off most.
+  let storedParamsJson = paramsJson;
+  let paramsHash = null;
+  if (paramsJson !== null) {
+    const interned = internParams(paramsJson);
+    paramsHash = interned.hash;
+    if (interned.dedup) storedParamsJson = null;
+  }
   const info = stmtInsertAction.run(
     sessionId, type,
-    params === undefined ? null : JSON.stringify(params),
+    storedParamsJson, paramsHash,
     storedResultJson, resultHash,
     ok ? 1 : 0,
     error ?? null,
@@ -432,7 +682,8 @@ export function listActions(sessionId, { ascending = false } = {}) {
   const rows = (ascending ? stmtListActionsAsc : stmtListActions).all(Number(sessionId));
   return rows.map((r) => {
     const resultJson = resolveResultJson(r.result_json, r.result_hash);
-    return { ...r, params: r.params_json ? JSON.parse(r.params_json) : null, result: resultJson ? JSON.parse(resultJson) : null };
+    const paramsJson = resolveParamsJson(r.params_json, r.params_hash);
+    return { ...r, params: paramsJson ? JSON.parse(paramsJson) : null, result: resultJson ? JSON.parse(resultJson) : null };
   });
 }
 
@@ -440,7 +691,8 @@ export function getActionById(actionId) {
   const row = stmtGetActionById.get(Number(actionId));
   if (!row) throw new Error(`no such action: ${actionId}`);
   const resultJson = resolveResultJson(row.result_json, row.result_hash);
-  return { ...row, params: row.params_json ? JSON.parse(row.params_json) : null, result: resultJson ? JSON.parse(resultJson) : null };
+  const paramsJson = resolveParamsJson(row.params_json, row.params_hash);
+  return { ...row, params: paramsJson ? JSON.parse(paramsJson) : null, result: resultJson ? JSON.parse(resultJson) : null };
 }
 
 // The heaviest rows this table ever holds are a handful of known result
@@ -466,11 +718,12 @@ export function listActionsSummary(sessionId, { limit } = {}) {
   const rows = stmtListActionsLimit.all(Number(sessionId), lim);
   return rows.map((r) => {
     const resultJson = resolveResultJson(r.result_json, r.result_hash);
+    const paramsJson = resolveParamsJson(r.params_json, r.params_hash);
     const result = resultJson ? JSON.parse(resultJson) : null;
     const redact = HEAVY_ACTION_RESULT_REDACTORS[r.type];
     return {
       ...r,
-      params: r.params_json ? JSON.parse(r.params_json) : null,
+      params: paramsJson ? JSON.parse(paramsJson) : null,
       result: redact ? redact(result) : result,
     };
   });
@@ -493,16 +746,18 @@ const stmtActionCostByType = db.prepare(`
   SELECT a.type AS type,
     COUNT(*) AS calls,
     SUM(LENGTH(COALESCE(a.result_json, rb.json, ''))) AS resultBytes,
-    SUM(LENGTH(COALESCE(a.params_json, ''))) AS paramsBytes
+    SUM(LENGTH(COALESCE(a.params_json, pb.json, ''))) AS paramsBytes
   FROM actions a LEFT JOIN result_blobs rb ON a.result_hash = rb.hash
+    LEFT JOIN params_blobs pb ON a.params_hash = pb.hash
   WHERE a.session_id = ? GROUP BY a.type ORDER BY resultBytes DESC
 `);
 const stmtActionCostByTypeAll = db.prepare(`
   SELECT a.type AS type,
     COUNT(*) AS calls,
     SUM(LENGTH(COALESCE(a.result_json, rb.json, ''))) AS resultBytes,
-    SUM(LENGTH(COALESCE(a.params_json, ''))) AS paramsBytes
+    SUM(LENGTH(COALESCE(a.params_json, pb.json, ''))) AS paramsBytes
   FROM actions a LEFT JOIN result_blobs rb ON a.result_hash = rb.hash
+    LEFT JOIN params_blobs pb ON a.params_hash = pb.hash
   GROUP BY a.type ORDER BY resultBytes DESC
 `);
 // chars/4 - the commonly-cited rough proxy for English/JSON-ish text tokens,
@@ -544,7 +799,7 @@ export function getActionCostReport(sessionId) {
 // have returned. Consecutive same-type+same-params calls within
 // REPEAT_WINDOW_MS of each other count as one loop; a run of 3+ is reported
 // (2 identical calls minutes apart is ordinary re-checking, not a loop).
-const stmtActionSequence = db.prepare('SELECT type, params_json, started_at FROM actions WHERE session_id = ? ORDER BY id ASC');
+const stmtActionSequence = db.prepare('SELECT type, params_json, params_hash, started_at FROM actions WHERE session_id = ? ORDER BY id ASC');
 const REPEAT_WINDOW_MS = 5000;
 const REPEAT_MIN_RUN = 3;
 
@@ -554,7 +809,13 @@ export function findRepeatedActionLoops(sessionId) {
   let run = null;
   const flush = () => { if (run && run.count >= REPEAT_MIN_RUN) loops.push({ type: run.type, params: run.params, count: run.count, firstAt: run.firstAt, lastAt: run.lastAt }); };
   for (const r of rows) {
-    const key = `${r.type}::${r.params_json ?? ''}`;
+    // params_hash (when set) IS the identity of the params content - same
+    // hash means byte-identical params whether or not this particular row
+    // was the one that got deduped, so it's a strictly cheaper AND equally
+    // correct loop-detection key than the raw JSON string used to be.
+    // Falls back to the raw string only for a pre-migration row with no
+    // params_hash yet.
+    const key = `${r.type}::${r.params_hash ?? r.params_json ?? ''}`;
     const t = new Date(r.started_at).getTime();
     if (run && run.key === key && Number.isFinite(t) && t - run.lastT <= REPEAT_WINDOW_MS) {
       run.count += 1;
@@ -562,7 +823,8 @@ export function findRepeatedActionLoops(sessionId) {
       run.lastAt = r.started_at;
     } else {
       flush();
-      run = { key, type: r.type, params: r.params_json ? JSON.parse(r.params_json) : null, count: 1, firstAt: r.started_at, lastAt: r.started_at, lastT: t };
+      const paramsJson = resolveParamsJson(r.params_json, r.params_hash);
+      run = { key, type: r.type, params: paramsJson ? JSON.parse(paramsJson) : null, count: 1, firstAt: r.started_at, lastAt: r.started_at, lastT: t };
     }
   }
   flush();
@@ -586,7 +848,7 @@ export function findRepeatedActionLoops(sessionId) {
 // a meaningful redundancy signal.
 const REDUNDANCY_CHECK_TYPES = new Set(['idb.dump', 'dom.query']);
 const stmtActionsForRedundancy = db.prepare(
-  "SELECT id, type, params_json, result_json, result_hash, started_at FROM actions WHERE session_id = ? AND type IN ('idb.dump','dom.query') ORDER BY id ASC",
+  "SELECT id, type, params_json, params_hash, result_json, result_hash, started_at FROM actions WHERE session_id = ? AND type IN ('idb.dump','dom.query') ORDER BY id ASC",
 );
 
 function redundancyKey(type, paramsJson) {
@@ -608,7 +870,12 @@ export function findRedundantCalls(sessionId) {
   const lastByKey = new Map(); // `${type}::${key}` -> { hash, actionId, at }
   const redundant = [];
   for (const r of rows) {
-    const key = `${r.type}::${redundancyKey(r.type, r.params_json)}`;
+    // params_json is NULL for a deduped row (see params_blobs) - resolve it
+    // first so redundancyKey still sees the real store/selector, not a
+    // blank target.
+    const paramsJson = resolveParamsJson(r.params_json, r.params_hash);
+    const target = redundancyKey(r.type, paramsJson);
+    const key = `${r.type}::${target}`;
     // result_hash is already computed once at write time (logAction's
     // internResult) - reuse it directly instead of re-hashing the full
     // result content here. Only a pre-migration row (result_hash NULL,
@@ -616,7 +883,7 @@ export function findRedundantCalls(sessionId) {
     const hash = r.result_hash || hashResultJson(r.result_json);
     const prev = lastByKey.get(key);
     if (prev && prev.hash === hash) {
-      redundant.push({ type: r.type, target: redundancyKey(r.type, r.params_json), actionId: r.id, repeatsActionId: prev.actionId, at: r.started_at });
+      redundant.push({ type: r.type, target, actionId: r.id, repeatsActionId: prev.actionId, at: r.started_at });
     }
     lastByKey.set(key, { hash, actionId: r.id, at: r.started_at });
   }
@@ -633,10 +900,10 @@ export function findRedundantCalls(sessionId) {
 // (LENGTH(...) in SQL) - never fetches full result_json here, same
 // no-re-paying-the-bytes-being-measured discipline as getActionCostReport.
 const stmtActionsForTargetCost = db.prepare(
-  "SELECT a.type AS type, a.params_json AS params_json, LENGTH(COALESCE(a.result_json, rb.json, '')) AS resultBytes, LENGTH(COALESCE(a.params_json,'')) AS paramsBytes FROM actions a LEFT JOIN result_blobs rb ON a.result_hash = rb.hash WHERE a.session_id = ? AND a.type IN ('idb.dump','dom.query') ORDER BY a.id ASC",
+  "SELECT a.type AS type, COALESCE(a.params_json, pb.json) AS params_json, LENGTH(COALESCE(a.result_json, rb.json, '')) AS resultBytes, LENGTH(COALESCE(a.params_json, pb.json, '')) AS paramsBytes FROM actions a LEFT JOIN result_blobs rb ON a.result_hash = rb.hash LEFT JOIN params_blobs pb ON a.params_hash = pb.hash WHERE a.session_id = ? AND a.type IN ('idb.dump','dom.query') ORDER BY a.id ASC",
 );
 const stmtActionsForTargetCostAll = db.prepare(
-  "SELECT a.type AS type, a.params_json AS params_json, LENGTH(COALESCE(a.result_json, rb.json, '')) AS resultBytes, LENGTH(COALESCE(a.params_json,'')) AS paramsBytes FROM actions a LEFT JOIN result_blobs rb ON a.result_hash = rb.hash WHERE a.type IN ('idb.dump','dom.query') ORDER BY a.id ASC",
+  "SELECT a.type AS type, COALESCE(a.params_json, pb.json) AS params_json, LENGTH(COALESCE(a.result_json, rb.json, '')) AS resultBytes, LENGTH(COALESCE(a.params_json, pb.json, '')) AS paramsBytes FROM actions a LEFT JOIN result_blobs rb ON a.result_hash = rb.hash LEFT JOIN params_blobs pb ON a.params_hash = pb.hash WHERE a.type IN ('idb.dump','dom.query') ORDER BY a.id ASC",
 );
 
 export function getActionCostByTarget(sessionId) {
@@ -645,6 +912,8 @@ export function getActionCostByTarget(sessionId) {
     : stmtActionsForTargetCostAll.all();
   const byTarget = new Map(); // `${type}::${target}` -> accumulator
   for (const r of rows) {
+    // params_json here is already resolved via the pb JOIN above (SQL-side,
+    // no need for resolveParamsJson in JS).
     const target = redundancyKey(r.type, r.params_json);
     const key = `${r.type}::${target}`;
     const cur = byTarget.get(key) || { type: r.type, target, calls: 0, resultBytes: 0, paramsBytes: 0 };
@@ -679,8 +948,9 @@ export function getActionCostByTarget(sessionId) {
 // session's own tags), not something this function should guess.
 const stmtSessionTokenTotals = db.prepare(`
   SELECT s.id AS sessionId, s.goal AS goal, s.tags AS tagsJson, s.started_at AS startedAt,
-    SUM(LENGTH(COALESCE(a.result_json, rb.json, '')) + LENGTH(COALESCE(a.params_json, ''))) AS totalBytes
+    SUM(LENGTH(COALESCE(a.result_json, rb.json, '')) + LENGTH(COALESCE(a.params_json, pb.json, ''))) AS totalBytes
   FROM sessions s LEFT JOIN actions a ON a.session_id = s.id LEFT JOIN result_blobs rb ON a.result_hash = rb.hash
+    LEFT JOIN params_blobs pb ON a.params_hash = pb.hash
   GROUP BY s.id ORDER BY s.id ASC
 `);
 
@@ -708,6 +978,14 @@ const stmtListAllActions = db.prepare('SELECT * FROM actions ORDER BY id ASC');
 // history (the dashboard's own best-effort catch swallowed the error with
 // no visible sign anything was wrong). `skipped` is returned so the caller
 // can surface it instead of pretending nothing happened.
+//
+// Applies the same HEAVY_ACTION_RESULT_REDACTORS as listActionsSummary -
+// Friction Analytics (this function's only caller, via GET /analytics) only
+// ever reasons about type/timing/loop patterns across EVERY session, never
+// result content, so shipping dom.screenshot dataUrls / idb.snapshot store
+// dumps / net.log entries here (previously: every one of them, cross-session,
+// unredacted - confirmed the one dedicated table-wide fetch with zero
+// redaction anywhere in the codebase) was pure waste with no consumer.
 export function listAllActions() {
   const rows = stmtListAllActions.all();
   const actions = [];
@@ -715,10 +993,13 @@ export function listAllActions() {
   for (const r of rows) {
     try {
       const resultJson = resolveResultJson(r.result_json, r.result_hash);
+      const paramsJson = resolveParamsJson(r.params_json, r.params_hash);
+      const result = resultJson ? JSON.parse(resultJson) : null;
+      const redact = HEAVY_ACTION_RESULT_REDACTORS[r.type];
       actions.push({
         ...r,
-        params: r.params_json ? JSON.parse(r.params_json) : null,
-        result: resultJson ? JSON.parse(resultJson) : null,
+        params: paramsJson ? JSON.parse(paramsJson) : null,
+        result: redact ? redact(result) : result,
       });
     } catch {
       skipped += 1;
@@ -730,41 +1011,79 @@ export function listAllActions() {
 // ---------- state snapshots ----------
 
 const stmtInsertSnapshot = db.prepare(`
-  INSERT INTO state_snapshots (session_id, action_id, taken_at, counts_json, stores_json, byte_size, agent_name, golden_name, content_hash)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO state_snapshots (session_id, action_id, taken_at, counts_json, stores_json, byte_size, agent_name, golden_name, content_hash, served_from_snapshot_id)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtGetSnapshot = db.prepare('SELECT * FROM state_snapshots WHERE id = ?');
 const stmtListSnapshots = db.prepare('SELECT id, session_id, action_id, taken_at, counts_json, byte_size, agent_name, golden_name FROM state_snapshots WHERE session_id = ? ORDER BY id DESC');
 const stmtGetGoldenSnapshot = db.prepare('SELECT * FROM state_snapshots WHERE golden_name = ? ORDER BY id DESC LIMIT 1');
+// Cross-session by design, same as findCachedDiff below - the exact same
+// live-tab state re-snapshotted (a pre/post pair around a no-op action, a
+// stability-confirming poll) is a real, observed shape, not hypothetical.
+// Only matches an ORIGINAL (served_from_snapshot_id IS NULL) row, same
+// no-chaining discipline as findCachedDiff.
+const stmtFindSnapshotByContentHash = db.prepare(
+  'SELECT id, stores_json FROM state_snapshots WHERE content_hash = ? AND served_from_snapshot_id IS NULL ORDER BY id DESC LIMIT 1',
+);
 
 export function saveSnapshot({ sessionId, actionId, stores, agentName, goldenName }) {
   const takenAt = new Date().toISOString();
-  const counts = {};
-  const refs = {};
-  for (const [name, entry] of Object.entries(stores)) {
-    const rows = Array.isArray(entry?.rows) ? entry.rows : [];
-    counts[name] = rows.length;
-    refs[name] = { rowHashes: rows.map((row) => internSnapshotRow(JSON.stringify(row))) };
-  }
-  const refsJson = JSON.stringify(refs);
   // Content hash is computed off the LOGICAL content (what a caller actually
-  // receives), not the compact refs encoding - two snapshots taken from
-  // identical store content must still hash identically regardless of which
-  // rows happened to already be interned, or findCachedDiff below would
-  // silently stop matching real repeats.
+  // receives) BEFORE any interning work happens - two snapshots taken from
+  // identical store content must hash identically regardless of which rows
+  // happened to already be interned, or findCachedDiff below would silently
+  // stop matching real repeats.
   const logicalStoresJson = JSON.stringify(stores);
   const contentHash = crypto.createHash('sha256').update(logicalStoresJson).digest('hex');
+  const counts = {};
+  for (const [name, entry] of Object.entries(stores)) counts[name] = Array.isArray(entry?.rows) ? entry.rows.length : 0;
+
+  // Snapshot-level dedup (see stmtFindSnapshotByContentHash above): the
+  // row-hash REFERENCE LIST (stores_json) is its own real storage cost -
+  // confirmed live at ~20KB/snapshot average - separate from the rows it
+  // points to (already deduped via snapshot_rows). An exact content repeat
+  // skips rebuilding that list entirely (no internSnapshotRow/column-dict
+  // work either - nothing new to intern when nothing changed).
+  const existing = stmtFindSnapshotByContentHash.get(contentHash);
+  if (existing) {
+    const info = stmtInsertSnapshot.run(sessionId, actionId ?? null, takenAt, JSON.stringify(counts), '', logicalStoresJson.length, agentName ?? 'default', goldenName ?? null, contentHash, existing.id);
+    return { id: Number(info.lastInsertRowid), takenAt, counts, byteSize: logicalStoresJson.length, agentName: agentName ?? 'default', goldenName: goldenName ?? null, contentHash };
+  }
+
+  const refs = {};
+  let columnDictBytesSaved = 0;
+  for (const [name, entry] of Object.entries(stores)) {
+    const rows = Array.isArray(entry?.rows) ? entry.rows : [];
+    const colDict = buildColumnDictionary(rows);
+    const rowsForStorage = colDict ? colDict.rows : rows;
+    if (colDict) columnDictBytesSaved += JSON.stringify(rows).length - JSON.stringify(rowsForStorage).length;
+    refs[name] = { rowHashes: rowsForStorage.map((row) => internSnapshotRow(JSON.stringify(row))) };
+    if (colDict) refs[name].dict = colDict.dict;
+  }
+  if (columnDictBytesSaved > 0) stmtBumpColumnDictSavings.run(columnDictBytesSaved);
+  const refsJson = JSON.stringify(refs);
   // byte_size stays the LOGICAL size too (same discipline as the
   // COALESCE(result_json, blob) reads elsewhere) - a snapshot's reported
   // size never shrinks just because this run happened to dedup well.
-  const info = stmtInsertSnapshot.run(sessionId, actionId ?? null, takenAt, JSON.stringify(counts), refsJson, logicalStoresJson.length, agentName ?? 'default', goldenName ?? null, contentHash);
+  const info = stmtInsertSnapshot.run(sessionId, actionId ?? null, takenAt, JSON.stringify(counts), refsJson, logicalStoresJson.length, agentName ?? 'default', goldenName ?? null, contentHash, null);
   return { id: Number(info.lastInsertRowid), takenAt, counts, byteSize: logicalStoresJson.length, agentName: agentName ?? 'default', goldenName: goldenName ?? null, contentHash };
+}
+
+// Read-side counterpart to the snapshot-level dedup above - a row whose own
+// stores_json is '' (served_from_snapshot_id set) fetches the ORIGINAL
+// row's stores_json instead. Named distinctly from resolveSnapshotRow above
+// (that one resolves a single ROW by hash; this resolves a whole
+// SNAPSHOT's reference list by pointer) - different granularity, easy to
+// confuse otherwise.
+function resolveSnapshotStoresJson(row) {
+  if (row.stores_json !== '' || !row.served_from_snapshot_id) return row.stores_json;
+  return stmtGetSnapshot.get(row.served_from_snapshot_id)?.stores_json ?? row.stores_json;
 }
 
 export function getSnapshot(id) {
   const row = stmtGetSnapshot.get(Number(id));
   if (!row) throw new Error(`no such snapshot: ${id}`);
-  return { ...row, counts: JSON.parse(row.counts_json), stores: resolveStores(row.stores_json) };
+  return { ...row, counts: JSON.parse(row.counts_json), stores: resolveStores(resolveSnapshotStoresJson(row)) };
 }
 
 export function listSnapshots(sessionId) {
@@ -776,14 +1095,23 @@ export function listSnapshots(sessionId) {
 export function getGoldenSnapshot(name) {
   const row = stmtGetGoldenSnapshot.get(name);
   if (!row) throw new Error(`no such golden snapshot: ${name}`);
-  return { ...row, counts: JSON.parse(row.counts_json), stores: resolveStores(row.stores_json) };
+  return { ...row, counts: JSON.parse(row.counts_json), stores: resolveStores(resolveSnapshotStoresJson(row)) };
+}
+
+export function getSnapshotDedupSavings() {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS dedupedCount, SUM(LENGTH(orig.stores_json)) AS bytesSaved
+    FROM state_snapshots sd JOIN state_snapshots orig ON sd.served_from_snapshot_id = orig.id
+  `).get();
+  const bytesSaved = row.bytesSaved || 0;
+  return { dedupedCount: row.dedupedCount || 0, bytesSaved, estTokensSaved: Math.round(bytesSaved / CHARS_PER_TOKEN_ESTIMATE) };
 }
 
 // ---------- state diffs ----------
 
 const stmtInsertDiff = db.prepare(`
-  INSERT INTO state_diffs (session_id, action_id, snapshot_from_id, snapshot_to_id, computed_at, summary_json, diff_json, served_from_diff_id)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO state_diffs (session_id, action_id, snapshot_from_id, snapshot_to_id, computed_at, summary_json, diff_json, diff_hash, served_from_diff_id)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtGetDiff = db.prepare('SELECT * FROM state_diffs WHERE id = ?');
 const stmtListDiffs = db.prepare('SELECT id, session_id, action_id, snapshot_from_id, snapshot_to_id, computed_at, summary_json, served_from_diff_id FROM state_diffs WHERE session_id = ? ORDER BY id DESC');
@@ -801,9 +1129,29 @@ const stmtFindDiffByContentHash = db.prepare(`
   ORDER BY sd.id DESC LIMIT 1
 `);
 
+// Read-side counterpart to internResult's '' sentinel (diff_json is NOT
+// NULL, same convention as resolveVerityResultJson/resolveTextEmptySentinel
+// elsewhere in this file).
+function resolveDiffJson(diffJson, diffHash) {
+  if (diffJson) return diffJson;
+  if (!diffHash) return diffJson;
+  return stmtGetResultBlob.get(diffHash)?.json ?? diffJson;
+}
+
 export function saveDiff({ sessionId, actionId, fromId, toId, summary, diff, servedFromDiffId }) {
   const computedAt = new Date().toISOString();
-  const info = stmtInsertDiff.run(sessionId, actionId ?? null, fromId, toId, computedAt, JSON.stringify(summary), JSON.stringify(diff), servedFromDiffId ?? null);
+  const diffJson = JSON.stringify(diff);
+  // Content-addressed dedup (see result_blobs above, reused here - a diff
+  // blob is just JSON content like an action result, no reason for a
+  // separate table) - a cache-served diff (servedFromDiffId set) is
+  // BYTE-IDENTICAL to the diff it was served from by construction, so this
+  // always dedups on a real cache hit; it can also dedup two UNRELATED
+  // diffs that happen to produce the same output (e.g. both report {} for
+  // a no-op), which is fine and harmless, same content-only discipline as
+  // snapshot_rows.
+  const interned = internResult(diffJson);
+  const storedDiffJson = interned.dedup ? '' : diffJson;
+  const info = stmtInsertDiff.run(sessionId, actionId ?? null, fromId, toId, computedAt, JSON.stringify(summary), storedDiffJson, interned.hash, servedFromDiffId ?? null);
   return { id: Number(info.lastInsertRowid), computedAt, summary, diff, servedFromDiffId: servedFromDiffId ?? null };
 }
 
@@ -814,13 +1162,21 @@ export function findCachedDiff(fromContentHash, toContentHash) {
   if (!fromContentHash || !toContentHash) return null;
   const row = stmtFindDiffByContentHash.get(fromContentHash, toContentHash);
   if (!row) return null;
-  return { id: row.id, summary: JSON.parse(row.summary_json), diff: JSON.parse(row.diff_json) };
+  return { id: row.id, summary: JSON.parse(row.summary_json), diff: JSON.parse(resolveDiffJson(row.diff_json, row.diff_hash)) };
 }
 
+// bytesSaved now reflects what's REALLY not physically re-stored on a cache
+// hit (the interned blob's own byte_length, via result_blobs - see saveDiff
+// above), not the diff_json column's own length (which is '' for every
+// deduped row post-fix, and previously - before diff-content-addressing
+// existed - was always the full duplicated size, i.e. this ledger used to
+// report a byte count that was never actually saved on disk).
 export function getGoldenDiffCacheSavings() {
-  const row = db.prepare(
-    "SELECT COUNT(*) AS cacheHits, SUM(LENGTH(diff_json)) AS bytesSaved FROM state_diffs WHERE served_from_diff_id IS NOT NULL",
-  ).get();
+  const row = db.prepare(`
+    SELECT COUNT(*) AS cacheHits, SUM(LENGTH(rb.json)) AS bytesSaved
+    FROM state_diffs sd JOIN result_blobs rb ON sd.diff_hash = rb.hash
+    WHERE sd.served_from_diff_id IS NOT NULL
+  `).get();
   const bytesSaved = row.bytesSaved || 0;
   return { cacheHits: row.cacheHits || 0, bytesSaved, estTokensSaved: Math.round(bytesSaved / CHARS_PER_TOKEN_ESTIMATE) };
 }
@@ -828,7 +1184,7 @@ export function getGoldenDiffCacheSavings() {
 export function getDiff(id) {
   const row = stmtGetDiff.get(Number(id));
   if (!row) throw new Error(`no such diff: ${id}`);
-  return { ...row, summary: JSON.parse(row.summary_json), diff: JSON.parse(row.diff_json) };
+  return { ...row, summary: JSON.parse(row.summary_json), diff: JSON.parse(resolveDiffJson(row.diff_json, row.diff_hash)) };
 }
 
 export function listDiffs(sessionId) {
@@ -863,17 +1219,36 @@ export function listQA(sessionId) {
 // but a meaningfully higher volume profile; documented in README.
 
 const stmtInsertConsole = db.prepare(`
-  INSERT INTO console_entries (session_id, agent_name, level, message, stack, occurred_at)
-  VALUES (?, ?, ?, ?, ?, ?)
+  INSERT INTO console_entries (session_id, agent_name, level, message, message_hash, stack, stack_hash, occurred_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtListConsole = db.prepare('SELECT * FROM console_entries WHERE session_id = ? ORDER BY id DESC');
 const stmtListConsoleLimit = db.prepare('SELECT * FROM console_entries WHERE session_id = ? ORDER BY id DESC LIMIT ?');
+
+function hydrateConsoleEntry(r) {
+  return {
+    ...r,
+    message: resolveTextEmptySentinel(r.message, r.message_hash),
+    stack: resolveTextNullSentinel(r.stack, r.stack_hash),
+  };
+}
 
 export function insertConsoleEntries(sessionId, agentName, entries) {
   db.exec('BEGIN');
   try {
     for (const e of entries) {
-      stmtInsertConsole.run(sessionId, agentName ?? 'default', e.level, e.message, e.stack ?? null, e.at);
+      // Content-addressed dedup (see text_blobs above) - a page logging the
+      // same warning/error message repeatedly stores it physically once.
+      const msgInterned = internText(e.message ?? '');
+      const storedMessage = msgInterned.dedup ? '' : (e.message ?? '');
+      let storedStack = e.stack ?? null;
+      let stackHash = null;
+      if (e.stack) {
+        const stackInterned = internText(e.stack);
+        stackHash = stackInterned.hash;
+        if (stackInterned.dedup) storedStack = null;
+      }
+      stmtInsertConsole.run(sessionId, agentName ?? 'default', e.level, storedMessage, msgInterned.hash, storedStack, stackHash, e.at);
     }
     db.exec('COMMIT');
   } catch (err) {
@@ -884,21 +1259,36 @@ export function insertConsoleEntries(sessionId, agentName, entries) {
 
 export function listConsoleEntries(sessionId, { limit } = {}) {
   const lim = Number.isFinite(limit) && limit > 0 ? Number(limit) : -1;
-  return lim > 0 ? stmtListConsoleLimit.all(Number(sessionId), lim) : stmtListConsole.all(Number(sessionId));
+  const rows = lim > 0 ? stmtListConsoleLimit.all(Number(sessionId), lim) : stmtListConsole.all(Number(sessionId));
+  return rows.map(hydrateConsoleEntry);
 }
 
 const stmtInsertNet = db.prepare(`
-  INSERT INTO net_entries (session_id, agent_name, via, method, url, status, error, started_at, ended_at, occurred_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO net_entries (session_id, agent_name, via, method, url, url_hash, status, error, started_at, ended_at, occurred_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtListNet = db.prepare('SELECT * FROM net_entries WHERE session_id = ? ORDER BY id DESC');
 const stmtListNetLimit = db.prepare('SELECT * FROM net_entries WHERE session_id = ? ORDER BY id DESC LIMIT ?');
+
+function hydrateNetEntry(r) {
+  return { ...r, url: resolveTextNullSentinel(r.url, r.url_hash) };
+}
 
 export function insertNetEntries(sessionId, agentName, entries) {
   db.exec('BEGIN');
   try {
     for (const e of entries) {
-      stmtInsertNet.run(sessionId, agentName ?? 'default', e.via, e.method, e.url ?? null, e.status ?? null, e.error ?? null, e.startedAt, e.endedAt, e.endedAt);
+      // Content-addressed dedup (see text_blobs above) - the same endpoint
+      // hit repeatedly (a polling loop, a retried failing call) stores its
+      // URL physically once across all 60K+ rows this table already holds.
+      let storedUrl = e.url ?? null;
+      let urlHash = null;
+      if (e.url) {
+        const urlInterned = internText(e.url);
+        urlHash = urlInterned.hash;
+        if (urlInterned.dedup) storedUrl = null;
+      }
+      stmtInsertNet.run(sessionId, agentName ?? 'default', e.via, e.method, storedUrl, urlHash, e.status ?? null, e.error ?? null, e.startedAt, e.endedAt, e.endedAt);
     }
     db.exec('COMMIT');
   } catch (err) {
@@ -909,7 +1299,8 @@ export function insertNetEntries(sessionId, agentName, entries) {
 
 export function listNetEntries(sessionId, { limit } = {}) {
   const lim = Number.isFinite(limit) && limit > 0 ? Number(limit) : -1;
-  return lim > 0 ? stmtListNetLimit.all(Number(sessionId), lim) : stmtListNet.all(Number(sessionId));
+  const rows = lim > 0 ? stmtListNetLimit.all(Number(sessionId), lim) : stmtListNet.all(Number(sessionId));
+  return rows.map(hydrateNetEntry);
 }
 
 // ---------- macros (record/replay) ----------
@@ -919,7 +1310,7 @@ export function listNetEntries(sessionId, { limit } = {}) {
 // recording mechanism, since every dom/idb/eval action is already
 // persisted to `actions` the moment it runs.
 
-const stmtInsertMacro = db.prepare('INSERT INTO macros (name, source_session_id, steps_json, created_at, steps_cost_est, compacted_steps_removed) VALUES (?, ?, ?, ?, ?, ?)');
+const stmtInsertMacro = db.prepare('INSERT INTO macros (name, source_session_id, steps_json, created_at, steps_cost_est, compacted_steps_removed, templated_steps_removed) VALUES (?, ?, ?, ?, ?, ?, ?)');
 const stmtGetMacro = db.prepare('SELECT * FROM macros WHERE id = ?');
 const stmtListMacros = db.prepare('SELECT * FROM macros ORDER BY id DESC');
 const stmtDeleteMacro = db.prepare('DELETE FROM macros WHERE id = ?');
@@ -976,14 +1367,98 @@ export function getStepBlobDedupSavings() {
 // A pre-migration macro's steps_json is still the full legacy array of
 // {type,params} objects; a new row's steps_json is an array of step-content
 // hashes (plain strings) - discriminated by the first element's type, same
-// legacy-fallback discipline as resolveStores above.
+// legacy-fallback discipline as resolveStores above. expandTemplateSteps
+// (below) is applied unconditionally on every read, so templating is
+// invisible to every caller (relay routes, cli.mjs, tests) - macro.steps
+// always looks like the full, concrete, replayable step list; only the
+// on-disk storage/step-blob volume is smaller.
 function hydrateMacro(row) {
   if (!row) return row;
   const parsed = JSON.parse(row.steps_json);
-  const steps = parsed.length && typeof parsed[0] === 'string'
+  const stored = parsed.length && typeof parsed[0] === 'string'
     ? parsed.map((hash) => JSON.parse(stmtGetStepBlob.get(hash)?.json ?? 'null'))
     : parsed;
-  return { ...row, steps };
+  return { ...row, steps: expandTemplateSteps(stored) };
+}
+
+// ---------- macro step templating (near-duplicate steps) ----------
+//
+// compactMacroSteps below only removes EXACT consecutive duplicates - a
+// fixture-seeding macro (10 idb.put calls differing only by row.id/name)
+// gets zero benefit from that, since every step differs by at least one
+// value. This groups a run of consecutive same-type, same-param-KEY-shape
+// steps into one template entry ({template:true, type, paramsTemplate,
+// varyingKeys, values}) once the group is large enough to be worth it -
+// expandTemplateSteps reconstructs the original concrete steps from it on
+// every read (see hydrateMacro above), so replay behavior is unchanged;
+// only the stored/interned step volume shrinks.
+const TEMPLATE_MIN_GROUP_SIZE = 3;
+
+function paramShapeKey(step) {
+  return `${step.type}|${Object.keys(step.params ?? {}).sort().join(',')}`;
+}
+
+export function templatizeMacroSteps(steps) {
+  const groups = [];
+  let current = null;
+  for (const step of steps) {
+    const shapeKey = paramShapeKey(step);
+    if (current && current.shapeKey === shapeKey) {
+      current.items.push(step);
+    } else {
+      current = { shapeKey, type: step.type, items: [step] };
+      groups.push(current);
+    }
+  }
+  const out = [];
+  let templated = 0;
+  for (const g of groups) {
+    if (g.items.length < TEMPLATE_MIN_GROUP_SIZE) {
+      out.push(...g.items);
+      continue;
+    }
+    const paramKeys = Object.keys(g.items[0].params ?? {});
+    const varyingKeys = paramKeys.filter((k) => {
+      const firstJson = JSON.stringify(g.items[0].params?.[k]);
+      return g.items.some((it) => JSON.stringify(it.params?.[k]) !== firstJson);
+    });
+    if (!varyingKeys.length) {
+      // Every step in the group is byte-identical - compactMacroSteps
+      // already collapses exact consecutive dupes; leave alone rather than
+      // build a degenerate zero-variable template.
+      out.push(...g.items);
+      continue;
+    }
+    const paramsTemplate = { ...g.items[0].params };
+    for (const k of varyingKeys) paramsTemplate[k] = { $var: k };
+    out.push({
+      template: true,
+      type: g.type,
+      paramsTemplate,
+      varyingKeys,
+      values: g.items.map((it) => varyingKeys.map((k) => it.params?.[k])),
+    });
+    templated += g.items.length - 1; // steps folded into this one template entry
+  }
+  return { steps: out, templated };
+}
+
+// Read-side counterpart - expands every template entry back into its
+// original concrete {type,params} steps, in order; a non-template step
+// passes through unchanged (also makes this safe to call on an
+// already-expanded/legacy steps array, which has no template entries at
+// all).
+export function expandTemplateSteps(steps) {
+  const out = [];
+  for (const step of steps) {
+    if (!step || !step.template) { out.push(step); continue; }
+    for (const values of step.values) {
+      const params = { ...step.paramsTemplate };
+      step.varyingKeys.forEach((k, i) => { params[k] = values[i]; });
+      out.push({ type: step.type, params });
+    }
+  }
+  return out;
 }
 
 // Consecutive identical type+params steps are recording noise (a retried
@@ -1023,11 +1498,16 @@ function estimateStepsTokenCost(steps) {
 export function createMacro({ name, sourceSessionId, steps }) {
   const createdAt = new Date().toISOString();
   const { steps: compacted, removed } = compactMacroSteps(steps);
+  // Cost estimate is summed over the real (expanded) replay step count -
+  // templating changes storage shape only, never which/how-many steps
+  // actually dispatch, so it must be computed off `compacted`, not the
+  // post-template list.
   const costEst = estimateStepsTokenCost(compacted);
-  const stepHashes = compacted.map(internStep);
+  const { steps: templatized, templated } = templatizeMacroSteps(compacted);
+  const stepHashes = templatized.map(internStep);
   let info;
   try {
-    info = stmtInsertMacro.run(name, sourceSessionId ?? null, JSON.stringify(stepHashes), createdAt, costEst, removed);
+    info = stmtInsertMacro.run(name, sourceSessionId ?? null, JSON.stringify(stepHashes), createdAt, costEst, removed, templated);
   } catch (err) {
     if (String(err.message).includes('UNIQUE')) throw new Error(`a macro named "${name}" already exists`);
     throw err;
@@ -1035,13 +1515,14 @@ export function createMacro({ name, sourceSessionId, steps }) {
   return hydrateMacro(stmtGetMacro.get(Number(info.lastInsertRowid)));
 }
 
-const stmtUpdateMacroSteps = db.prepare('UPDATE macros SET steps_json = ?, steps_cost_est = ?, compacted_steps_removed = ? WHERE id = ?');
+const stmtUpdateMacroSteps = db.prepare('UPDATE macros SET steps_json = ?, steps_cost_est = ?, compacted_steps_removed = ?, templated_steps_removed = ? WHERE id = ?');
 
 export function updateMacroSteps(id, steps) {
   const { steps: compacted, removed } = compactMacroSteps(steps);
   const costEst = estimateStepsTokenCost(compacted);
-  const stepHashes = compacted.map(internStep);
-  const info = stmtUpdateMacroSteps.run(JSON.stringify(stepHashes), costEst, removed, Number(id));
+  const { steps: templatized, templated } = templatizeMacroSteps(compacted);
+  const stepHashes = templatized.map(internStep);
+  const info = stmtUpdateMacroSteps.run(JSON.stringify(stepHashes), costEst, removed, templated, Number(id));
   if (info.changes === 0) throw new Error(`no such macro: ${id}`);
   return hydrateMacro(stmtGetMacro.get(Number(id)));
 }
@@ -1077,21 +1558,39 @@ export function deleteMacro(id) {
 // not this DB - so relay.mjs merges its own counter in alongside this at
 // the route level; this export only ever reports what SQL can prove.
 const stmtMacroCompactionTotal = db.prepare('SELECT COALESCE(SUM(compacted_steps_removed), 0) AS totalRemoved FROM macros');
+const stmtMacroTemplatingTotal = db.prepare('SELECT COALESCE(SUM(templated_steps_removed), 0) AS totalRemoved FROM macros');
 
 export function getTokenSavingsReport() {
   const resultDedup = getResultDedupSavings();
+  const paramsDedup = getParamsDedupSavings();
+  const textDedup = getTextDedupSavings();
+  // goldenDiffCache now reuses result_blobs for diff storage (see saveDiff)
+  // - its own bytesSaved (per CACHE-HIT ROW) and resultDedup's bytesSaved
+  // (per UNIQUE BLOB's ref_count) both real, but overlapping: a diff cache
+  // hit's bytes are counted by both. goldenDiffCache is reported on its own
+  // (cacheHits is a distinct, non-overlapping metric worth keeping visible)
+  // but deliberately excluded from the totals below to avoid double-
+  // counting the same physical bytes twice.
   const goldenDiffCache = getGoldenDiffCacheSavings();
   const macroCompaction = { stepsRemoved: stmtMacroCompactionTotal.get().totalRemoved };
+  const macroTemplating = { stepsRemoved: stmtMacroTemplatingTotal.get().totalRemoved };
   const snapshotRowDedup = getSnapshotRowDedupSavings();
+  const snapshotDedup = getSnapshotDedupSavings();
   const stepBlobDedup = getStepBlobDedupSavings();
+  const columnDictCompaction = getColumnDictSavings();
   return {
     resultDedup,
+    paramsDedup,
+    textDedup,
     goldenDiffCache,
     macroCompaction,
+    macroTemplating,
     snapshotRowDedup,
+    snapshotDedup,
     stepBlobDedup,
-    totalBytesSaved: resultDedup.bytesSaved + goldenDiffCache.bytesSaved + snapshotRowDedup.bytesSaved + stepBlobDedup.bytesSaved,
-    totalEstTokensSaved: resultDedup.estTokensSaved + goldenDiffCache.estTokensSaved + snapshotRowDedup.estTokensSaved + stepBlobDedup.estTokensSaved,
+    columnDictCompaction,
+    totalBytesSaved: resultDedup.bytesSaved + paramsDedup.bytesSaved + textDedup.bytesSaved + snapshotRowDedup.bytesSaved + snapshotDedup.bytesSaved + stepBlobDedup.bytesSaved + columnDictCompaction.bytesSaved,
+    totalEstTokensSaved: resultDedup.estTokensSaved + paramsDedup.estTokensSaved + textDedup.estTokensSaved + snapshotRowDedup.estTokensSaved + snapshotDedup.estTokensSaved + stepBlobDedup.estTokensSaved + columnDictCompaction.estTokensSaved,
   };
 }
 
@@ -1106,8 +1605,8 @@ export function getTokenSavingsReport() {
 // entry.
 
 const stmtInsertVerityRun = db.prepare(`
-  INSERT INTO verity_runs (session_id, label, passed, step_count, passed_count, failed_count, result_json, imported_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO verity_runs (session_id, label, passed, step_count, passed_count, failed_count, result_json, result_hash, imported_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtListVerityRuns = db.prepare('SELECT id, session_id, label, passed, step_count, passed_count, failed_count, imported_at FROM verity_runs WHERE session_id = ? ORDER BY id DESC');
 const stmtGetVerityRun = db.prepare('SELECT * FROM verity_runs WHERE id = ?');
@@ -1117,18 +1616,33 @@ export function importVerityRun({ sessionId, label, result }) {
   const passedCount = steps.filter((s) => s?.passed).length;
   const failedCount = steps.length - passedCount;
   const importedAt = new Date().toISOString();
+  const resultJson = JSON.stringify(result);
+  // Reuses result_blobs (see internResult above) - a repeat CRV import of a
+  // mostly-unchanged scenario now stores that result JSON physically once,
+  // not on every single re-run. '' sentinel because result_json is NOT NULL
+  // (pre-existing schema) - same convention as console_entries.message
+  // below.
+  const interned = internResult(resultJson);
+  const storedResultJson = interned.dedup ? '' : resultJson;
   const info = stmtInsertVerityRun.run(
     Number(sessionId), label ?? null,
     result?.passed === undefined ? null : (result.passed ? 1 : 0),
     steps.length, passedCount, failedCount,
-    JSON.stringify(result), importedAt,
+    storedResultJson, interned.hash, importedAt,
   );
   return { ...hydrateVerityRun(stmtGetVerityRun.get(Number(info.lastInsertRowid))) };
 }
 
+function resolveVerityResultJson(resultJson, resultHash) {
+  if (resultJson) return resultJson;
+  if (!resultHash) return resultJson;
+  return stmtGetResultBlob.get(resultHash)?.json ?? resultJson;
+}
+
 function hydrateVerityRun(row) {
   if (!row) return row;
-  return { ...row, passed: row.passed === null ? null : !!row.passed, result: row.result_json ? JSON.parse(row.result_json) : null };
+  const resultJson = resolveVerityResultJson(row.result_json, row.result_hash);
+  return { ...row, passed: row.passed === null ? null : !!row.passed, result: resultJson ? JSON.parse(resultJson) : null };
 }
 
 export function listVerityRuns(sessionId) {

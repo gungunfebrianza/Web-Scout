@@ -1313,11 +1313,41 @@ const routes = [
           results.push({ type: step.type, ok: true, skipped: true, reason: 'idb.put: identical row already present' });
           continue;
         }
+        // Same-session read-result cache (see READ_CACHEABLE_TYPES/
+        // readResultCache above) previously only applied inside POST
+        // /command - a macro replaying a read step (idb.dump, dom.query...)
+        // dispatched to the page every single time, even immediately after
+        // an earlier step (in this SAME replay, or an earlier /command call
+        // this session) already asked the identical question with nothing
+        // mutating in between. Wired through here too now, so a macro's
+        // read steps get the exact same cache-hit short-circuit.
+        const cacheKey = READ_CACHEABLE_TYPES.has(step.type) ? `${step.type}::${JSON.stringify(step.params ?? {})}` : null;
+        if (cacheKey) {
+          const cached = readResultCache.get(session.id)?.get(cacheKey);
+          if (cached && cached.mutationCounter === getMutationCounter(session.id)) {
+            runtimeCacheHitCount += 1;
+            runtimeCacheBytesSaved += JSON.stringify(cached.result).length;
+            results.push({ type: step.type, ok: true, skipped: true, reason: 'read result served from same-session cache', result: cached.result, durationMs: 0 });
+            continue;
+          }
+        }
         const stepTimeoutMs = LONG_POLL_TYPES.has(step.type) ? (Number(step.params?.timeoutMs) || 15000) + 5000
           : step.type === 'idb.snapshot' ? SNAPSHOT_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
         const stepStartedAt = Date.now();
         try {
           const { result } = await withLoggedAction(session.id, step.type, { ...step.params, via: 'macro', macroId: macro.id, macroName: macro.name }, () => dispatchCommand(step.type, step.params ?? {}, stepTimeoutMs, agentName), agentName);
+          // A macro's mutating steps (idb.put/delete/eval/...) previously
+          // never bumped sessionMutationCounters - invisible to /command's
+          // own cache too, so a stale read cached before this macro ran
+          // could still be served afterward even though the macro just
+          // changed the exact state that read reflects. Bumping it here
+          // closes that correctness gap, not just enables the cache-hit
+          // path above.
+          if (MUTATING_TYPES.has(step.type)) bumpMutationCounter(session.id);
+          if (cacheKey) {
+            if (!readResultCache.has(session.id)) readResultCache.set(session.id, new Map());
+            readResultCache.get(session.id).set(cacheKey, { result, mutationCounter: getMutationCounter(session.id), cachedAt: new Date().toISOString() });
+          }
           results.push({ type: step.type, ok: true, result, durationMs: Date.now() - stepStartedAt });
         } catch (err) {
           results.push({ type: step.type, ok: false, error: err.message, durationMs: Date.now() - stepStartedAt });

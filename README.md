@@ -70,10 +70,22 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   to one session - plus repeated-call loops, redundant re-checks, and a
   `savings` block proving what the mechanisms below actually saved
 - Same-session read-result cache (identical read, nothing mutated since ->
-  answered from cache, never re-dispatched) and content-addressed result
-  dedup (an identical result, even across sessions, physically stored once)
+  answered from cache, never re-dispatched), wired into both `/command` and
+  `macro run`'s own replay loop
+- Content-addressed dedup, at seven different granularities: whole action
+  results, params, individual snapshot rows, individual macro steps, console
+  messages/stacks, net URLs, and verity/diff results - each stored physically
+  once, ever, regardless of how many rows/sessions/macros reference it
+- Column-dictionary snapshot compaction (a repeated field value across one
+  store's rows folds into a small per-store dictionary) and macro step
+  templating (a run of near-duplicate steps folds into one template + value
+  list) - both transparent on read, invisible to any caller
 - Golden-diff memoization by content (not snapshot id) - a repeat
-  `diff-golden` check against unchanged data skips re-sending the full diff
+  `diff-golden` check against unchanged data skips re-sending AND
+  re-storing the full diff; matching snapshot-level dedup for `idb.snapshot`
+  itself
+- Macro `idb.put` no-op skip (a replayed write that changes nothing is never
+  dispatched) and a compact-by-default `macro run` response
 - Pre-call cost hints: a whole-page selector, or a store with real
   historical cost, warns BEFORE you pay for it - with a learned number, not
   a guess

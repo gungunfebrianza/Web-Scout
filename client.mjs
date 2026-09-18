@@ -286,6 +286,14 @@ export function buildVerityScenarioStub(macro) {
 export async function runSuite(steps, { continueOnError = false } = {}) {
   if (!Array.isArray(steps) || !steps.length) throw new Error('steps must be a non-empty array');
   const results = [];
+  // Memoizes a diff-golden step's own outcome by (name, idB) WITHIN this one
+  // runSuite call - the DB-level golden-diff cache (see db.mjs's
+  // findCachedDiff) already avoids recomputing/re-shipping the diff BODY for
+  // a content-identical pair, but a suite JSON that lists the literal same
+  // {name, idB} pair twice (e.g. re-checked after two different macro
+  // phases that both happened to leave state clean) still pays a full HTTP
+  // round trip for the second one. This skips that round trip entirely.
+  const diffGoldenCache = new Map();
   for (const step of steps) {
     let outcome;
     try {
@@ -302,9 +310,16 @@ export async function runSuite(steps, { continueOnError = false } = {}) {
         outcome = { ok: r.passed, detail: r };
       } else if (step.type === 'diff-golden') {
         if (!step.name || !step.idB) throw new Error('diff-golden step requires "name" and "idB"');
-        const r = await request('POST', '/state/diff', { golden: step.name, idB: Number(step.idB) });
-        const clean = Object.keys(r.summary || {}).length === 0;
-        outcome = { ok: step.expectClean === false ? true : clean, detail: r };
+        const memoKey = `${step.name}::${step.idB}`;
+        const memoized = diffGoldenCache.get(memoKey);
+        if (memoized) {
+          outcome = { ok: memoized.ok, detail: { ...memoized.detail, ranFromWithinSuiteCache: true } };
+        } else {
+          const r = await request('POST', '/state/diff', { golden: step.name, idB: Number(step.idB) });
+          const clean = Object.keys(r.summary || {}).length === 0;
+          outcome = { ok: step.expectClean === false ? true : clean, detail: r };
+          diffGoldenCache.set(memoKey, outcome);
+        }
       } else {
         outcome = { ok: false, detail: { error: `unknown suite step type '${step.type}' - expected macro/assert/diff-golden` } };
       }

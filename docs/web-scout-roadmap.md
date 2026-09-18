@@ -1772,6 +1772,180 @@ estimate); MCP server parity for `--meta`/`--since`/the pre-call hints (CLI-
 only friction this round, matching V20/V21's own precedent of deferring MCP
 parity until a real MCP-driven session hits the same gaps).
 
+## V24 - token-cost round 3: row-level snapshot dedup, macro no-op skip, cross-macro step dedup (implemented)
+
+V23 deduped a whole action RESULT; this round goes one level finer -
+individual snapshot ROWS and individual macro STEPS - plus stops a macro
+from paying for a write that changes nothing.
+
+- **Row-level snapshot dedup (new `snapshot_rows` table):** `idb.snapshot`
+  previously stored a full `stores_json` blob every time, even though most
+  rows in a real store don't change between two consecutive snapshots (V23's
+  whole-store `content_hash` cache only helped when the ENTIRE store was
+  unchanged). `internSnapshotRow`/`resolveSnapshotRow` (`db.mjs`) hash and
+  store each row's own JSON once, ever - a snapshot's `stores_json` becomes
+  `{storeName: {rowHashes: [...]}}`, expanded back transparently on every
+  read (`resolveStores`). Deliberately content-only (no store+key in the
+  hash) - two different stores holding byte-identical rows legitimately
+  share one physical copy. `getSnapshotRowDedupSavings()` is the proof.
+- **Macro `idb.put` no-op skip:** a replayed `idb.put` whose row (identified
+  by an explicit `id` field) is already byte-identical to what's stored is
+  skipped entirely - no dispatch, no logged action - instead of paying a
+  full round trip to write back the same data. The `idb.get` pre-check
+  itself is never logged (would eat into the very savings this produces).
+  Only safe for a row carrying an explicit `id`; autoIncrement-keyed inserts
+  always dispatch normally (heuristic, not a general keyPath resolver).
+- **`macro run` compact-by-default response:** a step's full result was
+  previously echoed back in FULL on every replay forever, even though a
+  caller almost never needs it (it already has each step's result from
+  recording time). Default response now keeps only
+  `{type,ok,skipped,reason,durationMs}` per step; a FAILED step always keeps
+  full detail (the one case debugging actually needs it); `{"full": true}`
+  opts back into everything.
+- **Cross-macro step dedup (new `step_blobs` table):** two macros sharing an
+  identical prefix (navigate-to-page, log-in) previously each stored that
+  step's full `{type,params}` JSON separately. `internStep` (`db.mjs`) hashes
+  and stores each step's content once, ever, regardless of how many macros -
+  or how many times within one macro, post-compaction - reference it.
+  `getStepBlobDedupSavings()` is the proof.
+
+## V25 - token-cost round 4: macro read-cache wiring, column-dictionary compaction, macro templating, within-suite diff memoization (implemented)
+
+- **Macro run wired into the same-session read-result cache:** V22's
+  same-session read-result cache previously only applied inside `POST
+  /command` - a macro replaying a read step (`idb.dump`/`dom.query`/...)
+  dispatched to the page every single time, even right after an earlier step
+  (this replay, or an earlier `/command` call this session) already asked
+  the identical question with nothing mutating in between. Wired through
+  `macro run`'s own replay loop now too - a hit skips dispatch entirely,
+  response carries `skipped:true, reason: "read result served from
+  same-session cache"`. Fixed a real correctness gap in the same change: a
+  macro's own MUTATING steps (`idb.put`/`idb.delete`/...) were never bumping
+  the session's mutation counter, meaning a stale cached read from before a
+  macro's mutation could still be served afterward - `macro run` now calls
+  `bumpMutationCounter` for every mutating step it dispatches, same as
+  `POST /command` always has.
+- **Column-dictionary snapshot compaction:** `buildColumnDictionary` (V24
+  runs BEFORE row-hashing, complementary to it) factors a field VALUE
+  repeating `>=2` times across one store's rows in a single snapshot (e.g.
+  500 rows sharing `status:"active"`) into a small per-store dictionary,
+  rewriting matching fields to a `{$d: index}` reference - shrinks storage
+  even the FIRST time a store is ever snapshotted, on top of (not instead
+  of) row-level dedup. Only applied when a real net-byte-savings check
+  passes (`buildColumnDictionary` returns `null` otherwise) - a short,
+  low-cardinality value's reference can cost MORE bytes than the value
+  itself, caught live during this round's own verification (a 3-row
+  synthetic fixture reported zero savings until the net-byte check was
+  added) and fixed before shipping. `expandColumnDictionary` is the
+  transparent read-side inverse. `column_dict_savings` table /
+  `getColumnDictSavings()` is the proof.
+- **Macro step templating:** `templatizeMacroSteps` (`db.mjs`) collapses a
+  run of 3+ CONSECUTIVE steps sharing a type and param shape but differing
+  by value only (bulk fixture-seeding `idb.put` calls, most commonly) into
+  one `{template: true, paramsTemplate, varyingKeys, values}` entry;
+  `expandTemplateSteps` transparently expands it back to the full concrete
+  step list on every read (`hydrateMacro`) - invisible to every downstream
+  consumer (relay routes, cost estimates, the suite runner, tests). A group
+  with no varying keys (byte-identical steps) is left alone - V23's
+  `compactMacroSteps` already handles that case. New
+  `macros.templated_steps_removed` column, surfaced as
+  `savings.macroTemplating`.
+- **Within-suite diff-golden memoization:** `suite run` (`client.mjs`) now
+  keeps a local `Map` scoped to one `runSuite` call, keyed by
+  `${name}::${idB}` - a repeated LITERAL `diff-golden` step is answered from
+  this map without issuing the `POST /state/diff` HTTP request at all,
+  distinct from (and additive to) the DB-level content-hash cache (V23),
+  which still pays the full request/response round trip even on a cache
+  hit.
+
+**Considered and not done this round:** suite-level snapshot reuse (the
+original 4th idea for this round) - discovered mid-implementation to be
+non-viable as conceived (the suite runner never dispatches `idb.snapshot`
+itself, so there is no snapshot-taking step to intercept) and, more
+importantly, fully redundant with the already-shipped V23 golden-diff
+content-hash cache even in the case it was meant to help (two diffs with
+identical CONTENT already reuse regardless of snapshot id). Replaced with
+within-suite diff-golden memoization above rather than ship something
+non-functional or duplicative.
+
+## V26 - token-cost round 5: params/console/net/verity dedup, Friction Analytics redaction (implemented)
+
+Closes the one real asymmetry left in the content-addressing pattern
+(`actions.result_json` was deduped since V23; `actions.params_json` -
+the very field loop/redundancy detection already groups calls BY - was
+not) and extends the same pattern to the two highest-volume, explicitly
+never-pruned tables (`console_entries`/`net_entries`, the latter confirmed
+live at 60K+ real rows) plus `verity_runs`.
+
+- **`actions.params_json` dedup (new `params_blobs` table):** same
+  intern-on-write/resolve-on-read/`ref_count` shape as `result_blobs`,
+  applied to params. Exposed (and fixed, in the same change) 5 real
+  correctness landmines: `findRepeatedActionLoops`, `findRedundantCalls`,
+  and 3 byte-counting SQL aggregates (`getActionCostReport`,
+  `getActionCostByTarget`, `getSessionTokenTotals`) all read raw
+  `params_json` directly and would have silently broken or undercounted the
+  moment a row got deduped - all patched to resolve through the hash
+  (`resolveParamsJson` in JS, `LEFT JOIN params_blobs` in SQL) before use.
+  `getParamsDedupSavings()` is the proof.
+- **Console/net text dedup (new `text_blobs` table):** `console_entries.
+  message`/`stack` and `net_entries.url` now intern each repeated value
+  once - a page logging the same warning, or hitting the same failing
+  endpoint, on every poll no longer pays full bytes past the first
+  occurrence. `console_entries.message` is `NOT NULL` (pre-existing schema,
+  real production rows) - rather than a risky live rebuild of a
+  60K-row-scale table, a deduped message is stored as `''` (satisfies
+  `NOT NULL`) instead of `NULL`, resolved back via the hash exactly the
+  same way; `stack`/`url` (already nullable) use a real `NULL` sentinel.
+  `getTextDedupSavings()` is the proof.
+- **`verity_runs.result_json` dedup:** reuses `result_blobs` directly (same
+  content domain as an action result - no reason for a third table). Same
+  `''`-sentinel convention as console messages (`result_json` is
+  `NOT NULL`). A repeat CRV import of a mostly-unchanged scenario now
+  stores that result JSON physically once.
+- **Friction Analytics redaction (`GET /analytics`):** `listAllActions`
+  (the one table-wide, cross-session action fetch in the whole codebase)
+  now applies the same `HEAVY_ACTION_RESULT_REDACTORS` `listActionsSummary`
+  already used - `computeAnalytics` only ever reasons about
+  type/timing/loop patterns, never result content, so parsing and holding
+  `dom.screenshot` dataUrls / `idb.snapshot` dumps / `net.log` entries in
+  memory on every 5s server-side rescan (polled by every open dashboard
+  tab) was pure waste with no consumer.
+
+## V27 - token-cost round 6: snapshot-level dedup, diff content dedup (implemented)
+
+Two structural gaps found on a fresh scan, one of them a real
+self-inconsistency in an already-shipped mechanism rather than a new
+feature.
+
+- **Snapshot-level dedup (new `state_snapshots.served_from_snapshot_id`
+  column):** row-level dedup (V24) already makes individual row content
+  free on repeat, but the ORDERED REFERENCE LIST of row hashes per store
+  (`stores_json` itself) was still written full-size on every single
+  `idb.snapshot`, even when a store had zero changes since the last one -
+  confirmed live at ~20KB/snapshot average across this project's own
+  `webscout.db`. `saveSnapshot` now checks for an existing snapshot with
+  the same `content_hash` (same cross-session-by-design lookup V23's
+  golden-diff cache already uses) before doing any row-interning work at
+  all; a match stores `stores_json` as `''` and points
+  `served_from_snapshot_id` at the original, resolved back transparently by
+  `getSnapshot`/`getGoldenSnapshot`. `getSnapshotDedupSavings()` is the
+  proof.
+- **Diff content dedup (new `state_diffs.diff_hash` column, reuses
+  `result_blobs`):** the V23 golden-diff CACHE only ever skipped
+  *recomputing* a diff on a content-hash match - `saveDiff` still wrote the
+  full `summary_json`/`diff_json` payload into a brand new row every single
+  cache hit, meaning `getGoldenDiffCacheSavings()`'s `bytesSaved` was
+  reporting a number that was never actually saved on disk. `diff_json`
+  (`NOT NULL`) now interns through `result_blobs` with the same
+  `''`-sentinel convention as V26's verity fix; a cache-served diff
+  physically stores nothing new. `getGoldenDiffCacheSavings()` rewritten to
+  report the REAL bytes not re-stored (via the interned blob's own size),
+  and deliberately EXCLUDED from `totalBytesSaved`/`totalEstTokensSaved` -
+  since diff content now shares storage with `result_blobs`, a cache hit's
+  bytes are counted by `resultDedup` already; summing both would double-
+  count the same physical bytes (caught and fixed in this same round,
+  before shipping).
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

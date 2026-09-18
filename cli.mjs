@@ -590,6 +590,38 @@ function usage() {
      instead of each paying for their own full copy. savings.stepBlobDedup is the proof.
    - macro no-op skip: "macro run" skips an idb.put step (with an "id" field on its row) whose row
      is already byte-identical to what's stored - no dispatch, no logged action.
+   - macro read-cache wiring: "macro run"'s own read steps (idb.dump/idb.get/idb.list/dom.query/...)
+     now hit the SAME same-session read-result cache "macro run"'s mutating steps also now correctly
+     bump - a macro re-checking state it (or an earlier /command call) just asked about is served
+     from cache like any other repeat read. Row shows skipped:true, reason "read result served from
+     same-session cache".
+   - column-dictionary snapshot compaction: "idb snapshot" factors a field VALUE repeating across
+     rows of the SAME store in one snapshot (e.g. 500 rows sharing status:"active") into a small
+     per-store dictionary before storing - shrinks storage even the FIRST time a store is ever
+     snapshotted, on top of (not instead of) row-level dedup. savings.columnDictCompaction is the proof.
+   - macro step templating: "macro record"/"macro update" fold a run of 3+ consecutive steps that
+     share a type and param shape but differ by value (bulk fixture-seeding idb.put calls, most
+     commonly) into one template entry + a value list - transparently expanded back on every read, so
+     replay is unaffected; only storage/step-blob volume shrinks. savings.macroTemplating is the proof.
+   - within-suite diff-golden memoization: "suite run" answers a literal repeat {name, idB}
+     diff-golden step from its own in-memory cache for that one run, skipping even the HTTP round
+     trip (not just the diff recompute) - response carries ranFromWithinSuiteCache:true.
+   - params dedup: an identical params object (e.g. the same {store} in a tight idb.dump polling
+     loop) is physically stored ONCE, ever, same mechanism as DB-level result dedup above but for
+     the params side. savings.paramsDedup is the proof; loop/redundant-call detection and cost
+     reports still see the real content transparently.
+   - console/net text dedup: console_entries.message/stack and net_entries.url (both never pruned,
+     net_entries alone real production volume in the tens of thousands of rows) intern each repeated
+     value once - a page logging the same warning, or hitting the same failing endpoint, on every
+     poll no longer pays full bytes past the first occurrence. savings.textDedup is the proof.
+   - verity result dedup: "verity import" of a byte-identical scenario result (a re-run CRV round
+     with no real change) reuses the same DB-level result_blobs storage as action results - no flag
+     needed. savings.resultDedup covers it (shared table).
+   - Friction Analytics redaction: GET /analytics's cross-session scan now redacts the same heavy
+     result fields (dom.screenshot dataUrl, idb.snapshot stores, net.log entries) listActionsSummary
+     already did - the dashboard's analytics panel never reasons about result content, only
+     type/timing/loop shape, so holding those bytes parsed in memory on every 5s server-side rescan
+     was pure waste.
 
   macro run / suite run           print an estimated token-cost NOTE on stderr before replaying -
                                    "macro run" reads the target macro's OWN stamped steps_cost_est
