@@ -907,29 +907,35 @@ measures.
 
 ## Testing internals
 
-Three test files, all real-not-simulated (real processes, real relay, no
-mocked HTTP/DOM):
+All real-not-simulated (real processes, real relay, real WebSocket protocol,
+no mocked HTTP/DOM). The relay-touching files each start their own ephemeral
+relay (`test-relay.mjs`): a free port, a throwaway database, auto-open off. So a
+green run always validates the code on disk, and files can run in parallel.
 
 - `db.mjs.test.mjs` - unit tests against `db.mjs` directly, using a
-  throwaway SQLite file (`WEBSCOUT_DB_PATH` override) instead of your real
-  `webscout.db`. No relay needed.
-- `cli.test.mjs` - spawns `cli.mjs` as a real child process against the
-  real, running relay; asserts exit codes and stdout/stderr shape.
-- `mcp-server.test.mjs` - spawns `mcp-server.mjs` and speaks real JSON-RPC
-  over its real stdio, against the real running relay.
+  throwaway SQLite file (`WEBSCOUT_DB_PATH` override). No relay.
+- `cli.test.mjs` / `mcp-server.test.mjs` - spawn `cli.mjs` / `mcp-server.mjs`
+  as real child processes against an ephemeral relay.
+- `relay-behavior.test.mjs` - drives an ephemeral relay through a fake in-page
+  agent (`connectFakeAgent`) that speaks the relay's real protocol
+  (`{kind:'command'}` in, `{kind:'reply'}` out): dispatch, the read cache and
+  its invalidation, registry-driven cleanup tracking, the token headers.
+- `relay-control.test.mjs` - start/stop/restart and stale-code detection,
+  against a COPY of the relay source in a temp directory (so an "edit" is a
+  bumped mtime on the copy, never a real file).
+- `client-notes.test.mjs` - the side-channel notes (nudge, token total with a
+  per-call delta, stale-relay warning) against a tiny fake relay, including the
+  MCP path that appends them to a tool reply.
+- Static, no relay: `command-registry.test.mjs` (every `inject.js` handler is
+  classified), `cli-spec.test.mjs` (argument validation), `cli-parity.test.mjs`
+  (every CLI command/flag has an MCP counterpart or a reasoned exemption, read
+  from a live MCP server's tool list), `docs-drift.test.mjs` (every command and
+  flag documented).
 
-`--test-concurrency=1` is required when running `cli.test.mjs` and
-`mcp-server.test.mjs` together (or alongside anything else that talks to
-the relay): both share the relay's single server-side "active session," and
-node's default parallel-file execution makes their `session start`/`session
-end` calls race each other - confirmed directly in this project's own CI
-setup work: the same two files pass reliably serialized and fail
-intermittently under default parallelism. `db.mjs.test.mjs` alone needs no
-such flag (its own isolated temp file).
-
-Any test that needs a connected browser tab skips itself (not a failure)
-when none is connected - true in a headless CI runner by default, so the
-suite still runs meaningfully there; see `.github/workflows/web-scout-tests.yml`.
+Any test that needs a connected browser tab `t.skip()`s (visibly) when none is
+connected - always true on an ephemeral relay. Set `WEBSCOUT_TEST_LIVE=1`
+(and `WEBSCOUT_PORT` if not 8973) to run them against a relay that has a tab.
+See `.github/workflows/web-scout-tests.yml`.
 
 ## Known gaps / scope
 

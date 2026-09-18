@@ -19,6 +19,7 @@
 
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 export const HOST = process.env.WEBSCOUT_HOST || '127.0.0.1';
 export const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
@@ -33,6 +34,35 @@ export const BASE = `http://${HOST}:${PORT}`;
 // raise it to cut the noise. Invalid/non-positive values fall back to 5000.
 const envThreshold = Number(process.env.WEBSCOUT_TOKEN_THRESHOLD);
 const SESSION_TOKENS_SOFAR_PRINT_THRESHOLD = Number.isFinite(envThreshold) && envThreshold > 0 ? envThreshold : 5000;
+
+// Side-channel notes (nudges, running token total, stale-relay warning) never
+// change a command's own result shape - they travel as response HEADERS (see
+// relay.mjs) and are surfaced HERE. Default sink is stderr, which a CLI
+// caller sees. An MCP host does not put a server's stderr in front of the
+// model (it goes to host logs), so mcp-server.mjs wraps each tool call in
+// collectNotes() and appends the notes to that call's reply content instead.
+// `key` lets a repeated note (the running token total, once per request)
+// replace its earlier value rather than pile up.
+const noteStore = new AsyncLocalStorage();
+
+export async function collectNotes(fn) {
+  const notes = new Map();
+  try {
+    const value = await noteStore.run(notes, fn);
+    return { value, notes: [...notes.values()] };
+  } catch (err) {
+    err.notes = [...notes.values()];
+    throw err;
+  }
+}
+
+function emitNote(text, key = text) {
+  const sink = noteStore.getStore();
+  if (sink) sink.set(key, text);
+  else console.error(`[web-scout] ${text}`);
+}
+
+const staleRelayWarned = new Set();
 
 export async function request(method, pathName, body) {
   const opts = { method };
@@ -57,7 +87,15 @@ export async function request(method, pathName, body) {
   // this way at session end, and mcp-server.mjs's stdio JSON-RPC channel is
   // stdout-only, so a stderr line here can never corrupt a JSON-RPC reply.
   const nudge = res.headers.get('x-webscout-nudge');
-  if (nudge) console.error(`[web-scout] ${nudge}`);
+  if (nudge) emitNote(nudge);
+  // The relay process is running OLDER code than what is on disk (an edit to
+  // relay.mjs/db.mjs/... is invisible to it until restart) - once per process
+  // is enough, and CLI/MCP results are otherwise trustworthy-looking.
+  const staleFiles = res.headers.get('x-webscout-relay-stale');
+  if (staleFiles && !staleRelayWarned.has(staleFiles)) {
+    staleRelayWarned.add(staleFiles);
+    emitNote(`WARNING: the relay is running code older than what is on disk (${staleFiles} changed since it started) - results may not reflect your edits. Restart it: node tools/web-scout/cli.mjs relay restart`, 'relay-stale');
+  }
   // Running session token total (see relay.mjs's generic response wrapper) -
   // same header-not-body convention as the nudge above, for the same reason
   // (never change the shape of a command's own real result). Printed on
@@ -66,7 +104,11 @@ export async function request(method, pathName, body) {
   // real spend is getting large enough to think about.
   const tokensSoFar = Number(res.headers.get('x-webscout-session-tokens'));
   if (Number.isFinite(tokensSoFar) && tokensSoFar > SESSION_TOKENS_SOFAR_PRINT_THRESHOLD) {
-    console.error(`[web-scout] session running total: ~${tokensSoFar} estimated tokens so far.`);
+    // Header is absent (not "0") when the relay has no baseline yet for this
+    // session, e.g. right after a relay restart - so no bogus per-call delta.
+    const callHeader = res.headers.get('x-webscout-call-tokens');
+    const callTokens = callHeader === null ? NaN : Number(callHeader);
+    emitNote(`session running total: ~${tokensSoFar} estimated tokens so far${Number.isFinite(callTokens) ? ` (+${callTokens} this call)` : ''}.`, 'session-tokens');
   }
   const json = await res.json();
   if (!json.ok) {
@@ -110,6 +152,26 @@ export async function netHistory({ sessionId, filter, minDuration, sort, limit }
   if (sort === 'duration') entries = entries.slice().sort((a, b) => (b.durationMs ?? 0) - (a.durationMs ?? 0));
   if (limit !== undefined) entries = entries.slice(0, Number(limit));
   return { sessionId: id, count: entries.length, entries };
+}
+
+// ---------- Snapshot delta (idb snapshot --since) ----------
+//
+// Takes a fresh snapshot scoped to the baseline's own stores, diffs it
+// against the baseline, and returns only the delta. idb.snapshot is the #2
+// all-time token cost offender precisely because a full dump prints every
+// unchanged row alongside whatever changed. The fresh full snapshot is still
+// persisted (its id is in the response). Shared by cli.mjs and mcp-server.mjs
+// so an MCP caller gets the same cheap "what changed" view the CLI has.
+export async function snapshotSince({ baselineId, stores, golden, agent }) {
+  const baseline = await request('GET', `/state/snapshots/${baselineId}`);
+  const scopeStores = stores || Object.keys(baseline.stores || {});
+  const fresh = await request('POST', '/state/snapshot', { agent, stores: scopeStores, golden });
+  const diff = await request('POST', '/state/diff', { idA: Number(baselineId), idB: fresh.id });
+  return {
+    mode: 'since', baselineSnapshotId: Number(baselineId), freshSnapshotId: fresh.id,
+    summary: diff.summary, diff: diff.diff,
+    note: 'only rows added/removed/changed since the baseline are shown - pass no since (or use idb dump) for a full read.',
+  };
 }
 
 // ---------- page fresh (hash-through-the-page vs. hash-on-disk) ----------

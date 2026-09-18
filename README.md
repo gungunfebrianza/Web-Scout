@@ -164,6 +164,17 @@ style usage text, or see
 [`docs/web-scout-architecture.md`](./docs/web-scout-architecture.md) for
 the full explanation behind any of these.
 
+**Relay lifecycle**
+```bash
+relay status                  # works even when the relay is down; reports pid, start time and
+                               # staleSourceFiles - non-empty means the running relay is OLDER than
+                               # relay.mjs/db.mjs/... on disk (an edit is invisible until restart)
+relay restart                 # stop + start (also: relay start, relay stop). Replaces `pkill` -
+                               # which silently does nothing against a Windows-native node process
+```
+Every reply also warns once on stderr when the relay is running code older
+than what is on disk, so a green run can't quietly be validating stale code.
+
 **Sessions** (required before anything else)
 ```bash
 session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--auto-snapshot] [--token-budget N]
@@ -180,7 +191,8 @@ session list
 session show <id>             # everything for one session
 session report <id> [--format md|json] [--out <path>]
 session assert <id> '[{"store":"skills","countGte":1}]'
-session cleanup <id> [--confirm]
+session cleanup <id> [--confirm] [--summary] [--since-snapshot <snapshotId>]
+                               # --summary: per-store counts + a size estimate instead of full rows
 ```
 
 **DOM**
@@ -188,8 +200,11 @@ session cleanup <id> [--confirm]
 dom query "#some-element"
 dom query "#some-element" --meta   # skip outerHTML/text entirely - just tag/id/className/matchCount
 dom pick                      # click any element in the browser -> get its selector back
-dom click "#some-button"
+dom click "#some-button" [--nth N]
+dom click-wait "#save" --wait-selector ".toast" --text "Saved"   # click, then wait, ONE round trip
 dom fill "#some-input" "value"
+dom rect "#some-panel"        # bounding box
+dom style "#some-panel" color,margin   # computed style (curated defaults if no list given)
 dom wait "#result" --text "DONE" --timeout 20000
 dom wait "#result" --changed --timeout 20000   # resolves once content DIFFERS from its call-time baseline -
                                # match --timeout to a known real provider budget, not a guess
@@ -205,10 +220,13 @@ dom query --selector-file ./selector.txt   # reads the selector from a file - si
 idb list                      # store names + a cheap per-store row count (check before an
                                # unscoped snapshot on a store you suspect is large)
 idb dump my_store
-idb dump my_store --where '{"status":"OK"}'   # client-side exact-match filter; "count" is the
+idb dump my_store --where '{"status":"OK"}'   # exact-match filter, applied IN THE PAGE; "count" is the
                                # filtered count, "totalCount" is the whole store's real count
+idb dump my_store --fields id,status --limit 20   # project + cap rows in the page too
 idb get my_store 1            # single-key lookup (store.get), not a full-store scan
-idb put my_store '{"id":1,"status":"OK"}'
+idb put my_store '{"id":1,"status":"OK"}' [--dry-run]   # --dry-run validates the row's shape, writes nothing
+idb put-many my_store '[{"id":1},{"id":2}]' [--dry-run]  # one transaction; a bad row is reported per-row
+idb patch my_store 1 '{"status":"DONE"}'   # merge onto the EXISTING row (errors if none exists)
 idb delete my_store 1
 idb delete-many my_store '[1,2,3]'   # one transaction; response includes deletedKeys/failedKeys
 idb clear my_store
@@ -218,6 +236,7 @@ idb snapshot --since 12        # fresh snapshot, prints ONLY the delta vs. snaps
 idb diff 1 2                  # or: idb diff-golden my-baseline 2 - both cache-aware: identical
                                # content to an already-computed diff skips re-sending the full body
 idb restore --golden my-baseline
+idb watch my_store --count-gte 4   # streams row-count changes (CLI-only; MCP uses "idb wait")
 ```
 
 **React**
@@ -233,10 +252,16 @@ react tree "#some-component" --nth 0 200  # ancestor chain of enclosing componen
 
 **Network & console**
 ```bash
-net log
+net log --limit 5 --url "/api/save"   # filtered IN THE PAGE - an unfiltered log is ~55KB in a busy session
 net history --min-duration 5000 --sort duration --limit 20
-net wait "/api/save" --timeout 15000
-console log
+net wait "/api/save" --timeout 15000   # Git Bash on Windows rewrites a leading "/" into a Windows path -
+                               # prefix the command with MSYS_NO_PATHCONV=1 (the CLI warns when it sees this)
+net capture "/api/ai"         # ADDS a response-body capture filter (call again to watch a second endpoint)
+net capture --off             # clears every armed filter
+net clear
+console log --limit 20
+console wait "Saved" --timeout 5000   # attach-and-wait instead of a sleep+poll loop
+console clear
 ```
 
 **Page**
@@ -268,6 +293,13 @@ status                         # also reports agents_detail: {name, connectedAt,
                                # socket presence (agents_connected) alone can be misleading
 ```
 
+**Debugging the tool and your own leftovers**
+```bash
+debug state                   # this tool's own live in-page state (WebSocket readyState, queues, backoff)
+debug sweep P46DEBUG          # CLI-only: greps the working directory for a leftover debug tag; exits 1 on any hit
+dev bump-reload js/db.js      # bumps every "<file>?v=N" importer, then hard-reloads + waits for reconnect
+```
+
 **DB version**
 ```bash
 db version-check              # compares js/db.js's DB_VERSION to the live tab; on drift, probes
@@ -285,6 +317,10 @@ eval --file ./script.js       # Windows/Git Bash: --file /dev/stdin does NOT wor
 macro record "my-flow" <sessionId>   # consecutive duplicate steps auto-compacted; cost stamped
 macro run <id>                # prints an estimated-cost NOTE (from the macro's own stamped cost)
                                # before replaying, no live lookup needed
+macro list                    # id, name, step count, source session, stamped cost
+macro show <id>               # every step
+macro delete <id>
+macro export-verity <id> --out ./scenario.json   # skeleton Verity scenario from the click/wait steps
 suite run ./checks/my-suite.json
 ```
 
@@ -307,17 +343,33 @@ no flag needed for either. A cache hit still counts toward the running
 the DB action log, but the result bytes still land in your terminal and
 still get read.
 
-Every reply also carries a running per-session token total, printed to
-stderr once it crosses a threshold (default ~5000, override with
-`WEBSCOUT_TOKEN_THRESHOLD=<n>`).
+Every reply also carries a running per-session token total plus what that
+call added, printed once it crosses a threshold (default ~5000, override with
+`WEBSCOUT_TOKEN_THRESHOLD=<n>`): `session running total: ~60024 estimated
+tokens so far (+66 this call).` The CLI prints it on stderr; over MCP it is
+appended to the tool reply as an extra text item, because an MCP host does
+not show a server's stderr to the model.
+
+The dashboard's **Token savings** panel shows the all-time ledgers behind
+`token-report`, split into what they actually measure: bytes never stored
+twice on disk (dedup) versus bytes never sent to the caller.
 
 **Other**
 ```bash
 ask "what changed between snapshot 1 and 2?"   # optional, needs an AI backend
 analytics                     # recurring failure patterns across every session
+search "cfi_ontology"         # full-text search across every session's actions
+verity import <sessionId> ./scenario-result.json   # fold a Verity result into a session's evidence
 agents                        # which browser tabs are connected
 dashboard                     # prints the dashboard URL
 ```
+
+**Arguments are checked before anything runs.** An unknown flag or an extra
+positional argument exits 1 immediately, naming what it rejected and listing
+the flags that command does take. (A silently ignored argument used to mean
+`token-report --session 206` returned the all-time report, and a typo'd
+`--dryrun` on `idb put` would have written the row.) The per-command spec is
+`cli-spec.mjs`; `eval` is exempt for flags, since its expression may start with `--`.
 
 Every `dom`/`idb`/`eval`/`page` command also accepts `--agent <name>` to
 target a specific tab when more than one is connected. Everything returns
@@ -375,6 +427,12 @@ shows the full, current, authoritative list. See
 [`docs/web-scout-architecture.md`](./docs/web-scout-architecture.md#mcp-server-internals)
 for the session-model and error-handling details.
 
+CLI and MCP stay in step: `cli-spec.mjs` lists every CLI command and flag
+with its MCP counterpart (or a reasoned exemption - e.g. `relay restart` is
+deliberately not exposed over MCP), and `cli-parity.test.mjs` fails when they
+drift. Nudges, the running token total and the stale-relay warning are
+appended to each tool reply as extra text content.
+
 ## Configuration (env vars)
 
 No config file - everything is an environment variable, read once at relay
@@ -387,6 +445,9 @@ startup unless noted:
 | `WEBSCOUT_NO_AUTOOPEN` | unset | Set to `1` to stop `session start` from auto-opening the dashboard in a browser tab. |
 | `WEBSCOUT_AI_BACKEND_URL` | none | Where the optional `ask` command sends its prompt - see "Ask AI" in the architecture doc. Live-editable from the dashboard's Settings dialog with no restart. |
 | `WEBSCOUT_DB_PATH` | `tools/web-scout/webscout.db` | Relocates the SQLite file that stores everything. |
+| `WEBSCOUT_TOKEN_THRESHOLD` | `5000` | Running-total token ticker prints only once a session's total passes this (read by the CLI/MCP client). |
+| `WEBSCOUT_PID_PATH` | `<tmpdir>/webscout-relay-<port>.pid` | Where the relay writes its pidfile, used by `relay stop/restart`. |
+| `WEBSCOUT_TEST_LIVE` | unset | Set to `1` to run the relay-touching tests against the already-running relay (needed only for tests that require a connected browser tab). |
 
 The dashboard's **Settings** menu shows all of the above, plus a
 live-editable AI backend URL.
@@ -401,8 +462,10 @@ Open it in a browser to watch sessions update live: connected-tab status, a
 session picker, a merged action/snapshot/diff/console/network timeline,
 regression-check results, a macros panel, cross-session search, a Token
 cost panel (budget burn-rate, per-type/per-target cost, cross-session
-trend, a Waste Radar banner for the session's single worst-cost type), and
-an Ask-AI box. Updates arrive over Server-Sent Events - no manual refresh.
+trend, a Waste Radar banner for the session's single worst-cost type), a
+Token savings panel (all-time: what each dedup/cache/compaction mechanism
+saved, split by what it actually measures, plus the biggest remaining spend
+and the flag that shrinks each), and an Ask-AI box. Updates arrive over Server-Sent Events - no manual refresh.
 
 The **Action log** panel is built for fast debugging:
 
@@ -462,14 +525,24 @@ Full detail: [`docs/web-scout-architecture.md`](./docs/web-scout-architecture.md
 ## Testing
 
 ```bash
-node tools/web-scout/relay.mjs &      # needed for cli.test.mjs / mcp-server.test.mjs
-node --test --test-concurrency=1 tools/web-scout/db.mjs.test.mjs tools/web-scout/cli.test.mjs tools/web-scout/mcp-server.test.mjs
+node --test --test-force-exit tools/web-scout/*.test.mjs
 ```
 
-`--test-concurrency=1` is required when running more than one relay-touching
-test file together - they share the relay's single active session. Any test
-needing a connected browser tab skips itself (not a failure) when none is
-connected, so the suite still runs meaningfully in CI. See
+The relay-touching tests (`cli.test.mjs`, `mcp-server.test.mjs`,
+`relay-behavior.test.mjs`) each start their **own ephemeral relay** on a free
+port with a throwaway database (`test-relay.mjs`), so a green run always
+validates the code on disk - never a relay left running on older code - and
+files can run in parallel. `relay-behavior.test.mjs` drives that relay
+through a fake in-page agent that speaks the real WebSocket protocol, so
+dispatch, the read cache, cleanup tracking and the token headers are tested
+without a browser.
+
+Tests that need a real connected browser tab skip themselves. To run them,
+start a relay with a tab connected and set `WEBSCOUT_TEST_LIVE=1` (and
+`WEBSCOUT_PORT` if it is not 8973). Static checks that need no relay at all:
+`command-registry.test.mjs` (every `inject.js` handler is classified),
+`cli-spec.test.mjs` (argument validation), `cli-parity.test.mjs` (CLI <-> MCP)
+and `docs-drift.test.mjs` (every command and flag is documented). See
 `.github/workflows/web-scout-tests.yml`.
 
 ## Relationship to Verity UI Relay

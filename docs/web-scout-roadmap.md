@@ -2007,6 +2007,116 @@ Pass 2 - fresh scan:
 
 `inject.js` cache-bust bumped to `?v=3` in the host app's `index.html`.
 
+## V29 - relay lifecycle, self-contained tests, one command registry, MCP parity, and an honest savings dashboard (implemented)
+
+Ten lessons from the V28 session, each grounded in friction that session
+actually hit, plus a dashboard panel for the token-savings numbers. Several
+turned out to be real bugs rather than conveniences; those are called out.
+
+**Relay lifecycle (lesson 1).** `relay start|stop|restart|status` (new
+`relay-control.mjs`) replaces `pkill` - which silently does nothing against a
+Windows-native node process - and the netstat + taskkill dance. The relay
+writes a pidfile on listen; a relay started before pidfiles existed is found by
+asking the OS which process LISTENS on the port, and `stop` refuses to kill a
+port owner that does not answer `/health` like a relay. The relay also records
+the mtime of `relay.mjs`/`db.mjs`/`ai.mjs`/`report.mjs`/`command-registry.mjs`
+at boot: `/health` reports `relay.stale_source_files`, every reply carries an
+`x-webscout-relay-stale` header that the CLI turns into a one-time stderr
+warning, and the dashboard header shows a badge. A green test run can no longer
+quietly be validating stale code.
+
+**Self-contained tests (lesson 2).** `test-relay.mjs` starts an ephemeral relay
+on a free port with a throwaway database (auto-open off), so `cli.test.mjs`,
+`mcp-server.test.mjs` and the new `relay-behavior.test.mjs` always exercise the
+code on disk and can run in parallel (`--test-concurrency=1` is gone; CI no
+longer starts a relay). `relay-behavior.test.mjs` uses a fake in-page agent
+speaking the real WebSocket protocol, so dispatch, the read cache, cleanup
+tracking and the token headers are tested without a browser. Tests that need a
+real tab now `t.skip()` visibly (they used to pass silently) and run under
+`WEBSCOUT_TEST_LIVE=1`.
+
+**One command registry (lesson 6).** `command-registry.mjs` declares, per
+command type, whether it is mutating / strict-CRV / macro-default / long-poll /
+read-cacheable / timeout-verifiable / auto-screenshotted, and how session
+cleanup tracks its writes. `relay.mjs` derives its seven Sets (and the cleanup
+tracker's branches) from it. `command-registry.test.mjs` fails when `inject.js`
+grows a handler the registry does not classify, or a write is half-classified.
+Writing it found a real bug: `net.clear`/`console.clear` were not in the
+mutating set, so a cached `net log` kept being served after `net clear`
+(mutation-tested: the new behavior test fails without the fix).
+
+**Per-call token delta and MCP delivery (lessons 4, 5).** The ticker now reads
+`session running total: ~60024 estimated tokens so far (+66 this call)`
+(`x-webscout-call-tokens`, omitted right after a relay restart, which has no
+baseline). The earlier claim that stderr reaches both callers was wrong: an MCP
+host routes a server's stderr to its logs, never the model. `client.mjs` now
+routes notes through `collectNotes()` (an AsyncLocalStorage collector) and
+`mcp-server.mjs` appends them to each tool reply as extra text content; the
+first content item is always the tool's own result, unchanged.
+
+**`net log --limit N --url <substr>` and `console log --limit N` (lesson 3).**
+Filtered in the page (`inject.js`, `?v=4`), so the 500-entry ring buffer never
+crosses the wire. The old `net log --limit 3` silently ignored the flag and
+printed all 236 entries (~55KB).
+
+**Arguments are checked before dispatch (lesson 9).** `cli-spec.mjs` declares
+every command's positional arity and flags; an unknown flag or extra positional
+exits 1 with what was rejected and what the command does take. This is the
+class behind the V28 `token-report --session` bug, and a typo'd `--dryrun` on
+`idb put` would have written the row. `usage()` moved out of a ~600-line
+template literal into `usage.txt` - which exposed a live bug in the old help
+text: an unescaped `D:\proc\self\fd\0` had been printing as `D:procself` plus
+a form-feed and a NUL byte. Git Bash rewriting a leading `/` argument into a
+Windows path (`net wait /api/save`) is now detected and warned about.
+
+**CLI/MCP parity and docs drift (lessons 7, 8).** `cli-spec.mjs` also maps each
+CLI command and flag to its MCP counterpart or a reasoned exemption;
+`cli-parity.test.mjs` reads the live tool list from a spawned MCP server.
+Writing it found real gaps, all now closed: MCP had no `token_report`, `ping`,
+`debug_state`, `idb patch`, `dom click_wait` or `console wait`; `idb dump` could
+not be scoped (`where`/`fields`/`limit`); `dom query` had no `full`/`meta`;
+`idb snapshot` had no `since` (now shared as `snapshotSince()` in
+`client.mjs`); `session start` had no `tokenBudget`; `macro run` had no `full`.
+`docs-drift.test.mjs` requires every command and flag in `usage.txt` and every
+command in the README (which had none of the last round's additions).
+
+**Monorepo <-> standalone sync (lesson 10).** `scripts/sync-web-scout.mjs`
+reports divergence and, on request, replays missing commits either way as
+patches (`--push` at the remote's tip in a temp worktree, tested, plain
+fast-forward; `--pull` re-rooted under `tools/web-scout` via `git am`). Missing
+commits are decided by subject, not patch-id: a replayed commit keeps its
+subject but gets a new patch-id, so `git cherry` reported the same commit as
+both ahead and behind. It also avoids `git subtree split` (~110s here vs ~2s).
+At the time of writing the standalone repo is 5 commits ahead of the monorepo
+(React fiber inspection, an Action log UX pass, a shared panel shell for every
+dashboard panel) - none pulled yet.
+
+**Token savings dashboard panel.** A new all-time panel renders
+`GET /token-report`: what callers actually READ next to what each mechanism
+saved, one row per mechanism with a `kind`, a reduction percentage, and
+evidence (`337 results -> 133 stored`), plus where the spend still is (top
+command types and single targets, each with the flag that shrinks it). Building
+it required being precise about what the ledgers measure, and they measure
+DISK: every DB ledger (result/text/snapshot-row/snapshot/params/step/column
+dedup) counts bytes not stored a second time in `webscout.db`. Dividing by 4
+gives a token-EQUIVALENT, not tokens a caller avoided - dedup makes the
+database smaller, it does not shrink what a call returns. Measured on the live
+database: callers read ~1.21M estimated tokens over 1,980 calls; dedup kept
+~673 KB (172K tokens-equivalent) off disk, 2.9% of a 23 MB database. Bytes a
+caller avoided by scoping a call (`--where`, `--fields`, `--limit`, `--since`,
+`--meta`) are never incurred, so no ledger sees them. `savings.ledgers` carries
+`kind` (storage / delivery / roundtrip / workflow) and `countedInTotal` (the
+golden-diff cache overlaps result dedup, so it is shown, not added);
+`savings.storageContext` and `savings.spend` sit beside it. The read-cache
+counters, which reset on every relay restart, are now persisted
+(`read_cache_savings`) - restarts are routine now.
+
+**Known gap, not fixed.** The same-session read cache invalidates only on a
+mutating command. A page can change on its own (background traffic,
+async renders), so an identical `net log`/`console log`/`dom query` repeated with no
+command in between can return a stale cached result. `__cacheHit:true` and
+`__cachedAt` in the reply say so; a short TTL on the volatile types would close it.
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

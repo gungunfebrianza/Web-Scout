@@ -1,34 +1,32 @@
 // Smoke tests for tools/web-scout/cli.mjs, spawned as a REAL child process
-// against the real, already-running relay (node tools/web-scout/relay.mjs)
-// - same "real, not simulated" discipline as mcp-server.test.mjs. Session-
-// scoped tests that need a connected browser tab are skipped (not failed)
-// when none is connected, so this still runs meaningfully in a headless CI
-// environment. Run with: node --test tools/web-scout/cli.test.mjs
+// against a REAL relay - an ephemeral one on a free port with a throwaway
+// database (see test-relay.mjs), so the result always reflects the code on
+// disk. Set WEBSCOUT_TEST_LIVE=1 to run against the already-running relay
+// instead (the only way to exercise a connected browser tab). Session-scoped
+// tests that need a connected tab are skipped (not failed) when none is
+// connected. Run with: node --test tools/web-scout/cli.test.mjs
 
-import { test, before } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startTestRelay } from './test-relay.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(__dirname, 'cli.mjs');
 
+const relay = await startTestRelay();
+after(() => relay.stop());
+
 function run(...args) {
-  const res = spawnSync('node', [CLI, ...args], { encoding: 'utf8', timeout: 20000 });
+  const res = spawnSync('node', [CLI, ...args], { encoding: 'utf8', timeout: 20000, env: { ...process.env, ...relay.env } });
   return { status: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? '' };
 }
 
-// This file's tests share one mutable real resource with the relay (its
-// single server-side "active session", and mcp-server.test.mjs's tests
-// share the same one) - MUST run with `node --test --test-concurrency=1`
-// across both files (see README "Testing"), never in parallel, or two
-// files' session start/end calls race the relay's one-active-session
-// constraint. Defensive best-effort cleanup here too: a previous run that
-// crashed mid-test (an assertion failure before its own `session end`
-// call) leaves a dangling active session that would otherwise fail every
-// `session start` in this run with a confusing "already active" error
-// pointing at a session this run never created.
+// Each test file now owns its own relay, so files can run in parallel. The
+// best-effort `session end` only matters under WEBSCOUT_TEST_LIVE=1, where a
+// previous crashed run may have left a dangling active session.
 before(() => { run('session', 'end'); });
 
 test('status exits 0 and prints real relay health as JSON', () => {
@@ -82,10 +80,10 @@ test('full round trip: session start -> current -> list -> end, exit 0 throughou
   assert.equal(JSON.parse(ended.stdout).status, 'ended');
 });
 
-test('dom/idb/eval against a real connected tab (skipped if none connected in this environment)', () => {
+test('dom/idb/eval against a real connected tab (skipped if none connected in this environment)', (t) => {
   const { stdout: statusOut } = run('status');
   const { agents_connected } = JSON.parse(statusOut);
-  if (!agents_connected.length) return; // environment gap, not a cli.mjs bug - see mcp-server.test.mjs for the same pattern
+  if (!agents_connected.length) return t.skip('no browser tab connected to this relay - run with WEBSCOUT_TEST_LIVE=1 against a relay that has one');
 
   const started = run('session', 'start', 'cli.test.mjs dom/idb/eval', 'automated');
   assert.equal(started.status, 0, started.stderr);

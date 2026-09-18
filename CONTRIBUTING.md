@@ -43,14 +43,19 @@ usually a faster path to a change that actually lands.
 
 ## Adding a new `dom.*`/`idb.*`/etc. command
 
-A new leaf command (say, `dom.hover`) touches up to 4 files, in this order:
+A new leaf command (say, `dom.hover`) touches up to 6 files, in this order:
 
 1. **`inject.js`** - add the actual implementation to the `handlers` object
    (`const handlers = { 'dom.query': (...) => {...}, ... }`). This is the
    only file that touches the real DOM/IndexedDB - everything downstream
    just relays `{type, params}` to this object and returns whatever it
    returns.
-2. **`relay.mjs`** - usually **no change needed**. Any command dispatched
+2. **`command-registry.mjs`** - add ONE row for the new type declaring what
+   it is (`mutating`, `strictCrv`, `macroDefault`, `readCacheable`,
+   `longPoll`, ... and, for a write to IndexedDB, its `cleanup` kind). The
+   relay derives all its behavior from this row, and
+   `command-registry.test.mjs` fails if you skip it or half-fill it.
+3. **`relay.mjs`** - usually **no change needed**. Any command dispatched
    through the generic `POST /command` route is forwarded to `inject.js`
    verbatim and its result persisted as an `actions` row automatically.
    Only add a relay-side route if the command needs its own persistence
@@ -58,17 +63,20 @@ A new leaf command (say, `dom.hover`) touches up to 4 files, in this order:
    `idb.diff`/`idb.restore` get dedicated `/state/*` routes because a
    snapshot/diff is its own durable, independently-fetchable record, not
    just an action's result blob).
-3. **`cli.mjs`** - add an entry to the `table` object in `main()` (or a
+4. **`cli.mjs`** - add an entry to the `table` object in `main()` (or a
    dedicated function like `handleSession`/`handleMacro` for something
    with its own subcommands), calling `send('dom.hover', {...})`. Add the
    new command to `usage()`'s help text - every existing command has an
    inline explanation of ambiguous behavior, not just a one-line
    description.
-4. **`mcp-server.mjs`** - add the action to the relevant namespace tool's
+5. **`mcp-server.mjs`** - add the action to the relevant namespace tool's
    `actions` map (e.g. `webscout_dom.actions.hover = (p) => sendCmd('dom.hover', {...}, p?.agent)`), and add it to that tool's `description` string (the MCP
    client's only source of truth for what params it takes - keep it
    accurate, not aspirational).
-5. **Docs** - add the command to `tools/web-scout/README.md`'s
+   Also add a row to `cli-spec.mjs` (its arity, its flags, and the MCP action
+   it maps to - or a reasoned `mcpExempt`); the CLI rejects any flag not listed
+   there, and `cli-parity.test.mjs` fails when the two surfaces drift.
+6. **Docs** - add the command to `tools/web-scout/README.md`'s
    `## Everyday commands` cheat sheet, its full rationale to
    `docs/web-scout-architecture.md`, and a `docs/web-scout-roadmap.md`
    entry explaining *why* (what real gap it closes), following the
@@ -79,17 +87,15 @@ A new leaf command (say, `dom.hover`) touches up to 4 files, in this order:
 Run the full test suite before opening a PR (see "Testing" in the README):
 
 ```bash
-node tools/web-scout/relay.mjs &      # needs to be running for cli.test.mjs/mcp-server.test.mjs
-node --test --test-concurrency=1 tools/web-scout/db.mjs.test.mjs tools/web-scout/cli.test.mjs tools/web-scout/mcp-server.test.mjs
+node --test --test-force-exit tools/web-scout/*.test.mjs
 ```
 
-`--test-concurrency=1` is required, not optional, when running more than
-one of the relay-touching test files together - they share the relay's
-single server-side "active session," and running them in parallel makes
-them race each other's `session start`/`session end` calls (confirmed
-directly: the same two files pass 100% serialized and fail intermittently
-under default parallelism). `db.mjs.test.mjs` alone is independent (its
-own throwaway SQLite file) and safe to parallelize on its own.
+Nothing needs to be running: each relay-touching test file starts its own
+ephemeral relay on a free port with a throwaway database, so a green run
+always validates the code on disk and files run in parallel. Tests that need
+a real connected browser tab skip themselves; set `WEBSCOUT_TEST_LIVE=1` to
+run them against a relay that has one. `docs-drift.test.mjs` requires your
+new command and flags to appear in `usage.txt` (and the command in the README).
 
 ## PR expectations
 
@@ -100,7 +106,10 @@ own throwaway SQLite file) and safe to parallelize on its own.
 - If your change touches `dashboard.html`, verify it in an actual browser
   tab against the real dashboard before opening the PR - `node --check` on
   the extracted `<script>` block only catches syntax errors, not "the
-  Settings dialog doesn't open."
+  Settings dialog doesn't open." A new panel also needs an entry in the
+  `PANELS` registry in `dashboard.html` (group, label, `count`, `refresh`,
+  `exportRows`) - that is what gives it the shared head, collapse, freshness
+  and maximize chrome; a `<section class="hud-section" id=...>` alone gets none.
 - Small, focused PRs over large ones - this codebase's own history (see
   the roadmap) is a long sequence of small, individually-justified
   changes, not big-bang rewrites.

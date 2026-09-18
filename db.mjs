@@ -595,6 +595,31 @@ export function getColumnDictSavings() {
   return { bytesSaved, estTokensSaved: Math.round(bytesSaved / CHARS_PER_TOKEN_ESTIMATE) };
 }
 
+// The relay's same-session read cache used to count its hits in process
+// memory, so every relay restart zeroed the savings shown on the dashboard -
+// and `relay restart` now makes restarts routine. Persisted here instead
+// (same single-row counter shape as column_dict_savings above).
+db.exec(`
+CREATE TABLE IF NOT EXISTS read_cache_savings (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  hits        INTEGER NOT NULL DEFAULT 0,
+  bytes_saved INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO read_cache_savings (id, hits, bytes_saved) VALUES (1, 0, 0);
+`);
+const stmtBumpReadCacheSavings = db.prepare('UPDATE read_cache_savings SET hits = hits + 1, bytes_saved = bytes_saved + ? WHERE id = 1');
+const stmtGetReadCacheSavings = db.prepare('SELECT hits, bytes_saved FROM read_cache_savings WHERE id = 1');
+
+export function bumpReadCacheSavings(bytes) {
+  stmtBumpReadCacheSavings.run(Math.max(0, Number(bytes) || 0));
+}
+
+export function getReadCacheSavings() {
+  const row = stmtGetReadCacheSavings.get();
+  const bytesSaved = row?.bytes_saved || 0;
+  return { hits: row?.hits || 0, bytesSaved, estTokensSaved: Math.round(bytesSaved / CHARS_PER_TOKEN_ESTIMATE) };
+}
+
 // ---------- sessions ----------
 
 const stmtInsertSession = db.prepare('INSERT INTO sessions (goal, context, status, started_at, strict_crv, strict_crv_stores, tags, token_budget) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
@@ -1653,6 +1678,62 @@ export function deleteMacro(id) {
 const stmtMacroCompactionTotal = db.prepare('SELECT COALESCE(SUM(compacted_steps_removed), 0) AS totalRemoved FROM macros');
 const stmtMacroTemplatingTotal = db.prepare('SELECT COALESCE(SUM(templated_steps_removed), 0) AS totalRemoved FROM macros');
 
+// What each ledger actually measures matters more than the totals. Every
+// DB-side ledger below counts bytes that were NOT PHYSICALLY STORED a second
+// time on disk ("storage") - none of them shrinks what a calling agent reads
+// off stdout, which is what getActionCostReport ranks. Dividing those bytes by
+// 4 gives a token-EQUIVALENT (what the same text would cost as tokens), not
+// tokens an agent avoided. Kinds:
+//   storage   - bytes never stored twice in webscout.db
+//   delivery  - bytes never sent back to the caller
+//   roundtrip - a page round trip and an action-log row skipped, but the
+//               result is still delivered to the caller in full
+//   workflow  - steps that never get replayed (a count, no byte figure)
+// `countedInTotal:false` rows are shown but excluded from the totals - either
+// they overlap a counted row (goldenDiffCache) or have no byte figure.
+function buildSavingsLedgers({ resultDedup, paramsDedup, textDedup, goldenDiffCache, macroCompaction, macroTemplating, snapshotRowDedup, snapshotDedup, stepBlobDedup, columnDictCompaction }) {
+  const bytesLedger = (key, label, kind, what, data, { uniqueBytes, refs } = {}) => {
+    const logicalBytes = uniqueBytes === undefined ? null : uniqueBytes + data.bytesSaved;
+    return {
+      key, label, kind, what, countedInTotal: true,
+      bytesSaved: data.bytesSaved, estTokensSaved: data.estTokensSaved,
+      uniqueBytes: uniqueBytes ?? null, logicalBytes,
+      reductionPct: logicalBytes ? Math.round((data.bytesSaved / logicalBytes) * 1000) / 10 : null,
+      refs: refs ?? null,
+    };
+  };
+  return [
+    bytesLedger('resultDedup', 'Action results', 'storage', 'An identical reply (a repeated idb.dump / dom.query / eval result) is stored once and ref-counted.', resultDedup, { uniqueBytes: resultDedup.uniqueBytes, refs: { unique: resultDedup.uniqueBlobs, total: resultDedup.totalReferences, unit: 'results' } }),
+    bytesLedger('textDedup', 'Console / network text', 'storage', 'Repeated console messages and network URLs are stored once.', textDedup, { uniqueBytes: textDedup.uniqueBytes, refs: { unique: textDedup.uniqueBlobs, total: textDedup.totalReferences, unit: 'strings' } }),
+    bytesLedger('snapshotRowDedup', 'Snapshot rows', 'storage', 'Each IndexedDB row is stored once, however many snapshots contain an unchanged copy.', snapshotRowDedup, { uniqueBytes: snapshotRowDedup.uniqueBytes, refs: { unique: snapshotRowDedup.uniqueRows, total: snapshotRowDedup.totalReferences, unit: 'rows' } }),
+    bytesLedger('snapshotDedup', 'Whole snapshots', 'storage', 'A snapshot byte-identical to an earlier one points at it instead of copying it.', snapshotDedup, { refs: { unique: null, total: snapshotDedup.dedupedCount, unit: 'snapshots' } }),
+    bytesLedger('paramsDedup', 'Command params', 'storage', 'Repeated command params (a poll loop sends the same ones dozens of times) are stored once.', paramsDedup, { uniqueBytes: paramsDedup.uniqueBytes, refs: { unique: paramsDedup.uniqueBlobs, total: paramsDedup.totalReferences, unit: 'param sets' } }),
+    bytesLedger('stepBlobDedup', 'Macro steps', 'storage', 'A step shared by several macros is stored once.', stepBlobDedup, { uniqueBytes: stepBlobDedup.uniqueBytes, refs: { unique: stepBlobDedup.uniqueSteps, total: stepBlobDedup.totalReferences, unit: 'steps' } }),
+    bytesLedger('columnDictCompaction', 'Column names', 'storage', 'Column names repeated across every row of a dump are stored in a dictionary.', columnDictCompaction),
+    {
+      key: 'goldenDiffCache', label: 'Golden-diff cache', kind: 'delivery', countedInTotal: false,
+      what: 'A repeat diff-golden between content-identical snapshots is answered with a pointer, not the whole diff body again.',
+      bytesSaved: goldenDiffCache.bytesSaved, estTokensSaved: goldenDiffCache.estTokensSaved, uniqueBytes: null, logicalBytes: null, reductionPct: null,
+      refs: { unique: null, total: goldenDiffCache.cacheHits, unit: 'cache hits' },
+      excludedBecause: 'its bytes are the same blobs Action results already counts - shown, not added, to avoid counting them twice',
+    },
+    {
+      key: 'macroCompaction', label: 'Macro compaction', 'kind': 'workflow', countedInTotal: false,
+      what: 'Consecutive duplicate steps (a retried click, a double submit) are dropped when a macro is recorded, so they are never replayed.',
+      bytesSaved: 0, estTokensSaved: 0, uniqueBytes: null, logicalBytes: null, reductionPct: null,
+      refs: { unique: null, total: macroCompaction.stepsRemoved, unit: 'steps removed' },
+      excludedBecause: 'counts steps, not bytes',
+    },
+    {
+      key: 'macroTemplating', label: 'Macro templating', kind: 'workflow', countedInTotal: false,
+      what: 'Steps that differ only by a value are stored once as a template.',
+      bytesSaved: 0, estTokensSaved: 0, uniqueBytes: null, logicalBytes: null, reductionPct: null,
+      refs: { unique: null, total: macroTemplating.stepsRemoved, unit: 'steps removed' },
+      excludedBecause: 'counts steps, not bytes',
+    },
+  ];
+}
+
 export function getTokenSavingsReport() {
   const resultDedup = getResultDedupSavings();
   const paramsDedup = getParamsDedupSavings();
@@ -1671,6 +1752,8 @@ export function getTokenSavingsReport() {
   const snapshotDedup = getSnapshotDedupSavings();
   const stepBlobDedup = getStepBlobDedupSavings();
   const columnDictCompaction = getColumnDictSavings();
+  const totalBytesSaved = resultDedup.bytesSaved + paramsDedup.bytesSaved + textDedup.bytesSaved + snapshotRowDedup.bytesSaved + snapshotDedup.bytesSaved + stepBlobDedup.bytesSaved + columnDictCompaction.bytesSaved;
+  const totalEstTokensSaved = resultDedup.estTokensSaved + paramsDedup.estTokensSaved + textDedup.estTokensSaved + snapshotRowDedup.estTokensSaved + snapshotDedup.estTokensSaved + stepBlobDedup.estTokensSaved + columnDictCompaction.estTokensSaved;
   return {
     resultDedup,
     paramsDedup,
@@ -1682,8 +1765,12 @@ export function getTokenSavingsReport() {
     snapshotDedup,
     stepBlobDedup,
     columnDictCompaction,
-    totalBytesSaved: resultDedup.bytesSaved + paramsDedup.bytesSaved + textDedup.bytesSaved + snapshotRowDedup.bytesSaved + snapshotDedup.bytesSaved + stepBlobDedup.bytesSaved + columnDictCompaction.bytesSaved,
-    totalEstTokensSaved: resultDedup.estTokensSaved + paramsDedup.estTokensSaved + textDedup.estTokensSaved + snapshotRowDedup.estTokensSaved + snapshotDedup.estTokensSaved + stepBlobDedup.estTokensSaved + columnDictCompaction.estTokensSaved,
+    totalBytesSaved,
+    totalEstTokensSaved,
+    ledgers: buildSavingsLedgers({ resultDedup, paramsDedup, textDedup, goldenDiffCache, macroCompaction, macroTemplating, snapshotRowDedup, snapshotDedup, stepBlobDedup, columnDictCompaction }),
+    // Every DB ledger above is a storage saving; kept as its own key so a
+    // reader never has to know which totals mean what.
+    byKind: { storage: { bytesSaved: totalBytesSaved, estTokensSaved: totalEstTokensSaved } },
   };
 }
 
