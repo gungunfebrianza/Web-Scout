@@ -1631,6 +1631,147 @@ sweeping debug instrumentation) - `debug sweep` covers the manual case for
 now; folding it into `session end` was considered but deferred as
 speculative without a second real session confirming the same gap.
 
+## V22 - token-cost monitoring and waste-prevention dashboard (implemented)
+
+Every prior version measured Web-scout's own *correctness*; nothing yet
+measured what a session actually COSTS the agent reading its output back -
+`result_json` on every logged action is the same substrate the CLI prints to
+stdout, so a large/redundant result is real, spent tokens, not just DB rows.
+This round adds an estimate-and-surface layer on top of the existing
+`actions` table, with no new dependency and no change to what any command
+returns by default.
+
+- **`token-report [--session <id>]` (new CLI/relay command + `GET
+  /token-report`, `GET /sessions/:id/token-report`):** ranks action TYPES by
+  `chars/4`-estimated tokens (`resultBytes`/`paramsBytes`, a pure SQL
+  `SUM(LENGTH(...))` aggregate - running the report never pays anything
+  close to the bytes it measures). Session-scoped form also flags
+  **repeated-call loops** (`findRepeatedActionLoops` - 3+ identical
+  type+params calls within 5s, the confirmed real "eval 1+1 while waiting
+  for boot" poll shape) and **redundant calls** (`findRedundantCalls` -
+  `idb.dump`/`dom.query` calls spaced further apart whose result never
+  actually changed - "did I already know this" re-checking, detected by
+  comparing each call's result hash against the last call to the same
+  store/selector).
+- **Printed automatically, no flag needed:** `printResult` (`cli.mjs`) warns
+  on stderr the moment a single result exceeds a token threshold, naming the
+  scoping flag (`--where`/`--fields`/`--limit` for `idb dump`) that would
+  have avoided it. `session end`/`session show` print a one-line cost
+  receipt (`session #N cost: X call(s), ~Y estimated tokens`) and a
+  budget-exceeded warning when the session declared one.
+- **`session start --token-budget N` (new flag) + `sessions.token_budget`
+  (new nullable column):** a purely advisory cost cap - nothing blocks a
+  command from running over it, it only changes what gets printed/rendered
+  once crossed. `DB_VERSION`-equivalent concept doesn't apply here (no
+  schema-drift gate in this tool) - just a plain migration via the existing
+  `ensureColumn` helper.
+- **Same-session read-result cache (`relay.mjs`):** a read call
+  (`idb.dump`/`get`/`list`, `dom.query`/`rect`/`computedStyle`, `net.log`,
+  `console.log`) with identical type+params, with no mutating command
+  (`dom.click`/`fill`/`eval`/`idb.put`/`patch`/`delete`/`clear`/
+  `page.reload`) dispatched in between, is answered from an in-relay cache
+  instead of re-dispatched to the page and re-logged as a new action -
+  `sessionMutationCounters` (bumped on every mutating dispatch) invalidates
+  the whole session's cache the instant anything could have changed. A hit
+  returns the identical result plus `__cacheHit:true`/`__cachedAt`, never a
+  reshaped response.
+- **Dashboard "Token cost (estimated)" section (new):** budget burn-rate
+  bar, per-type cost table, loop/redundant-call lists, and a cross-session
+  cost trend grouped by any tag shared with the open session
+  (`getSessionTokenTotals` - one `LEFT JOIN` so a zero-action session still
+  appears at 0 rather than vanishing). A **Waste Radar banner** auto-surfaces
+  the single worst-cost type when it's over 30% of the session's total AND
+  the total exceeds 3000 estimated tokens (dismissible per type, same
+  pattern as the existing friction/DB-version banners). The action log now
+  **collapses runs of 3+ consecutive identical type+params rows** into one
+  togglable summary row instead of rendering each individually - purely a
+  client-side render optimization on top of the already-fetched list, no
+  server change.
+- **`idb snapshot --since <snapshotId>` (new flag):** takes a fresh
+  snapshot scoped to the baseline's own stores, then prints ONLY the
+  add/remove/change delta (via the existing `/state/diff` route) instead of
+  a full dump - `idb.snapshot` is a top-3 all-time cost offender precisely
+  because a full dump prints every unchanged row alongside whatever actually
+  changed.
+- **`dom query <selector> [--full]` selector-shape warning:** warns on
+  stderr BEFORE dispatch when the selector looks like a whole-page/root
+  container (`body`, `html`, `#app`, `#root`, `main`, `#main`, `*`) - a
+  pre-call heuristic, cheaper than the existing post-call size warning,
+  since it costs nothing to check the selector string itself.
+
+## V23 - token-cost round 2: per-target ranking, dedup, and macro/suite cost awareness (implemented)
+
+V22 answered "which command TYPE costs the most"; this round answers "which
+SPECIFIC store/selector, macro, or repeat diff" - and, for the first time,
+actually reduces bytes stored/re-sent instead of only measuring them.
+
+- **`token-report`'s new `byTarget` field:** the same estTokens ranking as
+  `byType`, but grouped by the actual store (`idb.dump`) or selector
+  (`dom.query`) inside it - "`idb.dump` costs 90K tokens total" doesn't say
+  WHICH store; `byTarget` does (`getActionCostByTarget` in `db.mjs`, reusing
+  `findRedundantCalls`'s own target-extraction key).
+- **`idb dump <store>` historical pre-call hint:** when called unscoped (no
+  `--where`/`--fields`/`--limit`), the CLI checks that store's own `byTarget`
+  history before dispatching and warns with a REAL learned number ("store X
+  dumped 40x before, averaging ~Y estimated tokens/call") instead of a
+  static heuristic - the same historical-average machinery `macro run`
+  below reuses.
+- **`dom query --meta` (new flag):** skips `outerHTML`/`text` entirely -
+  just `tag`/`id`/`className`/`matchCount` (~50 bytes) - for the common
+  "does this exist / how many matched" check that never reads markup at
+  all. Stronger than the existing default cap (V21-era 2000/1000 chars):
+  opts OUT of paying for content, rather than paying a capped amount by
+  default.
+- **`macro run`/`suite run` pre-replay cost estimate:** prints an
+  estimated-tokens NOTE on stderr before replaying, summing each step's own
+  action type's historical average `estTokens`/call - a caller can trim a
+  macro/suite before paying for it, not discover the cost after the fact.
+- **Content-addressed result dedup (new `result_blobs` table,
+  `actions.result_hash` column):** a result byte-identical to one already
+  seen - even in a DIFFERENT session, e.g. the same fixture store dumped
+  every CRV round - is now physically stored ONCE; every later occurrence
+  just bumps a `ref_count` and leaves its own `actions.result_json` NULL.
+  Read-side `resolveResultJson` falls back to the blob by hash transparently
+  everywhere a result is read; every cost-report SQL aggregate `LEFT JOIN`s
+  `result_blobs` so LOGICAL byte counts (what a caller actually receives)
+  stay exact regardless of physical dedup. `getResultDedupSavings()` reports
+  real bytes never duplicated on disk, not an estimate.
+- **Macro step compaction at record/update time:** `compactMacroSteps`
+  collapses consecutive identical type+params steps (a retried click, a
+  double-submit) before persisting - `compacted_steps_removed` on the
+  response says how many. `steps_cost_est` (new `macros` column) stamps
+  each macro's own historical-average cost ONCE at record time, so `macro
+  list`/`macro run` read it back with zero live lookup.
+- **Golden-diff memoization by content, not id:** `state_snapshots` gained
+  a `content_hash` column (hash of its own `stores_json`) - two DIFFERENT
+  snapshot ids whose content is byte-identical (every `idb.snapshot` takes a
+  fresh id even when nothing changed) now produce the SAME diff. When
+  `idb diff`/`idb diff-golden` recognizes this (`findCachedDiff`), the full
+  diff body is NOT recomputed or re-sent - the response carries
+  `fromCache:true`/`cachedFromDiffId`/`diffOmitted` and only the (already
+  tiny) summary, with the full diff still persisted and fetchable by id for
+  data-integrity/audit purposes.
+- **`token-report`'s new `savings` block (no `--session`):** combines every
+  mechanism above's own REAL, measured numbers - `resultDedup`,
+  `goldenDiffCache`, `macroCompaction` (from real DB rows, survives a relay
+  restart) plus `runtimeReadCache` (V22's read-result cache's own hit
+  count/bytes saved - in-memory only, resets on restart, labeled as such).
+  Deliberately four separate real ledgers, not one fabricated composite
+  score.
+- **First-cache-hit awareness nudge:** the FIRST time in a session a call
+  is actually served from the read-result cache, a one-time
+  `x-webscout-nudge` header (same mechanism as V21's mid-session macro
+  nudge) tells the caller right then - a just-in-time teaching moment tied
+  to a real event, not a passive doc a caller has to already know to read -
+  and points at `token-report`'s `savings` block for the aggregate proof.
+
+**Considered and not done this round:** a real tokenizer replacing the
+`chars/4` estimate (ranking command types against each other doesn't need
+exact-token precision, and every number here is already labeled as an
+estimate); MCP server parity for `--meta`/`--since`/the pre-call hints (CLI-
+only friction this round, matching V20/V21's own precedent of deferring MCP
+parity until a real MCP-driven session hits the same gaps).
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

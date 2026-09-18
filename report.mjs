@@ -14,7 +14,7 @@ function mdEscapeBlock(v) {
   return String(v);
 }
 
-export function buildReportMarkdown({ session, actions, snapshots, diffs, qa, console: consoleEntries, net, verityRuns }) {
+export function buildReportMarkdown({ session, actions, snapshots, diffs, qa, console: consoleEntries, net, verityRuns, tokenReport, repeatedActionLoops }) {
   const lines = [];
   lines.push(`# Web-scout Session Report: ${session.goal}`);
   lines.push('');
@@ -35,6 +35,33 @@ export function buildReportMarkdown({ session, actions, snapshots, diffs, qa, co
     const chronological = actions.slice().reverse();
     for (const a of chronological) {
       lines.push(`| ${a.id} | ${a.started_at} | ${a.agent_name ?? 'default'} | ${mdEscapeCell(a.type)} | ${a.ok ? 'ok' : `FAIL: ${mdEscapeCell(a.error)}`} | ${a.duration_ms ?? ''} |`);
+    }
+  }
+  lines.push('');
+
+  // chars/4 estimate over the same result_json every action already
+  // stores - the exact bytes a coding agent reading this report (or the
+  // session's own printResult output) pays in tokens. Surfaced here so a
+  // waste pattern is visible without a separate "token-report" call.
+  lines.push('## Token cost (estimated)');
+  lines.push('');
+  if (!tokenReport?.byType?.length) {
+    lines.push('_No actions recorded._');
+  } else {
+    lines.push(`Total: **${tokenReport.totalCalls}** call(s), **~${tokenReport.totalEstTokens}** estimated tokens.`);
+    lines.push('');
+    lines.push('| Type | Calls | Avg result bytes | Est. tokens |');
+    lines.push('|---|---|---|---|');
+    for (const t of tokenReport.byType) {
+      lines.push(`| ${mdEscapeCell(t.type)} | ${t.calls} | ${t.avgResultBytes} | ${t.estTokens} |`);
+    }
+  }
+  if (repeatedActionLoops?.length) {
+    lines.push('');
+    lines.push('**Repeated-call loops flagged** (3+ identical type+params within 5s - likely a poll, not distinct diagnostics):');
+    lines.push('');
+    for (const l of repeatedActionLoops) {
+      lines.push(`- \`${l.type}\` x${l.count} (${l.firstAt} → ${l.lastAt})`);
     }
   }
   lines.push('');

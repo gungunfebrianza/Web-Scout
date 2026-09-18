@@ -21,7 +21,23 @@
 
   const port = params.get('webscout_port') || 8973;
   const agentName = params.get('webscout_name');
-  const RELAY_URL = agentName ? `ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(agentName)}` : `ws://127.0.0.1:${port}/agent`;
+  // Generated once per SCRIPT EVALUATION, not per WebSocket connection -
+  // this line only re-runs on a real navigation (a fresh <script> eval),
+  // never on inject.js's own auto-reconnect (`scheduleReconnect` below,
+  // which just re-opens a WebSocket inside the SAME still-running page).
+  // Confirmed live: a WS drop/reconnect unrelated to any reload (network
+  // blip, relay restart, page.hardReload's own SW-unregister step) was
+  // enough to bump relay.mjs's connectedAt for this agent name, making
+  // `page reload --wait-reconnect` report reconnected:true even though
+  // location.reload() never actually tore down this page's JS - a
+  // window.__marker__ set before the "reload" survived it. loadId is sent
+  // to the relay on every connect (see RELAY_URL below) so waitForReconnect
+  // (client.mjs) can require it to actually CHANGE, not just infer a fresh
+  // connection from timing.
+  const loadId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  const RELAY_URL = agentName
+    ? `ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(agentName)}&loadId=${loadId}`
+    : `ws://127.0.0.1:${port}/agent?loadId=${loadId}`;
   const DB_NAME = 'AgentCapitalOS';
 
   console.warn('[web-scout] ACTIVE - full DOM/IndexedDB/network access is exposed to a local relay. Never leave this on for a real session.');
@@ -395,7 +411,21 @@
     // so it never throws on ambiguity (unlike resolveTarget) - `matchCount`/
     // `renderedMatchCount` are always included so a caller can tell a clean
     // single match from a biased pick among several.
-    'dom.query': ({ selector }) => {
+    // Default caps kept small (2000/1000, vs. the old unconditional
+    // 20000/5000) - confirmed real waste: a caller checking "does this
+    // element exist" or "what's its class" paid full-tree outerHTML cost
+    // every time, even for a container with a large subtree. `full:true`
+    // (CLI: --full) restores the old, larger ceiling for when the whole
+    // subtree genuinely IS what's needed. Either way `outerHTMLTruncated`
+    // says whether anything was actually cut, so a caller never mistakes a
+    // capped result for the complete element.
+    // `meta:true` (CLI: --meta) skips outerHTML/text entirely (~50 bytes
+    // instead of up to 2000/1000 even at the default cap) - for the common
+    // "does this exist / what's its tag+class / how many matched" check
+    // that never reads the markup at all. A stronger lever than the
+    // htmlCap/textCap default below: those still PAY for (capped) content
+    // by default, this opts OUT of paying for it at all.
+    'dom.query': ({ selector, full, meta }) => {
       const all = document.querySelectorAll(selector);
       if (all.length === 0) return { found: false };
       let el = all[0];
@@ -403,13 +433,29 @@
         const visible = [...all].filter(isRendered);
         if (visible.length === 1) el = visible[0];
       }
+      if (meta) {
+        return {
+          found: true,
+          tag: el.tagName,
+          id: el.id || null,
+          className: el.className || null,
+          matchCount: all.length,
+          renderedMatchCount: all.length > 1 ? [...all].filter(isRendered).length : undefined,
+        };
+      }
+      const htmlCap = full ? 20000 : 2000;
+      const textCap = full ? 5000 : 1000;
+      const fullHTML = el.outerHTML;
+      const fullText = el.textContent ?? '';
       return {
         found: true,
         tag: el.tagName,
         id: el.id || null,
         className: el.className || null,
-        outerHTML: el.outerHTML.slice(0, 20000),
-        text: el.textContent?.slice(0, 5000) ?? null,
+        outerHTML: fullHTML.slice(0, htmlCap),
+        outerHTMLTruncated: fullHTML.length > htmlCap,
+        text: fullText.slice(0, textCap) || null,
+        textTruncated: fullText.length > textCap,
         matchCount: all.length,
         renderedMatchCount: all.length > 1 ? [...all].filter(isRendered).length : undefined,
       };
@@ -645,15 +691,45 @@
       db.close();
       return { stores: names, counts };
     },
-    'idb.dump': async ({ store }) => {
+    // `where`/`fields`/`limit` filter and project IN-PAGE, before the
+    // result ever reaches the WebSocket - confirmed real waste: the CLI's
+    // own `--where` used to fetch the WHOLE store first and filter
+    // client-side after the fact, so a scoped "just my tagged rows" dump of
+    // a huge store still paid full transfer+DB-storage+stdout-print cost
+    // for every unrelated row. Same exact-equality `where` semantics as
+    // before (JSON.stringify equality per field, matches `session assert`'s
+    // checks). `fields` (array of key names) projects each surviving row
+    // down to just those keys - the "confirm outcome_status changed"
+    // check that used to mean printing 40+ unrelated columns per row.
+    // `limit` caps rows AFTER filtering (matchedCount still reports the
+    // real total so a truncated result is never silently mistaken for a
+    // complete one).
+    'idb.dump': async ({ store, where, fields, limit } = {}) => {
       const db = await openDb();
       if (!db.objectStoreNames.contains(store)) {
         db.close();
         throw new Error(`no such store: ${store}`);
       }
-      const { keyPath, rows } = await readStore(db, store);
+      const { keyPath, rows: allRows } = await readStore(db, store);
       db.close();
-      return { store, keyPath, count: rows.length, rows };
+      let rows = allRows;
+      if (where && typeof where === 'object') {
+        const entries = Object.entries(where);
+        rows = rows.filter((r) => entries.every(([k, v]) => JSON.stringify(r?.[k]) === JSON.stringify(v)));
+      }
+      const matchedCount = rows.length;
+      const lim = Number.isFinite(limit) ? Number(limit) : undefined;
+      const truncated = lim !== undefined && matchedCount > lim;
+      if (truncated) rows = rows.slice(0, lim);
+      if (Array.isArray(fields) && fields.length) {
+        rows = rows.map((r) => Object.fromEntries(fields.filter((f) => r && Object.prototype.hasOwnProperty.call(r, f)).map((f) => [f, r[f]])));
+      }
+      return {
+        store, keyPath, totalCount: allRows.length, matchedCount, count: rows.length, rows,
+        ...(where ? { where } : {}),
+        ...(fields ? { fields } : {}),
+        ...(truncated ? { truncated: true, note: `${matchedCount - lim} more row(s) matched but were cut by --limit ${lim}` } : {}),
+      };
     },
     // Single-key lookup - idb.dump only ever does a whole-store scan (via
     // store.getAll()), so finding one row by an already-known key in a

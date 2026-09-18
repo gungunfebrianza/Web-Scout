@@ -30,6 +30,12 @@
     --fail-bg: #3a1016; --fail-fg: var(--accent-danger);
     --active-bg: #0c2a33; --active-fg: var(--accent-info);
     --warn-bg: #3a2606; --warn-fg: var(--accent-predator);
+    --glow-predator: 0 0 12px rgba(255,157,0,.25);
+    --glow-alien: 0 0 12px rgba(124,255,60,.25);
+    --glow-info: 0 0 12px rgba(41,226,255,.25);
+    --glow-danger: 0 0 12px rgba(255,42,61,.25);
+    --divider-hud: linear-gradient(90deg, transparent, var(--border-hud) 15%, var(--border-hud) 85%, transparent);
+    --bg-panel-inset: #070a0a;
   }
   * { box-sizing: border-box; }
   body { margin: 0; padding: 16px; background: var(--bg-void); color: var(--ink-primary); font: 13px/1.5 var(--font-mono); position: relative; }
@@ -40,7 +46,9 @@
     mix-blend-mode: overlay;
   }
   @keyframes scan-drift { 0% { background-position: 0 0; } 100% { background-position: 0 60px; } }
-  h1 { font-family: var(--font-display); font-size: 18px; letter-spacing: .12em; text-transform: uppercase; margin: 0 0 12px; color: var(--accent-predator); text-shadow: 0 0 8px rgba(255,157,0,.35); }
+  h1 { font-family: var(--font-display); font-size: 18px; letter-spacing: .12em; text-transform: uppercase; margin: 0; color: var(--accent-predator); text-shadow: 0 0 8px rgba(255,157,0,.35); transition: color .3s, text-shadow .3s; }
+  body.relay-down h1 { color: var(--accent-danger); text-shadow: var(--glow-danger); }
+  .hud-subtitle { font-size: 11px; color: var(--ink-muted); margin: 2px 0 0; letter-spacing: .04em; }
   h2 { font-family: var(--font-display); font-size: 13px; text-transform: uppercase; letter-spacing: .1em; color: var(--accent-info); margin: 20px 0 8px; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   select, input, textarea, button { background: var(--bg-panel-raised); color: var(--ink-primary); border: 1px solid var(--border-hud); border-radius: 2px; padding: 6px 8px; font: inherit; }
@@ -55,11 +63,16 @@
   .chip { display: inline-block; background: var(--bg-panel-raised); color: var(--ink-muted); border: 1px solid var(--border-hud); border-radius: 10px; padding: 1px 8px; font-size: 11px; margin-right: 4px; }
   table { width: 100%; border-collapse: collapse; margin-top: 4px; }
   th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border-hud); vertical-align: top; }
-  th { color: var(--accent-info); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  th { color: var(--accent-info); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid var(--accent-predator); }
+  .hud-section table tbody tr:nth-child(even) td, .panel table tbody tr:nth-child(even) td { background: rgba(124,255,60,.02); }
   tr.expandable { cursor: pointer; }
   tr.expandable:hover { background: var(--bg-panel-raised); }
   pre { white-space: pre-wrap; word-break: break-word; background: #05070a; color: var(--ink-primary); border: 1px solid var(--border-hud); border-radius: 4px; padding: 8px; margin: 4px 0 0; max-height: 320px; overflow: auto; }
-  .empty { color: var(--ink-muted); font-style: italic; padding: 8px 0; }
+  .empty { color: var(--ink-muted); font-style: italic; padding: 14px 10px; text-align: center; border: 1px dashed var(--border-hud); border-radius: 3px; margin-top: 4px; }
+  .empty::before { content: '\25C7'; display: block; font-style: normal; color: var(--border-hud); font-size: 14px; margin-bottom: 4px; }
+  .skeleton-row td { padding: 8px; }
+  .skeleton-row .skeleton-bar { height: 10px; border-radius: 2px; background: linear-gradient(90deg, var(--bg-panel-raised) 0%, var(--border-hud) 50%, var(--bg-panel-raised) 100%); background-size: 200% 100%; animation: skeleton-sweep 1.4s ease-in-out infinite; }
+  @keyframes skeleton-sweep { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
   .panel, .hud-section { background: var(--bg-panel); border: 1px solid var(--border-hud); border-radius: 2px; padding: 12px; position: relative; }
   .hud-section { padding: 8px 10px 12px; margin-bottom: 4px; }
   .panel::before, .panel::after, .hud-section::before, .hud-section::after {
@@ -101,7 +114,8 @@
   .tl-verity { background: var(--kind-verity); }
   .timeline-label { color: var(--ink-muted); font-size: 11px; text-transform: uppercase; min-width: 64px; }
   #globalSearch { min-width: 220px; }
-  #searchResults .empty { padding: 4px 0; }
+  #searchResults .empty { padding: 4px 0; border: none; text-align: left; }
+  #searchResults .empty::before { display: inline; margin: 0 6px 0 0; }
   .search-hit { padding: 6px 0; border-bottom: 1px solid var(--border-hud); font-size: 12px; cursor: pointer; }
   .search-hit:hover { background: var(--bg-panel-raised); }
   .search-hit .muted { font-size: 11px; }
@@ -112,36 +126,61 @@
   .diff-added { color: var(--accent-alien); }
   .diff-removed { color: var(--accent-danger); }
   .diff-changed { color: var(--accent-predator); }
-  #frictionBanner, #dbVersionBanner { background: var(--warn-bg); border: 1px solid var(--accent-predator); border-radius: 2px; padding: 10px 12px; margin-bottom: 12px; }
-  #frictionBanner h3, #dbVersionBanner h3 { margin: 0 0 6px; font-family: var(--font-display); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--accent-predator); }
+  #frictionBanner, #dbVersionBanner, #wasteBanner { background: var(--warn-bg); border: 1px solid var(--accent-predator); border-radius: 2px; padding: 10px 12px; margin-bottom: 12px; }
+  #frictionBanner h3, #dbVersionBanner h3, #wasteBanner h3 { margin: 0 0 6px; font-family: var(--font-display); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--accent-predator); }
   #frictionBanner ul { margin: 0; padding-left: 18px; }
   #frictionBanner li { margin: 2px 0; }
-  #frictionToggle, #dbVersionToggle { float: right; background: none; border: none; color: var(--ink-muted); cursor: pointer; padding: 0 4px; }
+  #frictionToggle, #dbVersionToggle, #wasteToggle { float: right; background: none; border: none; color: var(--ink-muted); cursor: pointer; padding: 0 4px; }
+  .token-trend-bar { display: inline-block; width: 16px; margin-right: 2px; text-align: center; vertical-align: bottom; }
+  .token-trend-bar-track { height: 30px; display: flex; align-items: flex-end; }
   .assert-run { border-bottom: 1px solid var(--border-hud); padding: 8px 0; }
   .assert-run:last-child { border-bottom: none; }
   .assert-checks-list { list-style: none; margin: 4px 0 0; padding: 0; }
   .assert-checks-list li { padding: 2px 0; font-size: 12px; }
   .hud-pulse { animation: hud-blink 1.6s ease-in-out infinite; }
   @keyframes hud-blink { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
-  .hud-header { display: flex; flex-direction: column; gap: 10px; }
+  .hud-header { display: flex; flex-direction: column; gap: 14px; padding-bottom: 14px; }
+  .hud-header::after { content: ''; display: block; position: absolute; left: 10px; right: 10px; bottom: 0; height: 1px; background: var(--divider-hud); }
+  .hud-header::before, .hud-header::after { width: 16px; height: 16px; }
   .hud-header-row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
   .hud-stat-strip { display: flex; gap: 8px; flex-wrap: wrap; }
-  .hud-tile { background: var(--bg-panel-raised); border: 1px solid var(--border-hud); border-radius: 2px; padding: 6px 12px; min-width: 100px; }
+  .hud-tile { background: var(--bg-panel-raised); border: 1px solid var(--border-hud); border-radius: 2px; padding: 7px 12px 6px; min-width: 100px; position: relative; border-top: 2px solid var(--border-hud); }
+  .hud-tile[data-hint] { cursor: help; }
+  .hud-tile[data-hint]::after { content: attr(data-hint); position: absolute; left: 0; top: 100%; margin-top: 6px; width: max-content; max-width: 220px; background: var(--bg-void); border: 1px solid var(--accent-predator); color: var(--ink-primary); font-size: 11px; padding: 5px 7px; border-radius: 2px; opacity: 0; pointer-events: none; transition: opacity .15s; z-index: 20; }
+  .hud-tile[data-hint]:hover::after { opacity: 1; }
   .hud-tile-label { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-muted); }
   .hud-tile-value { font-size: 18px; font-weight: 700; color: var(--accent-info); font-family: var(--font-display); }
+  .hud-tile-ok { border-top-color: var(--accent-alien); }
   .hud-tile-ok .hud-tile-value { color: var(--accent-alien); }
+  .hud-tile-warn { border-top-color: var(--accent-predator); box-shadow: var(--glow-predator); }
   .hud-tile-warn .hud-tile-value { color: var(--accent-predator); }
+  .hud-tile-fail { border-top-color: var(--accent-danger); box-shadow: var(--glow-danger); }
   .hud-tile-fail .hud-tile-value { color: var(--accent-danger); }
   .hud-sparkline { flex: 1; min-width: 220px; margin-top: 6px; }
   .hud-sparkline svg { display: block; height: 28px; width: 100%; }
+  .hud-sparkline-legend { display: flex; gap: 12px; margin-top: 4px; font-size: 10px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: .05em; }
+  .hud-sparkline-legend .swatch { display: inline-block; width: 10px; height: 2px; margin-right: 4px; vertical-align: middle; }
+  .swatch-predator { background: var(--accent-predator); }
+  .swatch-danger { background: var(--accent-danger); }
+  .hud-radar-col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
   .hud-radar { width: 100px; height: 100px; flex-shrink: 0; }
   .hud-radar svg { width: 100%; height: 100%; }
+  .hud-radar-legend { display: flex; flex-wrap: wrap; gap: 4px 8px; justify-content: center; font-size: 9px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: .04em; max-width: 120px; }
+  .hud-radar-legend .swatch-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 3px; vertical-align: middle; }
   .radar-ring { fill: none; stroke: var(--border-hud); stroke-width: 1; }
   .radar-sweep { transform-origin: 50px 50px; animation: radar-rotate 4s linear infinite; }
   .radar-sweep line { stroke: var(--accent-alien); stroke-width: 1.5; opacity: .8; }
   @keyframes radar-rotate { to { transform: rotate(360deg); } }
+  .relay-uptime-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent-alien); margin-right: 5px; box-shadow: 0 0 4px var(--accent-alien); vertical-align: middle; }
+  body.relay-down .relay-uptime-dot { background: var(--accent-danger); box-shadow: 0 0 4px var(--accent-danger); }
+  #sessionPanel { position: relative; }
+  #hudSweepBar { position: absolute; left: 0; right: 0; top: 0; height: 2px; background: linear-gradient(90deg, transparent, var(--accent-alien), transparent); opacity: 0; pointer-events: none; z-index: 5; }
+  #hudSweepBar.sweep-run { animation: hud-sweep-sequence .9s ease-out; }
+  @keyframes hud-sweep-sequence { 0% { top: 0; opacity: 1; } 100% { top: 100%; opacity: 0; } }
+  .hud-section.just-updated::before, .hud-section.just-updated::after { border-color: var(--accent-alien); box-shadow: 0 0 8px var(--accent-alien); }
   @media (prefers-reduced-motion: reduce) {
-    body::before, .hud-pulse, .radar-sweep, .spinner { animation: none !important; }
+    body::before, .hud-pulse, .radar-sweep, .spinner, .skeleton-row .skeleton-bar { animation: none !important; }
+    #hudSweepBar.sweep-run { animation: none !important; opacity: 0 !important; }
   }
   dialog#settingsDialog { background: var(--bg-panel); color: var(--ink-primary); border: 1px solid var(--border-hud); border-radius: 4px; padding: 16px; max-width: 640px; width: 90vw; }
   dialog#settingsDialog::backdrop { background: rgba(0,0,0,.6); }
@@ -156,24 +195,39 @@
 </head>
 <body>
 <div class="hud-header hud-section">
-  <h1>Web-scout Dashboard</h1>
+  <div>
+    <h1>Web-scout Dashboard</h1>
+    <div id="sessionSubtitle" class="hud-subtitle">scanning...</div>
+  </div>
   <div class="hud-header-row">
     <div style="flex:1; min-width:260px;">
       <div id="hudStatStrip" class="hud-stat-strip"></div>
       <div id="hudSparkline" class="hud-sparkline"><svg id="hudSparklineSvg"></svg></div>
+      <div class="hud-sparkline-legend"><span><span class="swatch swatch-predator"></span>activity</span><span><span class="swatch swatch-danger"></span>failures</span></div>
     </div>
-    <div id="hudRadar" class="hud-radar" aria-hidden="true" title="motion tracker: recent event activity">
-      <svg viewBox="0 0 100 100">
-        <circle class="radar-ring" cx="50" cy="50" r="46"/>
-        <circle class="radar-ring" cx="50" cy="50" r="30"/>
-        <circle class="radar-ring" cx="50" cy="50" r="14"/>
-        <g class="radar-sweep"><line x1="50" y1="50" x2="50" y2="4"/></g>
-        <g id="hudRadarBlips"></g>
-      </svg>
+    <div class="hud-radar-col">
+      <div id="hudRadar" class="hud-radar" aria-hidden="true" title="motion tracker: recent event activity">
+        <svg viewBox="0 0 100 100">
+          <circle class="radar-ring" cx="50" cy="50" r="46"/>
+          <circle class="radar-ring" cx="50" cy="50" r="30"/>
+          <circle class="radar-ring" cx="50" cy="50" r="14"/>
+          <g class="radar-sweep"><line x1="50" y1="50" x2="50" y2="4"/></g>
+          <g id="hudRadarBlips"></g>
+        </svg>
+      </div>
+      <div class="hud-radar-legend" aria-hidden="true">
+        <span><span class="swatch-dot" style="background:var(--kind-action)"></span>action</span>
+        <span><span class="swatch-dot" style="background:var(--kind-snapshot)"></span>snap</span>
+        <span><span class="swatch-dot" style="background:var(--kind-diff)"></span>diff</span>
+        <span><span class="swatch-dot" style="background:var(--kind-console)"></span>console</span>
+        <span><span class="swatch-dot" style="background:var(--kind-net)"></span>net</span>
+        <span><span class="swatch-dot" style="background:var(--kind-verity)"></span>verity</span>
+      </div>
     </div>
   </div>
   <div class="row">
     <span id="relayStatus" class="muted hud-pulse">checking relay...</span>
+    <span id="relayUptime" class="muted"></span>
     <span id="agentsStatus" class="muted"></span>
     <input id="tagFilter" placeholder="filter sessions (goal/context/tag)...">
     <select id="sessionPicker"></select>
@@ -232,6 +286,12 @@
   <div id="dbVersionReloadStatus"></div>
 </div>
 
+<div id="wasteBanner" hidden>
+  <button id="wasteToggle">hide</button>
+  <h3>Token waste radar</h3>
+  <div id="wasteText"></div>
+</div>
+
 <div id="frictionBanner" hidden>
   <button id="frictionToggle">hide</button>
   <h3>Known friction (across every session)</h3>
@@ -243,6 +303,7 @@
 <div id="noSession" class="empty" hidden>No sessions yet (or none match the filter). Start one from the CLI: <code>node tools/web-scout/cli.mjs session start "&lt;goal&gt;" "&lt;context&gt;"</code></div>
 
 <div id="sessionPanel" hidden>
+  <div id="hudSweepBar" aria-hidden="true"></div>
   <div class="panel">
     <div class="row" style="justify-content: space-between;">
       <div>
@@ -265,7 +326,7 @@
   <div id="timelineEmpty" class="empty" hidden>Nothing recorded yet.</div>
   </section>
 
-  <section class="hud-section">
+  <section class="hud-section" id="actionsSection">
   <h2>Action log</h2>
   <div class="row filter-row">
     <select id="actionTypeFilter"><option value="">all types</option></select>
@@ -277,37 +338,49 @@
   </section>
 
   <section class="hud-section">
+  <h2>Token cost (estimated)</h2>
+  <div class="muted">chars/4 estimate over each action's own result_json - the same bytes a coding agent reads off stdout. Read-only calls (idb dump/get/list, dom query/rect/style, net log, console log) are served from cache when nothing could have changed since the last identical call - see "token-report" in the CLI help.</div>
+  <div id="tokenBudgetBar" hidden style="margin-top:8px;"></div>
+  <table id="tokenCostTable"><thead><tr><th>Type</th><th>Calls</th><th>Avg bytes</th><th>Est. tokens</th></tr></thead><tbody></tbody></table>
+  <div id="tokenCostTotal" class="muted" style="margin-top:4px;"></div>
+  <div id="tokenLoopsList" style="margin-top:6px; font-size:12px;"></div>
+  <div id="tokenRedundantList" style="margin-top:6px; font-size:12px;"></div>
+  <div id="tokenTrendSection" style="margin-top:10px;"></div>
+  <div id="tokenCostEmpty" class="empty" hidden>No actions recorded yet.</div>
+  </section>
+
+  <section class="hud-section">
   <h2>Regression checks</h2>
   <div class="muted">results of <code>session assert</code> - declarative checks against LIVE state (see the CLI's own "session assert" doc)</div>
   <div id="assertRunsList" style="margin-top: 4px;"></div>
   <div id="assertRunsEmpty" class="empty" hidden>No "session assert" runs recorded yet for this session.</div>
   </section>
 
-  <section class="hud-section">
+  <section class="hud-section" id="snapshotsSection">
   <h2>State snapshots</h2>
   <table id="snapshotsTable"><thead><tr><th>ID</th><th>Time</th><th>Agent</th><th>Counts</th><th>Size</th><th></th></tr></thead><tbody></tbody></table>
   <div id="snapshotsEmpty" class="empty" hidden>No snapshots yet - <code>idb snapshot</code> from the CLI.</div>
   </section>
 
-  <section class="hud-section">
+  <section class="hud-section" id="diffsSection">
   <h2>State diffs</h2>
   <table id="diffsTable"><thead><tr><th>ID</th><th>From &rarr; To</th><th>Summary</th></tr></thead><tbody></tbody></table>
   <div id="diffsEmpty" class="empty" hidden>No diffs yet - <code>idb diff &lt;a&gt; &lt;b&gt;</code> from the CLI.</div>
   </section>
 
-  <section class="hud-section">
+  <section class="hud-section" id="consoleSection">
   <h2>Console</h2>
   <table id="consoleTable"><thead><tr><th>Time</th><th>Agent</th><th>Level</th><th>Message</th></tr></thead><tbody></tbody></table>
   <div id="consoleEmpty" class="empty" hidden>No console entries captured yet.</div>
   </section>
 
-  <section class="hud-section">
+  <section class="hud-section" id="netSection">
   <h2>Network</h2>
   <table id="netTable"><thead><tr><th>Time</th><th>Agent</th><th>Via</th><th>Method</th><th>URL</th><th>Status</th><th id="netDurationHeader" class="sortable" title="Click to sort by duration">Duration</th></tr></thead><tbody></tbody></table>
   <div id="netEmpty" class="empty" hidden>No network entries captured yet.</div>
   </section>
 
-  <section class="hud-section">
+  <section class="hud-section" id="veritySection">
   <h2>Verity UI checks</h2>
   <div class="muted">accessibility-tree evidence imported from <code>tools/ui-verifier</code> (a Verity <code>scenario</code> result JSON) - Verity itself persists nothing on its own</div>
   <div class="row" style="margin-top: 4px;">
@@ -329,7 +402,7 @@
   <div id="macrosEmpty" class="empty" hidden>No macros recorded yet.</div>
   </section>
 
-  <section class="hud-section">
+  <section class="hud-section" id="qaSection">
   <h2>Ask AI</h2>
   <div id="qaList"></div>
   <form id="askForm">
@@ -378,6 +451,16 @@ let lastDiffs = [];
 let lastConsoleEntries = [];
 let lastNetEntries = [];
 let lastVerityRuns = [];
+// Token-cost/budget/trend state (see refreshTokenReport/renderTokenReport
+// below) - lastSessionFull is the full session row (needs token_budget,
+// unlike currentSessionStatus which only tracks its status string).
+// lastAnalyticsData is /analytics's own already-cached response (see
+// refreshFriction), reused here rather than a second fetch just to read its
+// additive sessionTokenTotals field.
+let lastTokenReport = null;
+let lastSessionFull = null;
+let lastAnalyticsData = null;
+let wasteDismissedFor = null; // remembers which top-cost TYPE was dismissed, so a new worst type re-shows
 // Lazily-fetched full (unredacted) action rows, keyed by action id - avoids
 // re-fetching the same expanded row's heavy payload on every collapse/
 // re-expand within a session. Cleared on session switch (see below) so it
@@ -456,6 +539,8 @@ async function refreshSessionPicker() {
   allSessions = await api('GET', '/sessions');
   const filter = el('tagFilter').value.trim();
   const filtered = allSessions.filter((s) => sessionMatchesFilter(s, filter));
+  const activeCount = filtered.filter((s) => s.status === 'active').length;
+  el('sessionSubtitle').textContent = `${filtered.length} session${filtered.length === 1 ? '' : 's'} tracked (${activeCount} active)`;
   const picker = el('sessionPicker');
   const prev = picker.value;
   picker.innerHTML = filtered.map((s) => {
@@ -485,15 +570,54 @@ function renderDbVersionBanner(drift) {
   el('dbVersionBanner').hidden = false;
 }
 
+let relayConnectedSince = null;
+
+function fmtUptime(ms) {
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+}
+
 async function refreshHealth() {
   const health = await api('GET', '/health');
   lastHealth = health;
-  el('relayStatus').textContent = 'relay: ok';
+  document.body.classList.remove('relay-down');
+  if (!relayConnectedSince) relayConnectedSince = Date.now();
+  el('relayStatus').innerHTML = '<span class="relay-uptime-dot"></span>relay: ok';
+  el('relayUptime').textContent = `connected ${fmtUptime(Date.now() - relayConnectedSince)}`;
+  // loadId (last 8 chars) shown per agent so a human can eyeball, at a
+  // glance, whether the connected tab actually survived its last reload -
+  // same signal client.mjs's waitForReconnect now requires, surfaced here
+  // since the dashboard has no CLI stdout to print it into. Only changes on
+  // a real navigation (see inject.js's RELAY_URL comment) - a same loadId
+  // across two polls after a "reload" means it never actually happened.
   el('agentsStatus').textContent = health.agents_connected.length
-    ? `agents: ${health.agents_connected.join(', ')}`
+    ? `agents: ${health.agents_detail.map((a) => `${a.name} (loadId ${a.loadId ? a.loadId.slice(-8) : 'unknown'})`).join(', ')}`
     : 'agents: none connected';
   renderDbVersionBanner(health.db_version_drift);
   renderHud();
+}
+
+// Polls GET /agents for `target` to actually change loadId, mirroring
+// client.mjs's waitForReconnect (that function isn't reachable from a
+// browser tab - no import across the relay boundary - so the same proof
+// logic is duplicated here, deliberately kept in lockstep with it). Used by
+// the hard-reload button below so its status text reflects a REAL
+// navigation, not just "command dispatched".
+async function waitForLoadIdChange({ target = 'default', timeoutMs = 60000 } = {}) {
+  const start = Date.now();
+  const before = await api('GET', '/agents');
+  const initialLoadId = before.detail?.find((a) => a.name === target)?.loadId ?? null;
+  while (Date.now() - start < timeoutMs) {
+    const { agents, detail } = await api('GET', '/agents');
+    const current = detail?.find((a) => a.name === target) ?? null;
+    if (agents.includes(target) && current?.loadId && current.loadId !== initialLoadId) {
+      return { reconnected: true, waitedMs: Date.now() - start, initialLoadId, loadId: current.loadId };
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return { reconnected: false, waitedMs: Date.now() - start, initialLoadId };
 }
 
 function computeStats() {
@@ -503,18 +627,25 @@ function computeStats() {
   const consoleErrors = lastConsoleEntries.filter((c) => /error|uncaught|unhandledrejection/.test(c.level)).length;
   const netCalls = lastNetEntries.length;
   const agentsConnected = lastHealth?.agents_connected?.length ?? 0;
-  return { totalActions, failRate, consoleErrors, netCalls, agentsConnected };
+  const totalEstTokens = lastTokenReport?.totalEstTokens ?? 0;
+  const budget = lastSessionFull?.token_budget;
+  return { totalActions, failRate, consoleErrors, netCalls, agentsConnected, totalEstTokens, budget };
 }
 
 function renderStatStrip() {
   const s = computeStats();
   const band = s.failRate < 10 ? 'ok' : s.failRate < 30 ? 'warn' : 'fail';
+  // Live "how much has this session cost so far" tile - updates on every
+  // action (see refreshTokenReport, wired into the SSE 'action' handler),
+  // not only when someone opens the Token cost panel below.
+  const tokenBand = s.budget ? (s.totalEstTokens < s.budget * 0.7 ? 'ok' : s.totalEstTokens < s.budget ? 'warn' : 'fail') : '';
   el('hudStatStrip').innerHTML = `
-    <div class="hud-tile"><div class="hud-tile-label">Actions</div><div class="hud-tile-value">${s.totalActions}</div></div>
-    <div class="hud-tile hud-tile-${band}"><div class="hud-tile-label">Fail rate</div><div class="hud-tile-value">${s.failRate.toFixed(1)}%</div></div>
-    <div class="hud-tile"><div class="hud-tile-label">Console errors</div><div class="hud-tile-value">${s.consoleErrors}</div></div>
-    <div class="hud-tile"><div class="hud-tile-label">Net calls</div><div class="hud-tile-value">${s.netCalls}</div></div>
-    <div class="hud-tile"><div class="hud-tile-label">Agents</div><div class="hud-tile-value">${s.agentsConnected}</div></div>`;
+    <div class="hud-tile" data-hint="Total actions run in this session so far."><div class="hud-tile-label">Actions</div><div class="hud-tile-value">${s.totalActions}</div></div>
+    <div class="hud-tile hud-tile-${band}" data-hint="Failed actions / total actions this session."><div class="hud-tile-label">Fail rate</div><div class="hud-tile-value">${s.failRate.toFixed(1)}%</div></div>
+    <div class="hud-tile" data-hint="Console messages logged at error/uncaught/unhandledrejection level."><div class="hud-tile-label">Console errors</div><div class="hud-tile-value">${s.consoleErrors}</div></div>
+    <div class="hud-tile" data-hint="Network requests captured this session."><div class="hud-tile-label">Net calls</div><div class="hud-tile-value">${s.netCalls}</div></div>
+    <div class="hud-tile" data-hint="Browser agents currently connected to the relay."><div class="hud-tile-label">Agents</div><div class="hud-tile-value">${s.agentsConnected}</div></div>
+    <div class="hud-tile ${tokenBand ? `hud-tile-${tokenBand}` : ''}" data-hint="${s.budget ? `Estimated tokens spent vs. declared budget of ${s.budget}.` : 'Estimated tokens spent (chars/4). No --token-budget declared.'}"><div class="hud-tile-label">Est. tokens</div><div class="hud-tile-value">${s.totalEstTokens}</div></div>`;
 }
 
 function renderSparkline() {
@@ -522,10 +653,14 @@ function renderSparkline() {
   // magnitude-over-time sparkline, no chart library needed.
   const now = Date.now();
   const buckets = new Array(30).fill(0);
+  const failBuckets = new Array(30).fill(0);
   for (const a of lastActions) {
     const t = new Date(a.started_at).getTime();
     const bucket = 29 - Math.floor((now - t) / 60000);
-    if (bucket >= 0 && bucket < 30) buckets[bucket]++;
+    if (bucket >= 0 && bucket < 30) {
+      buckets[bucket]++;
+      if (!a.ok) failBuckets[bucket]++;
+    }
   }
   const max = Math.max(1, ...buckets);
   const w = 4, gap = 1;
@@ -533,10 +668,18 @@ function renderSparkline() {
     const h = Math.max(1, (v / max) * 24);
     return `<rect x="${i * (w + gap)}" y="${24 - h}" width="${w}" height="${h}" fill="var(--accent-predator)"/>`;
   }).join('');
+  // Overlaid on the same buckets/scale as the activity bars above - shows
+  // whether volume and failures are moving together or diverging, at no
+  // extra fetch cost (lastActions is already iterated once above).
+  const points = failBuckets.map((v, i) => {
+    const x = i * (w + gap) + w / 2;
+    const y = 24 - Math.max(0, (v / max) * 24);
+    return `${x},${y.toFixed(1)}`;
+  }).join(' ');
   const svg = el('hudSparklineSvg');
   svg.setAttribute('viewBox', `0 0 ${30 * (w + gap)} 24`);
   svg.setAttribute('preserveAspectRatio', 'none');
-  svg.innerHTML = bars;
+  svg.innerHTML = bars + `<polyline points="${points}" fill="none" stroke="var(--accent-danger)" stroke-width="1"/>`;
 }
 
 function renderRadar() {
@@ -639,6 +782,15 @@ function renderPendingRows(tbody) {
 // own. Tracks which action ids are currently expanded so a rebuild can
 // re-open them instead of just dropping them.
 const expandedActionIds = new Set();
+// Consecutive-run collapse state (see groupConsecutiveActions/appendActionRow
+// below) - keyed by the group's newest action id (stable across a rebuild as
+// long as that action stays the newest of that same run). A run of 3+
+// consecutive same-type+same-params rows renders as one collapsed summary
+// row by default - the exact "eval 1+1 while waiting for boot" poll shape
+// db.mjs's findRepeatedActionLoops already flags server-side, made visually
+// collapsible here too (which also cuts the TABLE's own render cost for a
+// long poll, not just the reader's).
+const expandedGroupIds = new Set();
 
 async function actionDetailHtml(a) {
   const cached = renderedDetailHtmlCache.get(a.id);
@@ -682,6 +834,54 @@ function restoreDetailScrollTop(tr, scrollTops, actionId) {
   tr.nextElementSibling.querySelectorAll('pre').forEach((p, i) => { if (saved[i] !== undefined) p.scrollTop = saved[i]; });
 }
 
+// Splits a newest-first action list into consecutive runs sharing the same
+// type + identical params (JSON-stringified - same equality this file's own
+// action-log filter/search already treats params by). Order within a group
+// is preserved (still newest-first) - only ADJACENT identical calls group,
+// so two same-shaped calls separated by something else in between are never
+// silently merged into one.
+function groupConsecutiveActions(list) {
+  const groups = [];
+  let i = 0;
+  while (i < list.length) {
+    let j = i + 1;
+    while (j < list.length && list[j].type === list[i].type && JSON.stringify(list[j].params) === JSON.stringify(list[i].params)) j += 1;
+    groups.push(list.slice(i, j));
+    i = j;
+  }
+  return groups;
+}
+
+// Extracted from the old renderActions loop body unchanged - reused both
+// for an ungrouped/short run and for a group the user has expanded.
+function appendActionRow(a, body, scrollTops) {
+  const tr = document.createElement('tr');
+  tr.className = 'expandable';
+  tr.dataset.actionId = a.id;
+  tr.innerHTML = `<td>${fmtTime(a.started_at)}</td><td>${esc(a.agent_name ?? 'default')}</td><td>${esc(a.type)}</td><td><span class="badge ${a.ok ? 'badge-ok' : 'badge-fail'}">${a.ok ? 'ok' : 'fail'}</span></td><td>${a.duration_ms ?? ''}</td>`;
+  tr.addEventListener('click', async () => {
+    const existing = tr.nextElementSibling;
+    if (existing && existing.classList.contains('detail-row')) { existing.remove(); expandedActionIds.delete(a.id); return; }
+    expandedActionIds.add(a.id);
+    toggleRow(tr, await actionDetailHtml(a));
+  });
+  body.appendChild(tr);
+  if (expandedActionIds.has(a.id)) {
+    actionDetailHtml(a).then((html) => {
+      // Guard against a race with a newer rebuild that already replaced
+      // this <tr> (or re-opened it) by the time the lazy fetch resolves.
+      if (body.contains(tr) && !(tr.nextElementSibling && tr.nextElementSibling.classList.contains('detail-row'))) {
+        toggleRow(tr, html);
+        restoreDetailScrollTop(tr, scrollTops, a.id);
+      }
+    }).catch(() => {
+      // A transient fetch error here (e.g. session ended mid-request)
+      // should not silently leave the row stuck closed - it stays
+      // tracked as expanded and gets another reopen attempt next render.
+    });
+  }
+}
+
 function renderActions(actions) {
   lastActions = actions;
   populateActionTypeFilter(actions);
@@ -690,35 +890,27 @@ function renderActions(actions) {
   const visible = filtered.slice(0, settings.actionsRenderCap);
   const visibleIds = new Set(visible.map((a) => a.id));
   for (const id of expandedActionIds) { if (!visibleIds.has(id)) expandedActionIds.delete(id); }
+  for (const id of expandedGroupIds) { if (!visibleIds.has(id)) expandedGroupIds.delete(id); }
   const body = document.querySelector('#actionsTable tbody');
   const scrollTops = captureDetailScrollTops(body);
   body.innerHTML = '';
-  for (const a of visible) {
-    const tr = document.createElement('tr');
-    tr.className = 'expandable';
-    tr.dataset.actionId = a.id;
-    tr.innerHTML = `<td>${fmtTime(a.started_at)}</td><td>${esc(a.agent_name ?? 'default')}</td><td>${esc(a.type)}</td><td><span class="badge ${a.ok ? 'badge-ok' : 'badge-fail'}">${a.ok ? 'ok' : 'fail'}</span></td><td>${a.duration_ms ?? ''}</td>`;
-    tr.addEventListener('click', async () => {
-      const existing = tr.nextElementSibling;
-      if (existing && existing.classList.contains('detail-row')) { existing.remove(); expandedActionIds.delete(a.id); return; }
-      expandedActionIds.add(a.id);
-      toggleRow(tr, await actionDetailHtml(a));
-    });
-    body.appendChild(tr);
-    if (expandedActionIds.has(a.id)) {
-      actionDetailHtml(a).then((html) => {
-        // Guard against a race with a newer rebuild that already replaced
-        // this <tr> (or re-opened it) by the time the lazy fetch resolves.
-        if (body.contains(tr) && !(tr.nextElementSibling && tr.nextElementSibling.classList.contains('detail-row'))) {
-          toggleRow(tr, html);
-          restoreDetailScrollTop(tr, scrollTops, a.id);
-        }
-      }).catch(() => {
-        // A transient fetch error here (e.g. session ended mid-request)
-        // should not silently leave the row stuck closed - it stays
-        // tracked as expanded and gets another reopen attempt next render.
-      });
+  for (const group of groupConsecutiveActions(visible)) {
+    if (group.length >= 3 && !expandedGroupIds.has(group[0].id)) {
+      const first = group[0], last = group[group.length - 1]; // visible is newest-first, so first = newest, last = oldest
+      const tr = document.createElement('tr');
+      tr.className = 'expandable';
+      tr.innerHTML = `<td colspan="5"><span class="badge badge-crv">${esc(first.type)} &times;${group.length} (collapsed)</span> <span class="muted">${fmtTime(last.started_at)} &rarr; ${fmtTime(first.started_at)} - click to expand</span></td>`;
+      tr.addEventListener('click', () => { expandedGroupIds.add(group[0].id); renderActions(lastActions); });
+      body.appendChild(tr);
+      continue;
     }
+    if (group.length >= 3) {
+      const collapseTr = document.createElement('tr');
+      collapseTr.innerHTML = `<td colspan="5" class="muted" style="cursor:pointer;">&uarr; collapse ${group.length} &times; ${esc(group[0].type)}</td>`;
+      collapseTr.addEventListener('click', () => { expandedGroupIds.delete(group[0].id); renderActions(lastActions); });
+      body.appendChild(collapseTr);
+    }
+    for (const a of group) appendActionRow(a, body, scrollTops);
   }
   if (filtered.length > settings.actionsRenderCap) {
     const tr = document.createElement('tr');
@@ -755,6 +947,90 @@ function renderAssertRuns(actions) {
         <ul class="assert-checks-list">${checksHtml}</ul>
       </div>`;
   }).join('');
+}
+
+// ---------- Token cost panel (byType table, budget burn bar, loops,
+// redundant-call flags, waste-radar banner, cross-session cost trend by
+// shared tag - see relay.mjs's GET /sessions/:id/token-report and
+// db.mjs's getActionCostReport/findRepeatedActionLoops/findRedundantCalls) ----------
+
+function renderTokenBudgetBar(report) {
+  const budget = lastSessionFull?.token_budget;
+  const barEl = el('tokenBudgetBar');
+  if (!budget) { barEl.hidden = true; return; }
+  const pct = Math.min(100, (report.totalEstTokens / budget) * 100);
+  const band = pct < 70 ? 'ok' : pct < 100 ? 'warn' : 'fail';
+  const color = band === 'ok' ? 'var(--accent-alien)' : band === 'warn' ? 'var(--accent-predator)' : 'var(--accent-danger)';
+  barEl.hidden = false;
+  barEl.innerHTML = `<div class="muted">Token budget: ${report.totalEstTokens} / ${budget} (${pct.toFixed(0)}%)</div>
+    <div style="background:var(--bg-panel-raised);border:1px solid var(--border-hud);border-radius:2px;height:8px;margin-top:2px;overflow:hidden;">
+      <div style="height:100%;width:${pct}%;background:${color};"></div>
+    </div>`;
+}
+
+// Auto-surfaces the single worst cost TYPE as an actionable banner (same
+// "banner with a fix CTA" convention as dbVersionBanner) instead of leaving
+// it as just another row in the table below - a caller has to actively open
+// this panel to see a table, but the banner is impossible to miss.
+function renderWasteBanner(report) {
+  const top = report.byType[0];
+  const worthFlagging = top && report.totalEstTokens > 3000 && (top.estTokens / report.totalEstTokens) > 0.3;
+  if (!worthFlagging || wasteDismissedFor === top.type) { el('wasteBanner').hidden = true; return; }
+  el('wasteText').innerHTML = `<strong>${esc(top.type)}</strong> is costing ~${top.estTokens} of this session's ~${report.totalEstTokens} estimated tokens so far (${top.calls} call(s), avg ${top.avgResultBytes} bytes/call) - the single biggest driver. See the CLI's own help for that command's cost-reduction flags (--where/--fields/--limit for idb dump, --since for idb snapshot, default-capped outerHTML for dom query).`;
+  el('wasteBanner').hidden = false;
+}
+
+// Groups /analytics's cross-session sessionTokenTotals by any tag shared
+// with the CURRENTLY open session, sorted oldest-first - answers "is this
+// repeated shape (this project's own round-1/round-2/... CRV convention)
+// getting cheaper or more wasteful each time it's repeated", which no
+// single session's own token-report can. Silently renders nothing when the
+// open session has no tags or no sibling shares one - this is meant to
+// appear only when it has something real to compare against.
+function renderTokenTrend() {
+  const container = el('tokenTrendSection');
+  const tags = lastSessionFull?.tags;
+  if (!lastAnalyticsData || !tags?.length) { container.innerHTML = ''; return; }
+  const tagSet = new Set(tags);
+  const related = (lastAnalyticsData.sessionTokenTotals || [])
+    .filter((s) => s.tags.some((t) => tagSet.has(t)))
+    .sort((a, b) => a.sessionId - b.sessionId);
+  if (related.length < 2) { container.innerHTML = ''; return; }
+  const max = Math.max(1, ...related.map((s) => s.totalEstTokens));
+  const bars = related.map((s) => {
+    const h = Math.max(2, (s.totalEstTokens / max) * 30);
+    const isCurrent = s.sessionId === currentSessionId;
+    return `<div class="token-trend-bar" title="#${s.sessionId}: ~${s.totalEstTokens} estimated tokens">
+      <div class="token-trend-bar-track"><div style="width:100%;height:${h}px;background:${isCurrent ? 'var(--accent-predator)' : 'var(--accent-info)'};"></div></div>
+      <div class="muted" style="font-size:9px;">#${s.sessionId}</div>
+    </div>`;
+  }).join('');
+  container.innerHTML = `<div class="muted">Token cost trend across sessions tagged ${[...tagSet].map((t) => `<span class="chip">${esc(t)}</span>`).join('')}:</div><div style="margin-top:4px;">${bars}</div>`;
+}
+
+function renderTokenReport(report) {
+  lastTokenReport = report;
+  el('tokenCostEmpty').hidden = report.byType.length > 0;
+  const body = document.querySelector('#tokenCostTable tbody');
+  body.innerHTML = report.byType.map((t) => `<tr><td>${esc(t.type)}</td><td>${t.calls}</td><td>${t.avgResultBytes}</td><td>${t.estTokens}</td></tr>`).join('');
+  el('tokenCostTotal').textContent = `Total: ${report.totalCalls} call(s), ~${report.totalEstTokens} estimated tokens`;
+  el('tokenLoopsList').innerHTML = report.loops?.length
+    ? '<strong>Repeated-call loops:</strong> ' + report.loops.map((l) => `<span class="chip" title="${esc(l.firstAt)} to ${esc(l.lastAt)}">${esc(l.type)} x${l.count}</span>`).join(' ')
+    : '';
+  el('tokenRedundantList').innerHTML = report.redundantCalls?.length
+    ? '<strong>Redundant calls (identical result to a prior call):</strong> ' + report.redundantCalls.map((r) => `<span class="chip" title="repeats action #${r.repeatsActionId}">${esc(r.type)} ${esc(r.target || '')} (#${r.actionId})</span>`).join(' ')
+    : '';
+  renderTokenBudgetBar(report);
+  renderWasteBanner(report);
+  renderTokenTrend();
+}
+
+async function refreshTokenReport() {
+  if (!currentSessionId) return;
+  try {
+    renderTokenReport(await api('GET', `/sessions/${currentSessionId}/token-report`));
+    renderStatStrip();
+  } catch { /* best-effort - a transient fetch failure here shouldn't break the rest of the dashboard */ }
 }
 
 function renderTimeline() {
@@ -1038,6 +1314,7 @@ async function refreshSessionMeta() {
   if (!currentSessionId) return;
   const session = await api('GET', `/sessions/${currentSessionId}`);
   currentSessionStatus = session.status;
+  lastSessionFull = session;
   el('sessionGoal').textContent = session.goal;
   el('sessionContext').textContent = session.context || '';
   el('sessionTags').innerHTML = (session.tags || []).map((t) => `<span class="chip">${esc(t)}</span>`).join('');
@@ -1066,8 +1343,22 @@ function fingerprintRows(rows) {
 
 let lastActionsFp = null, lastSnapshotsFp = null, lastDiffsFp = null, lastConsoleFp = null, lastNetFp = null, lastQaFp = null, lastVerityFp = null;
 
+// Shown only for a table's very first fetch in a session (fp still null) so
+// the initial network round-trip reads as "loading" rather than a blank
+// table flashing to populated - never touches fingerprintRows/rendering.
+function showSkeletonRows(tableId, rows) {
+  const table = document.getElementById(tableId);
+  if (!table) return;
+  const cols = table.querySelector('thead tr').children.length;
+  const tbody = table.querySelector('tbody');
+  tbody.innerHTML = new Array(rows).fill(
+    `<tr class="skeleton-row"><td colspan="${cols}"><div class="skeleton-bar"></div></td></tr>`
+  ).join('');
+}
+
 async function refreshActions() {
   if (!currentSessionId) return false;
+  if (lastActionsFp === null) showSkeletonRows('actionsTable', 4);
   const actions = await api('GET', `/sessions/${currentSessionId}/actions`);
   const fp = fingerprintRows(actions);
   if (fp === lastActionsFp) return false;
@@ -1100,6 +1391,7 @@ async function refreshDiffs() {
 // configurable via Settings > Display (settings.consoleNetFetchLimit).
 async function refreshConsole() {
   if (!currentSessionId) return false;
+  if (lastConsoleFp === null) showSkeletonRows('consoleTable', 4);
   const entries = await api('GET', `/sessions/${currentSessionId}/console?limit=${settings.consoleNetFetchLimit}`);
   const fp = fingerprintRows(entries);
   if (fp === lastConsoleFp) return false;
@@ -1109,6 +1401,7 @@ async function refreshConsole() {
 }
 async function refreshNet() {
   if (!currentSessionId) return false;
+  if (lastNetFp === null) showSkeletonRows('netTable', 4);
   const entries = await api('GET', `/sessions/${currentSessionId}/net?limit=${settings.consoleNetFetchLimit}`);
   const fp = fingerprintRows(entries);
   if (fp === lastNetFp) return false;
@@ -1158,8 +1451,33 @@ async function refreshSessionDetail() {
   // can change, so skip the other 7 fetches entirely instead of just
   // re-rendering identical data every 3s (see currentSessionStatus above).
   if (!isSwitch && currentSessionStatus === 'ended') return;
-  const changed = await Promise.all([refreshActions(), refreshSnapshots(), refreshDiffs(), refreshConsole(), refreshNet(), refreshQA(), refreshVerityRuns()]);
+  const changed = await Promise.all([refreshActions(), refreshSnapshots(), refreshDiffs(), refreshConsole(), refreshNet(), refreshQA(), refreshVerityRuns(), refreshTokenReport()]);
   if (isSwitch || changed.some(Boolean)) renderTimeline();
+  if (!isSwitch) triggerSweep(changed);
+}
+
+// "IFF transponder sweep" - a brief scan pulse across the session panel,
+// fired only when a poll tick's fingerprint check found genuinely new data
+// (never on an idle tick, never on a plain session switch) - a glanceable
+// "new evidence just landed, here" cue matching what this tool watches for.
+const SWEEP_SECTION_IDS = ['actionsSection', 'snapshotsSection', 'diffsSection', 'consoleSection', 'netSection', 'qaSection', 'veritySection'];
+function triggerSweep(changedFlags) {
+  if (!changedFlags.some(Boolean)) return;
+  const bar = el('hudSweepBar');
+  if (bar) {
+    bar.classList.remove('sweep-run');
+    void bar.offsetWidth; // restart the animation if it's already mid-run
+    bar.classList.add('sweep-run');
+  }
+  changedFlags.forEach((didChange, i) => {
+    if (!didChange) return;
+    const sectionEl = el(SWEEP_SECTION_IDS[i]);
+    if (!sectionEl) return;
+    sectionEl.classList.remove('just-updated');
+    void sectionEl.offsetWidth;
+    sectionEl.classList.add('just-updated');
+    setTimeout(() => sectionEl.classList.remove('just-updated'), 700);
+  });
 }
 
 let frictionDismissed = false;
@@ -1197,7 +1515,9 @@ function renderFriction(a) {
 async function refreshFriction() {
   try {
     const a = await api('GET', '/analytics');
+    lastAnalyticsData = a;
     renderFriction(a);
+    renderTokenTrend();
   } catch {
     // Best-effort - a relay that can't even answer /health has already
     // surfaced its own error via refreshHealth's catch below.
@@ -1212,6 +1532,9 @@ async function refreshAll() {
     await refreshMacros();
     await refreshFriction();
   } catch (err) {
+    document.body.classList.add('relay-down');
+    relayConnectedSince = null;
+    el('relayUptime').textContent = '';
     el('relayStatus').textContent = 'relay: unreachable - ' + err.message;
   }
 }
@@ -1232,7 +1555,7 @@ async function refreshAll() {
 // arrives), just uncoalesced rebuild churn. Collapsing a burst into one
 // trailing refresh per 250ms fixes it.
 const debouncedPendingRerender = debounce(() => renderActions(lastActions), 100);
-const debouncedActionRefresh = debounce(async () => { await refreshActions(); renderTimeline(); }, 250);
+const debouncedActionRefresh = debounce(async () => { await refreshActions(); await refreshTokenReport(); renderTimeline(); }, 250);
 const debouncedConsoleRefresh = debounce(async () => { await refreshConsole(); renderTimeline(); }, 250);
 const debouncedNetRefresh = debounce(async () => { await refreshNet(); renderTimeline(); }, 250);
 const KIND_REFRESH = {
@@ -1325,6 +1648,11 @@ el('frictionToggle').addEventListener('click', () => {
   el('frictionBanner').hidden = true;
 });
 
+el('wasteToggle').addEventListener('click', () => {
+  wasteDismissedFor = lastTokenReport?.byType?.[0]?.type ?? null;
+  el('wasteBanner').hidden = true;
+});
+
 el('dbVersionToggle').addEventListener('click', () => {
   if (lastHealth?.db_version_drift?.checked && lastHealth.db_version_drift.drift) {
     dbVersionDismissedFor = `${lastHealth.db_version_drift.sourceVersion}:${lastHealth.db_version_drift.liveVersion}`;
@@ -1343,7 +1671,17 @@ el('dbVersionReloadBtn').addEventListener('click', async () => {
   status.textContent = 'reloading...';
   try {
     await api('POST', '/command', { type: 'page.hardReload', params: {} });
-    status.textContent = 'hard reload dispatched - drift clears on the next health poll once the tab reconnects.';
+    status.textContent = 'reload dispatched - waiting for a real navigation to confirm (up to 60s)...';
+    // Confirmed real reconnected:true (a WS-level reconnect with no actual
+    // navigation - network blip, relay restart, the hardReload's own
+    // SW-unregister step) used to be indistinguishable from a genuine
+    // reload here; "dispatched" alone (the old copy) claimed success before
+    // any proof existed. waitForLoadIdChange only resolves once inject.js's
+    // per-navigation loadId actually changes.
+    const result = await waitForLoadIdChange({ timeoutMs: 60000 });
+    status.textContent = result.reconnected
+      ? `reload confirmed (loadId changed, waited ${result.waitedMs}ms) - drift clears on the next health poll.`
+      : `reload NOT confirmed after ${result.waitedMs}ms - tab may still be mid-boot (an unbundled ES-module app can take 45-60s+) or never re-activated. Re-check before trusting the drift banner.`;
   } catch (err) {
     status.textContent = 'could not dispatch: ' + err.message;
   }

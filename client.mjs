@@ -178,21 +178,59 @@ export async function waitForReconnect({ agent, timeoutMs } = {}) {
   // regardless of whether the gap was ever observed. Falls back to the
   // original disconnect-then-reconnect signal when no agent was connected
   // yet at call time (nothing to compare a "later" timestamp against).
+  //
+  // Confirmed live FALSE POSITIVE on top of that: connectedAt also bumps on
+  // any WebSocket-level reconnect that has nothing to do with a real
+  // reload - inject.js auto-reconnects on any socket close (network blip,
+  // relay restart, page.hardReload's own SW-unregister/cache-clear step),
+  // re-opening a WS inside the SAME still-running page. A window.__marker__
+  // set before "page reload --hard --wait-reconnect" survived it, while
+  // reconnected:true was still reported. loadId (stamped by inject.js at
+  // <script> EVAL time, unique per real navigation, stable across that
+  // page's own WS reconnects - see inject.js's RELAY_URL comment) is the
+  // actual proof. When an initial loadId is known, reconnected now requires
+  // it to have CHANGED - a later connectedAt with the SAME loadId is no
+  // longer treated as a reload.
   const initialDetail = await request('GET', '/agents');
-  const initialConnectedAt = initialDetail.detail?.find((a) => a.name === target)?.connectedAt ?? null;
+  const initialAgent = initialDetail.detail?.find((a) => a.name === target) ?? null;
+  const initialConnectedAt = initialAgent?.connectedAt ?? null;
+  const initialLoadId = initialAgent?.loadId ?? null;
   while (Date.now() - start < limit) {
     const { agents, detail } = await request('GET', '/agents');
     const present = agents.includes(target);
-    const connectedAtNow = detail?.find((a) => a.name === target)?.connectedAt ?? null;
+    const currentAgent = detail?.find((a) => a.name === target) ?? null;
+    const connectedAtNow = currentAgent?.connectedAt ?? null;
+    const loadIdNow = currentAgent?.loadId ?? null;
     if (!present) sawDisconnect = true;
-    if (present && (sawDisconnect || (initialConnectedAt !== null && connectedAtNow !== null && connectedAtNow > initialConnectedAt))) {
-      return { reconnected: true, waitedMs: Date.now() - start };
+    const connectionLooksFresh = sawDisconnect
+      || (initialConnectedAt !== null && connectedAtNow !== null && connectedAtNow > initialConnectedAt);
+    // A known initial loadId is authoritative: require it to have actually
+    // changed. Only fall back to the connectedAt/disconnect signal when
+    // there is no loadId to compare (older inject.js build, or no agent was
+    // connected yet at call time).
+    const reloadProven = initialLoadId !== null
+      ? (loadIdNow !== null && loadIdNow !== initialLoadId)
+      : connectionLooksFresh;
+    if (present && reloadProven) {
+      // loadId/initialLoadId echoed on the result (not just folded into the
+      // boolean) so a human reading raw CLI/dashboard output - not just
+      // trusting reconnected:true - can eyeball proof a real navigation
+      // happened, same as the window.__marker__ check that first caught the
+      // false-positive this replaces.
+      return {
+        reconnected: true,
+        waitedMs: Date.now() - start,
+        proofMethod: initialLoadId !== null ? 'loadId_changed' : 'connectedAt_fallback',
+        initialLoadId,
+        loadId: loadIdNow,
+      };
     }
     await new Promise((r) => setTimeout(r, 150));
   }
   return {
     reconnected: false,
     waitedMs: Date.now() - start,
+    initialLoadId,
     note: 'timed out waiting for reconnect - the tab may still be mid-reload (a hard reload with a large cache to clear can take longer than the default 15000ms), or it never re-activated (check the activation flag survived: ?webscout=1 in the URL, or localStorage.webscout_enabled)',
   };
 }

@@ -25,8 +25,19 @@ function send(type, params) {
   return request('POST', '/command', { type, params, agent: agentFlag });
 }
 
+// chars/4 - same rough estimate as db.mjs's getActionCostReport, applied
+// here at print time so the cost is visible the moment a heavy call
+// happens, not only after the fact via "token-report"/"session show".
+// stderr, not stdout - a caller piping/parsing this JSON must never see it
+// mixed in.
+const PRINT_RESULT_TOKEN_WARN_THRESHOLD = 2000;
 function printResult(result) {
-  console.log(JSON.stringify(result, null, 2));
+  const json = JSON.stringify(result, null, 2);
+  console.log(json);
+  const estTokens = Math.round(json.length / 4);
+  if (estTokens > PRINT_RESULT_TOKEN_WARN_THRESHOLD) {
+    console.error(`NOTE: this result is ~${estTokens} estimated tokens (${json.length} chars). If this is idb.dump, try --where/--fields/--limit to scope it; if dom.query, note outerHTML/text are already truncated - "token-report" ranks which command types cost the most across a session.`);
+  }
 }
 
 // Extracts `--name <value>` anywhere in `args`, returning the remaining
@@ -66,7 +77,7 @@ function usage() {
                                    blocked RIGHT NOW (another tab - web-scout-connected or not -
                                    holding a connection at the older version), and by what, instead
                                    of only reporting THAT a version-bump "page reload" hasn't taken.
-  session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--agent <name>]
+  session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--token-budget N] [--agent <name>]
                                    declare context/goal - REQUIRED before any action.
                                    --strict-crv auto-snapshots+diffs before/after every
                                    dom.click/dom.fill/eval/idb.put/idb.delete in this session.
@@ -91,6 +102,9 @@ function usage() {
                                    that step was easy to forget until after the writes already
                                    happened, at which point there is no way to retroactively
                                    recover a "before" state.
+                                   --token-budget N is purely advisory - nothing blocks a command from
+                                   running over it, but "session end"/"session show"/dashboard's Token
+                                   cost panel warn once the session's own estTokens total crosses it.
   session assert <id> '<checks-json>' [--agent <name>]
                                    declarative regression checks against LIVE state - a single
                                    check object or a JSON array of them, each:
@@ -102,7 +116,9 @@ function usage() {
                                    same idb.dump-and-eyeball checks by hand every later phase.
                                    Exits 1 (not 0) if any check fails - scriptable/CI-safe.
   session end [id]                 end the given session, or the active one if omitted -
-                                   prints a one-line "consider macro record" nudge when the
+                                   prints a one-line token-cost receipt (calls, estTokens, top
+                                   offender type; also a --token-budget warning if declared and
+                                   exceeded) and a "consider macro record" nudge when the
                                    session logged 5+ replayable actions (dom.click/fill/wait,
                                    idb.put/delete/deleteMany/clear/wait, page.reload, eval) and
                                    was never saved as one - real repeatable shapes (seed/verify/
@@ -133,8 +149,30 @@ function usage() {
                                    the baseline are listed but never auto-deleted. Dry-run by
                                    default; needs a real, still-persisted snapshot id ('idb
                                    snapshot --stores ...' before you start mutating).
+                                   DANGEROUS against a busy/shared live app: confirmed live that a
+                                   real app's own background writes (e.g. a periodic recompute
+                                   cycle writing its own state-history rows) land in the same
+                                   window as a long CRV session and get diffed in as "new since
+                                   baseline" - a --confirm delete here would destroy real,
+                                   non-synthetic data, not just your seeded rows. Prefer tagging:
+                                   give every synthetic row your own boolean field (e.g.
+                                   {"__crv":true}) at write time, then 'idb dump <store> --where
+                                   {"__crv":true}' to enumerate exact ids and 'idb delete-many' by
+                                   id - safe regardless of how much real traffic interleaves.
 
-  dom query <selector>            outerHTML + basic attrs for the first match
+  dom query <selector> [--full] [--meta]
+                                   warns on stderr BEFORE dispatching if selector looks like a
+                                   whole-page/root container (body/html/#app/#root/main/#main/*) -
+                                   likely a huge subtree, worth narrowing before paying for it.
+                                   outerHTML + basic attrs for the first match. outerHTML/text
+                                   default-capped at 2000/1000 chars (outerHTMLTruncated/
+                                   textTruncated say whether anything was actually cut) -
+                                   confirmed real waste paying full-subtree cost just to check
+                                   an element exists/its class. --full raises the cap to 20000/
+                                   5000 for when the whole subtree is genuinely needed. --meta
+                                   skips outerHTML/text entirely - just tag/id/className/
+                                   matchCount (~50 bytes) for "does this exist / how many
+                                   matched" checks that never read the markup at all.
                                    (dom.click/dom.fill/dom.wait: a FAILURE auto-captures a
                                    dom.screenshot of the target selector as its own separate
                                    logged action - the broken state is often gone by the time
@@ -212,16 +250,21 @@ function usage() {
   idb list                        list IndexedDB object store names + a per-store row count
                                    (cheap store.count(), not a full dump) - check this before
                                    an unscoped "idb snapshot" on a store you suspect is large
-  idb dump <store> [--where '<json-field-map>']
-                                   dump every row (+ real keyPath) in one store - --where filters
-                                   the returned rows client-side by exact-equality field match
-                                   (same semantics as "session assert"'s own where), e.g.
-                                   --where '{"__synthetic_tag":"MY-TAG"}'. Still fetches the WHOLE
-                                   store first (idb.get is the real indexed-lookup escape hatch
-                                   for a large store + a known key) - this only saves the
-                                   dump-then-pipe-to-node-then-JSON.parse-and-filter dance for
-                                   everything else. Response's "count" is the FILTERED count;
-                                   "totalCount" is always the whole store's real row count.
+  idb dump <store> [--where '<json-field-map>'] [--fields a,b,c] [--limit N]
+                                   dump rows (+ real keyPath) in one store - --where filters by
+                                   exact-equality field match (same semantics as "session
+                                   assert"'s own where), e.g. --where '{"__synthetic_tag":"MY-TAG"}'.
+                                   Filtering/projection/limiting all happen IN-PAGE now, before the
+                                   result ever reaches the WebSocket - previously --where fetched
+                                   the WHOLE store and filtered client-side after the fact, so a
+                                   scoped dump of a huge store still paid full transfer+DB-storage+
+                                   stdout-print cost for every unrelated row (confirmed real token
+                                   waste feeding a coding agent). --fields projects each surviving
+                                   row down to just those keys instead of every column. --limit
+                                   caps rows AFTER filtering (adds truncated:true + a note; use
+                                   "idb get" instead when you know the key on a large store).
+                                   Response's "count" is rows actually returned; "matchedCount" is
+                                   the real filtered total; "totalCount" is the whole store's count.
   idb get <store> <json-key>      real indexed lookup of ONE row by key (store.get, not a
                                    getAll()+filter) - use this instead of "idb dump" when you
                                    already know the key and the store is large (a full dump of
@@ -233,11 +276,23 @@ function usage() {
                                    from ANY future session via "idb diff-golden" (re-tagging
                                    the same name just makes the latest one win - no delete
                                    needed to re-baseline).
-  idb diff <idA> <idB>            compute + PERSIST the diff between two persisted snapshots
-  idb diff-golden <name> <idB>    diff a named golden snapshot (from any session) against
-                                   snapshot <idB> - "did this later phase touch anything
-                                   <name> already proved untouched", without hunting down
-                                   an old snapshot id by hand
+  idb snapshot --since <snapshotId> [--stores a,b,c]
+                                   takes a fresh snapshot (still persisted, scoped to the
+                                   baseline's own stores unless --stores overrides) and prints
+                                   ONLY the added/removed/changed rows since that baseline,
+                                   instead of the full dump - idb.snapshot is the #2 all-time
+                                   token-cost offender (see "token-report") precisely because a
+                                   full dump prints every unchanged row too.
+  idb diff <idA> <idB>            compute + PERSIST the diff between two persisted snapshots.
+  idb diff-golden <name> <idB>    Both cache-aware: if <idB>'s own CONTENT (not id - a fresh
+                                   snapshot always gets a new id even when nothing changed) matches
+                                   a diff already computed for this golden/pair, the full diff body
+                                   is NOT recomputed or re-sent - response carries fromCache:true,
+                                   cachedFromDiffId:N, and diffOmitted instead (summary is still
+                                   included; fetch diff #N directly if the full detail is genuinely
+                                   needed). "did this later phase touch anything <name> already
+                                   proved untouched", without hunting down an old snapshot id by
+                                   hand.
   idb restore <snapshotId>        replay a persisted snapshot's rows back into IndexedDB via
   idb restore --golden <name>     one idb.put per row per store - resets LIVE state to a known-
                                    good point instead of only detecting drift from it (which is
@@ -351,6 +406,13 @@ function usage() {
                                    command (reload, ping, eval) times out repeatedly, that IS the
                                    real freeze signal - see eval's own note below on why reload
                                    is not always an escape hatch from that state.
+                                   reconnected:true is proof of a real navigation, not just a live
+                                   socket - confirmed live that a plain WS-level reconnect (network
+                                   blip, relay restart, page.hardReload's own SW-unregister step)
+                                   used to false-positive this (a window.__marker__ set before
+                                   reload survived it). inject.js now stamps a loadId at <script>
+                                   EVAL time (unique per real navigation) and waitForReconnect
+                                   requires it to actually change - see client.mjs.
   page fresh <local-file-path> [--url </served/path>]
                                    fetches that path THROUGH THE PAGE (its real cache/SW stack,
                                    not a plain disk read) and hashes it, then hashes the same
@@ -407,7 +469,13 @@ function usage() {
                                    save that session's own replayable actions (dom.click/fill/
                                    wait, idb.put/delete/deleteMany/clear/wait, page.reload, eval)
                                    as a named macro. --all also includes read-only actions.
-  macro list                      list saved macros (id, name, step count, source session)
+                                   Consecutive duplicate steps (a retried click, a double-submit)
+                                   are auto-compacted out (compacted_steps_removed on the response
+                                   says how many); the macro's own historical estTokens cost is
+                                   stamped once here too (steps_cost_est), read back with zero live
+                                   lookup by "macro list"/"macro run".
+  macro list                      list saved macros (id, name, step count, source session, and
+                                   each one's own steps_cost_est/compacted_steps_removed)
   macro show <id>                 full macro detail, including every step
   macro run <id> [--continue-on-error] [--from-step N] [--confirm]
                                    replay a macro's steps against the CURRENTLY active session -
@@ -461,6 +529,58 @@ function usage() {
 
   agents                          list currently connected agent (tab) names
   dashboard                       print the dashboard URL (open it in a browser)
+  (read-only commands - idb dump/get/list, dom query/rect/style, net log, console log - are
+   answered from an in-relay cache when called twice IN A ROW with identical args and no
+   mutating command (click/fill/eval/idb.put/patch/delete/clear/page.reload) ran in between.
+   Result carries __cacheHit:true when this happened - never dispatched to the page twice for
+   nothing the page could possibly have changed. The FIRST time this fires in a session, a
+   one-time stderr NOTE explains it and points at "token-report"'s savings block. Separately,
+   any result byte-identical to one already seen - even in a DIFFERENT session - is physically
+   stored only once at the DB level, no flag needed either way.)
+
+  token-report [--session <id>]   rank command TYPES by estimated tokens read off stdout
+                                   (chars/4 over result_json, a pure SQL aggregate - running this
+                                   never pays anything close to the bytes it measures). Omit
+                                   --session for an all-time cross-session ranking; pass it to
+                                   audit one CRV session, which also flags repeated-call loops
+                                   (3+ same-type+same-params calls within 5s - the confirmed real
+                                   "eval 1+1 while waiting for boot" poll shape) and redundantCalls
+                                   (idb.dump/dom.query calls spaced further apart whose result never
+                                   actually changed - "did I already know this" re-checking), and
+                                   byTarget - same estTokens ranking but grouped by store (idb.dump)
+                                   or selector (dom.query) instead of just type, to pinpoint WHICH
+                                   store/selector is the real hotspot. The all-time form (no
+                                   --session) ALSO carries a "savings" block - real, measured
+                                   proof of what the mechanisms below actually saved: resultDedup
+                                   (bytesSaved/estTokensSaved never physically duplicated on disk),
+                                   goldenDiffCache (bytes never re-sent for a repeat diff-golden
+                                   check), macroCompaction (steps removed at record time), and
+                                   runtimeReadCache (this relay PROCESS's own cache hits/bytes -
+                                   resets on restart, unlike the other three which are real DB rows
+                                   and survive one). Check this after a long CRV session to see
+                                   whether the waste-prevention machinery below is actually earning
+                                   its keep, not just running.
+
+  Waste-prevention machinery running AUTOMATICALLY, with no flag needed (mentioned here so you
+  know it exists - "token-report"'s savings block above is the proof it's working):
+   - same-session read-result cache: identical read call twice in a row with nothing mutating in
+     between is answered from cache (__cacheHit:true), never re-dispatched to the page. The FIRST
+     time this happens in a session, a one-time stderr NOTE points here.
+   - DB-level result dedup: an identical result (even across DIFFERENT sessions - e.g. the same
+     fixture store dumped every CRV round) is physically stored ONCE, ever, no flag needed.
+   - macro compaction: "macro record"/"macro show" automatically drop consecutive duplicate steps
+     (a retried click, a double-submit) and stamp the macro's own historical cost estimate at
+     record time - "macro list"/"macro run" read it back with zero live lookup.
+   - golden-diff cache: "idb diff-golden"/a suite's diff-golden step recognizes when two DIFFERENT
+     snapshot ids hold byte-identical content to an already-computed diff, and omits re-sending the
+     full (possibly large) diff body - response carries fromCache:true + cachedFromDiffId instead.
+
+  macro run / suite run           print an estimated token-cost NOTE on stderr before replaying -
+                                   "macro run" reads the target macro's OWN stamped steps_cost_est
+                                   (set once at record/update time, zero live lookup); "suite run"
+                                   sums each referenced macro's own stamped estimate the same way.
+                                   Falls back to a live historical-average lookup only for a
+                                   pre-migration macro that predates steps_cost_est.
 
 Global flag (any dom/idb/eval subcommand, anywhere in its own arguments):
   --agent <name>                  target a specific tab (see ?webscout_name= in the README) -
@@ -502,14 +622,16 @@ async function handleSession(sub, rawArgs) {
     let strictCrv;
     let storesValue;
     let autoSnapshot;
+    let tokenBudgetValue;
     ({ args, value: tagsValue } = extractFlag(args, '--tags'));
     ({ args, value: strictCrv } = extractBooleanFlag(args, '--strict-crv'));
     ({ args, value: storesValue } = extractFlag(args, '--stores'));
     ({ args, value: autoSnapshot } = extractBooleanFlag(args, '--auto-snapshot'));
+    ({ args, value: tokenBudgetValue } = extractFlag(args, '--token-budget'));
     ({ args, value: agentFlag } = extractFlag(args, '--agent'));
     const tags = tagsValue ? tagsValue.split(',').map((t) => t.trim()).filter(Boolean) : [];
     const strictCrvStores = storesValue ? storesValue.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
-    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, tags });
+    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, tags, token_budget: tokenBudgetValue !== undefined ? Number(tokenBudgetValue) : undefined });
     if (strictCrv && !storesValue) {
       console.error('WARNING: --strict-crv with no --stores auto-snapshots the WHOLE db on every dom.click/fill/eval/idb.put/idb.delete - this WILL time out (60s) against a real-size production IndexedDB. Pass --stores a,b,c to scope it.');
     }
@@ -544,6 +666,17 @@ async function handleSession(sub, rawArgs) {
     if (ended.replayableActionCount >= 5) {
       console.error(`${ended.replayableActionCount} replayable action(s) this session - consider "macro record \\"<name>\\" ${ended.id}" if this shape (seed/verify/cleanup, etc.) will repeat.`);
     }
+    // One-line cost receipt at the natural end-of-session checkpoint -
+    // catches waste the same day it happened instead of only on a later,
+    // on-demand "token-report" call nobody remembered to run.
+    try {
+      const tokenReport = await request('GET', `/sessions/${ended.id}/token-report`);
+      const top = tokenReport.byType[0];
+      console.error(`session #${ended.id} cost: ${tokenReport.totalCalls} call(s), ~${tokenReport.totalEstTokens} estimated tokens${top ? ` (top: ${top.type} ~${top.estTokens})` : ''}.`);
+      if (ended.token_budget && tokenReport.totalEstTokens > ended.token_budget) {
+        console.error(`WARNING: session #${ended.id} used ~${tokenReport.totalEstTokens} estimated tokens, over its declared --token-budget of ${ended.token_budget}.`);
+      }
+    } catch { /* best-effort - never fail "session end" over the receipt */ }
     printResult(ended);
     return;
   }
@@ -559,7 +692,7 @@ async function handleSession(sub, rawArgs) {
   if (sub === 'show') {
     const id = rawArgs[0];
     if (!id) throw new Error('session show requires an id');
-    const [session, actions, snapshots, diffs, qa, consoleEntries, net] = await Promise.all([
+    const [session, actions, snapshots, diffs, qa, consoleEntries, net, tokenReport] = await Promise.all([
       request('GET', `/sessions/${id}`),
       request('GET', `/sessions/${id}/actions?full=1`),
       request('GET', `/sessions/${id}/snapshots`),
@@ -567,8 +700,15 @@ async function handleSession(sub, rawArgs) {
       request('GET', `/sessions/${id}/qa`),
       request('GET', `/sessions/${id}/console`),
       request('GET', `/sessions/${id}/net`),
+      // Pure SQL aggregate (see db.mjs's getActionCostReport) - adds
+      // essentially nothing to this call's own cost despite `actions`
+      // above already being the full, unredacted dump.
+      request('GET', `/sessions/${id}/token-report`),
     ]);
-    printResult({ session, actions, snapshots, diffs, qa, console: consoleEntries, net });
+    if (session.token_budget && tokenReport.totalEstTokens > session.token_budget) {
+      console.error(`WARNING: session #${id} has used ~${tokenReport.totalEstTokens} estimated tokens, over its declared --token-budget of ${session.token_budget}.`);
+    }
+    printResult({ session, actions, snapshots, diffs, qa, console: consoleEntries, net, tokenReport });
     return;
   }
   if (sub === 'report') {
@@ -744,6 +884,18 @@ async function handleDb(sub, rawArgs) {
   throw new Error(`unknown 'db ${sub || ''}'`);
 }
 
+// Pre-run, not post-run: sums each step's OWN action type's historical
+// average estTokens/call (from GET /token-report's byType, all sessions)
+// across the steps about to replay - so a caller can decide to trim a
+// macro/suite BEFORE paying for it, not discover the cost after the fact
+// via "token-report"/"session end"'s receipt. Best-effort only (a type with
+// zero prior history just contributes 0) - never blocks the run.
+async function estimateActionsTokenCost(steps) {
+  const report = await request('GET', '/token-report');
+  const avgByType = new Map((report.byType || []).map((r) => [r.type, r.calls ? r.estTokens / r.calls : 0]));
+  return Math.round(steps.reduce((sum, step) => sum + (avgByType.get(step.type) || 0), 0));
+}
+
 async function handleMacro(sub, rawArgs) {
   if (sub === 'record') {
     let args = rawArgs;
@@ -774,6 +926,17 @@ async function handleMacro(sub, rawArgs) {
     ({ args, value: confirm } = extractBooleanFlag(args, '--confirm'));
     const id = args[0];
     if (!id) throw new Error('macro run requires an id');
+    try {
+      const macro = await request('GET', `/macros/${id}`);
+      // steps_cost_est is stamped once at record/update time (db.mjs's
+      // estimateStepsTokenCost) - reused here directly instead of a live
+      // /token-report round trip. compacted_steps_removed (also stamped at
+      // record time) is surfaced too, since it's real evidence this exact
+      // macro is already cheaper than the raw session it was recorded from.
+      const estTokens = Number.isFinite(macro.steps_cost_est) ? macro.steps_cost_est : await estimateActionsTokenCost(macro.steps);
+      const compactNote = macro.compacted_steps_removed ? ` (${macro.compacted_steps_removed} duplicate step(s) already compacted out at record time)` : '';
+      console.error(`NOTE: estimated cost of this replay ~${estTokens} tokens across ${macro.steps.length} step(s)${compactNote} (historical per-type averages - see "token-report").`);
+    } catch { /* best-effort estimate only, never block the run */ }
     const result = await request('POST', `/macros/${id}/run`, { continueOnError, confirm, fromStep: fromStep !== undefined ? Number(fromStep) : undefined });
     printResult(result);
     // Same exit-code gap as session assert: the relay's own route never
@@ -828,6 +991,30 @@ async function handleSuite(sub, rawArgs) {
     const suitePath = args[0];
     if (!suitePath) throw new Error('suite run requires a path to a suite JSON file');
     const steps = JSON.parse(fs.readFileSync(suitePath, 'utf8'));
+    try {
+      // Sums each referenced macro's OWN stamped steps_cost_est (set once at
+      // record time, see db.mjs) instead of a live /token-report call per
+      // macro - zero extra HTTP round trips to print this estimate. Falls
+      // back to a live estimate only for a pre-migration macro that predates
+      // steps_cost_est (null).
+      let totalEst = 0;
+      let totalSteps = 0;
+      let anyLiveFallback = false;
+      for (const step of steps) {
+        if (step.type !== 'macro' || !step.id) continue;
+        const macro = await request('GET', `/macros/${step.id}`);
+        totalSteps += macro.steps.length;
+        if (Number.isFinite(macro.steps_cost_est)) {
+          totalEst += macro.steps_cost_est;
+        } else {
+          anyLiveFallback = true;
+          totalEst += await estimateActionsTokenCost(macro.steps);
+        }
+      }
+      if (totalSteps) {
+        console.error(`NOTE: estimated cost of this suite ~${totalEst} tokens across ${totalSteps} macro step(s)${anyLiveFallback ? '' : ' (from each macro\'s own stamped cost estimate, no live lookup needed)'} - see "token-report".`);
+      }
+    } catch { /* best-effort estimate only, never block the run */ }
     const result = await runSuite(steps, { continueOnError });
     printResult(result);
     if (!result.passed) process.exitCode = 1;
@@ -967,6 +1154,27 @@ async function main() {
     return;
   }
 
+  // Ranks command TYPES by estimated tokens a coding agent actually reads
+  // off stdout for them (chars/4 over the SAME result_json every
+  // printResult call already prints) - a pure SQL aggregate server-side
+  // (db.mjs's getActionCostReport), so running this never itself pays
+  // anything close to the bytes it measures. Omit --session for a
+  // cross-session, all-time ranking (which type is worst overall); pass it
+  // to audit one CRV session. `loops` (session-scoped only) flags
+  // consecutive same-type+same-params calls within 5s of each other, 3+ in
+  // a row - the confirmed real "eval 1+1 while waiting for boot" poll
+  // shape, a waste class byType alone can't distinguish from one-off heavy
+  // calls.
+  if (command === 'token-report') {
+    const a = rest.slice(1);
+    const { value: sessionIdArg } = extractFlag(a, '--session');
+    const report = sessionIdArg
+      ? await request('GET', `/sessions/${sessionIdArg}/token-report`)
+      : await request('GET', '/token-report');
+    printResult(report);
+    return;
+  }
+
   let args = rest;
   ({ args, value: agentFlag } = extractFlag(args, '--agent'));
   let nthValue;
@@ -975,6 +1183,7 @@ async function main() {
   let countGteValue;
   let storesValue;
   let goldenValue;
+  let sinceValue;
   let quietValue;
   let graceValue;
   let fileValue;
@@ -986,15 +1195,21 @@ async function main() {
   let changedValue;
   let waitReconnectValue;
   let whereValue;
+  let fieldsValue;
   let selectorFileValue;
   let stableValue;
   let stableCountValue;
   let waitSelectorValue;
+  let fullValue;
+  ({ args, value: fullValue } = extractBooleanFlag(args, '--full'));
+  let metaValue;
+  ({ args, value: metaValue } = extractBooleanFlag(args, '--meta'));
   ({ args, value: stableValue } = extractBooleanFlag(args, '--stable'));
   ({ args, value: stableCountValue } = extractFlag(args, '--stable-count'));
   ({ args, value: waitSelectorValue } = extractFlag(args, '--wait-selector'));
   ({ args, value: selectorFileValue } = extractFlag(args, '--selector-file'));
   ({ args, value: whereValue } = extractFlag(args, '--where'));
+  ({ args, value: fieldsValue } = extractFlag(args, '--fields'));
   ({ args, value: changedValue } = extractBooleanFlag(args, '--changed'));
   ({ args, value: waitReconnectValue } = extractBooleanFlag(args, '--wait-reconnect'));
   ({ args, value: nthValue } = extractFlag(args, '--nth'));
@@ -1003,6 +1218,7 @@ async function main() {
   ({ args, value: countGteValue } = extractFlag(args, '--count-gte'));
   ({ args, value: storesValue } = extractFlag(args, '--stores'));
   ({ args, value: goldenValue } = extractFlag(args, '--golden'));
+  ({ args, value: sinceValue } = extractFlag(args, '--since'));
   ({ args, value: quietValue } = extractFlag(args, '--quiet-ms'));
   ({ args, value: graceValue } = extractFlag(args, '--grace'));
   ({ args, value: fileValue } = extractFlag(args, '--file'));
@@ -1126,9 +1342,20 @@ async function main() {
   // take a selector as their first positional arg.
   const domSelector = selectorFileValue ? fs.readFileSync(selectorFileValue, 'utf8').trim() : subArgs[0];
 
+  // Pre-call, not post-call: warns BEFORE spend, based on the selector
+  // string alone (no relay round trip needed) - a whole-page/root container
+  // selector is very likely a huge subtree, worth flagging before paying
+  // outerHTML cost for it (printResult's own token-warn note below only
+  // fires AFTER the result is already back and paid for).
+  const BROAD_DOM_QUERY_SELECTORS = new Set(['body', 'html', '#app', '#root', 'main', '#main', '*']);
   const table = {
     dom: {
-      query: () => send('dom.query', { selector: domSelector }),
+      query: () => {
+        if (!fullValue && !metaValue && BROAD_DOM_QUERY_SELECTORS.has(String(domSelector).trim().toLowerCase())) {
+          console.error(`NOTE: selector "${domSelector}" looks like a whole-page/root container - likely a huge subtree. Consider a more specific selector (id/class/data-attribute), --meta if you only need tag/id/class/matchCount, or --full only if the whole subtree is genuinely needed.`);
+        }
+        return send('dom.query', { selector: domSelector, full: fullValue, meta: metaValue });
+      },
       click: () => send('dom.click', { selector: domSelector, nth: nthValue !== undefined ? Number(nthValue) : undefined }),
       fill: () => send('dom.fill', { selector: domSelector, value: subArgs[1], nth: nthValue !== undefined ? Number(nthValue) : undefined }),
       rect: () => send('dom.rect', { selector: domSelector }),
@@ -1154,22 +1381,58 @@ async function main() {
     },
     idb: {
       list: () => send('idb.list', {}),
+      // where/fields/limit are now filtered/projected IN-PAGE (inject.js) -
+      // this dispatches them as params instead of re-filtering a full dump
+      // client-side, so a scoped dump of a huge store no longer pays full
+      // transfer+DB-storage+stdout-print cost for every unrelated row.
+      // Pre-call, not post-call: checks this store's OWN historical average
+      // cost (across all sessions, via GET /token-report's byTarget) before
+      // dispatching - a real, learned number ("store X averaged ~N
+      // tokens/call over M past dumps"), not the static whole-page-selector
+      // heuristic "dom query" uses above. Only fires when the caller hasn't
+      // already scoped the call (no --where/--fields/--limit).
       dump: async () => {
-        const dump = await send('idb.dump', { store: subArgs[0] });
-        if (!whereValue) return dump;
-        // Client-side post-filter (same exact-equality "where" semantics as
-        // "session assert"'s own checks) - still fetches the whole store
-        // first (idb.get is the real indexed lookup for a known key on a
-        // large store), this only saves the dump-then-pipe-to-node-then-
-        // JSON.parse-and-filter dance that every inspection this shape
-        // needed otherwise, confirmed real friction in a live session.
-        const where = JSON.parse(whereValue);
-        const rows = dump.rows.filter((r) => Object.entries(where).every(([k, v]) => JSON.stringify(r?.[k]) === JSON.stringify(v)));
-        return { ...dump, totalCount: dump.count, count: rows.length, rows, where };
+        const store = subArgs[0];
+        if (store && !whereValue && !fieldsValue && !limitValue) {
+          try {
+            const report = await request('GET', '/token-report');
+            const hist = (report.byTarget || []).find((t) => t.type === 'idb.dump' && t.target === store);
+            if (hist && hist.calls >= 3) {
+              console.error(`NOTE: store "${store}" dumped ${hist.calls}x before, averaging ~${hist.avgEstTokens} estimated tokens/call (~${hist.avgResultBytes} bytes). Consider --where/--fields/--limit to scope it.`);
+            }
+          } catch { /* best-effort historical hint only, never block the dump */ }
+        }
+        return send('idb.dump', {
+          store,
+          where: whereValue ? JSON.parse(whereValue) : undefined,
+          fields: fieldsValue ? fieldsValue.split(',').map((f) => f.trim()) : undefined,
+          limit: limitValue !== undefined ? Number(limitValue) : undefined,
+        });
       },
       get: () => send('idb.get', { store: subArgs[0], key: JSON.parse(subArgs[1]) }),
       snapshot: async () => {
         const stores = storesValue ? storesValue.split(',').map((s) => s.trim()) : undefined;
+        // --since <snapshotId>: sugar for "take a fresh snapshot scoped to
+        // that baseline's own stores, diff against it, print only the
+        // delta" - idb.snapshot is the #2 all-time token cost offender
+        // (getActionCostReport) precisely because a full dump prints every
+        // unchanged row alongside whatever actually changed. /state/diff
+        // already only returns added/removed/changed rows per store (see
+        // relay.mjs's computeDiff) - this just makes that the DEFAULT view
+        // for "what changed" instead of a separate diff call after the fact.
+        // The fresh full snapshot is still taken and persisted (its id is
+        // in the response) for anyone who later needs the complete dump.
+        if (sinceValue) {
+          const baseline = await request('GET', `/state/snapshots/${sinceValue}`);
+          const scopeStores = stores || Object.keys(baseline.stores || {});
+          const fresh = await request('POST', '/state/snapshot', { agent: agentFlag, stores: scopeStores, golden: goldenValue });
+          const diff = await request('POST', '/state/diff', { idA: Number(sinceValue), idB: fresh.id });
+          return {
+            mode: 'since', baselineSnapshotId: Number(sinceValue), freshSnapshotId: fresh.id,
+            summary: diff.summary, diff: diff.diff,
+            note: 'only rows added/removed/changed since the baseline are shown - pass no --since (or "idb dump") for a full read.',
+          };
+        }
         // Unscoped snapshot of a real-size db is the confirmed
         // SNAPSHOT_TIMEOUT_MS (60s) failure mode - warn with a real row-
         // count total (via the cheap idb.list counts, not a full dump)

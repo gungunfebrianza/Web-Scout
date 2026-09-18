@@ -95,6 +95,36 @@ const AUTO_SCREENSHOT_ON_FAILURE_TYPES = new Set(['dom.click', 'dom.clickWait', 
 // (e.g. a macro recorded for "delete synthetic test rows" about to run
 // against "verify production-mirroring dev session").
 const MACRO_CONTEXT_SIMILARITY_THRESHOLD = 0.15;
+// Same-session read-result cache (token-waste lever #10): a read call whose
+// target provably cannot have changed since the last identical call in this
+// SAME session - no mutating command ran in between - is answered from
+// cache instead of re-dispatching to the page and re-logging a new action
+// row. Deliberately narrow: only calls with no wait/poll semantics of their
+// own (dom.wait/idb.wait/net.wait/console.wait must always actually check
+// live state, caching them would be a correctness bug, not an optimization)
+// and no side-effect risk (eval is excluded even though many eval calls are
+// read-only, because this file cannot tell a read eval from a write eval).
+// idb.snapshot is dispatched via POST /state/snapshot, never this route -
+// not applicable here either way.
+const READ_CACHEABLE_TYPES = new Set(['idb.dump', 'idb.get', 'idb.list', 'dom.query', 'dom.rect', 'dom.computedStyle', 'net.log', 'console.log']);
+// Anything that can change DOM/IndexedDB/navigation state - a cache entry
+// recorded before one of these ran must never be served again.
+const MUTATING_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'eval', 'idb.put', 'idb.patch', 'idb.delete', 'idb.deleteMany', 'idb.clear', 'page.reload', 'page.hardReload']);
+const sessionMutationCounters = new Map(); // sessionId -> counter, bumped on every MUTATING_TYPES dispatch
+const readResultCache = new Map(); // sessionId -> Map(`${type}::${JSON.stringify(params)}` -> { result, mutationCounter, cachedAt })
+// In-memory only (resets on relay restart, unlike db.mjs's getTokenSavingsReport
+// ledgers which are real DB rows) - still a REAL count of dispatches this
+// process actually skipped, surfaced via GET /token-report so this cache's
+// own savings are visible, not just its existence.
+let runtimeCacheHitCount = 0;
+let runtimeCacheBytesSaved = 0;
+
+function getMutationCounter(sessionId) {
+  return sessionMutationCounters.get(sessionId) || 0;
+}
+function bumpMutationCounter(sessionId) {
+  sessionMutationCounters.set(sessionId, getMutationCounter(sessionId) + 1);
+}
 
 function goalWordSet(goal) {
   return new Set(String(goal ?? '').toLowerCase().match(/[a-z0-9]+/g) ?? []);
@@ -460,6 +490,23 @@ function maybeMidSessionNudge(sessionId, res) {
   } catch { /* best-effort - never block a command reply on this */ }
 }
 
+// Awareness strategy for the caching/dedup/compaction machinery itself: a
+// PASSIVE doc (README/usage()) only reaches a caller who already thought to
+// go read it. This fires the JUST-IN-TIME moment instead - the FIRST time a
+// session's own call is actually served from the read-result cache, tell
+// the caller right then (it just benefited from a real event, not a
+// speculative ad) and point at where the aggregate numbers live. Once per
+// session - a caller told once doesn't need repeating on every later hit.
+const sessionCacheAwarenessNudged = new Set();
+
+function maybeCacheAwarenessNudge(sessionId, res) {
+  if (sessionCacheAwarenessNudged.has(sessionId)) return;
+  sessionCacheAwarenessNudged.add(sessionId);
+  try {
+    res.setHeader('x-webscout-nudge', 'this result was served from the same-session read-result cache instead of re-dispatched (__cacheHit:true) - identical results are also deduped once at the DB level, macros are auto-compacted, and repeat suite diffs are cache-served; run "token-report" (no --session) for real bytes/tokens saved by all of these so far.');
+  } catch { /* best-effort - never block a command reply on this */ }
+}
+
 function requireActiveSession() {
   const session = dbApi.getCurrentSession();
   if (!session) {
@@ -548,6 +595,11 @@ function agentsDetail() {
       connectedAt: a.connectedAt ?? null,
       lastAckAt: a.lastAckAt ?? null,
       msSinceLastAck: a.lastAckAt ? now - a.lastAckAt : null,
+      // Only changes on a real navigation (inject.js stamps this at script
+      // eval time, not at WS-connect time) - see inject.js's RELAY_URL
+      // comment. waitForReconnect uses a CHANGED loadId, not just a later
+      // connectedAt, as its proof of an actual reload.
+      loadId: a.loadId ?? null,
     }));
 }
 
@@ -562,6 +614,8 @@ async function gatherReportBundle(sessionId) {
     console: dbApi.listConsoleEntries(sessionId),
     net: dbApi.listNetEntries(sessionId),
     verityRuns: dbApi.listVerityRuns(sessionId).map((r) => dbApi.getVerityRun(r.id)),
+    tokenReport: dbApi.getActionCostReport(sessionId),
+    repeatedActionLoops: dbApi.findRepeatedActionLoops(sessionId),
   };
 }
 
@@ -658,6 +712,12 @@ function computeAnalytics() {
     macrosNeverRun,
     macrosNeverSucceeding,
     verityLabelsStillFailing,
+    // One row per session (id/goal/tags/startedAt/totalEstTokens) - the
+    // dashboard groups these by shared tag client-side to trend token cost
+    // across repeated work (this project's own round-1/round-2/... CRV
+    // convention), answering "is this shape getting cheaper or more
+    // wasteful each time" which no single session's own token-report can.
+    sessionTokenTotals: dbApi.getSessionTokenTotals(),
   };
 }
 
@@ -865,6 +925,7 @@ const routes = [
         strictCrv: !!body.strict_crv,
         strictCrvStores: Array.isArray(body.strict_crv_stores) ? body.strict_crv_stores : undefined,
         tags: Array.isArray(body.tags) ? body.tags : undefined,
+        tokenBudget: Number.isFinite(body.token_budget) ? Number(body.token_budget) : undefined,
       });
       broadcastUpdate('session', null);
       openDashboardInBrowser();
@@ -883,6 +944,12 @@ const routes = [
       // `macro record` (which already exists) has no prompt pointing at it.
       const replayableActionCount = dbApi.listActions(sessionId).filter((a) => a.ok && DEFAULT_MACRO_TYPES.has(a.type)).length;
       const session = dbApi.endSession(sessionId);
+      // Nothing under an ended session can change again - an unbounded relay
+      // process would otherwise keep every past session's read-result cache
+      // and mutation counter alive in memory forever for no benefit.
+      readResultCache.delete(sessionId);
+      sessionMutationCounters.delete(sessionId);
+      sessionCacheAwarenessNudged.delete(sessionId);
       broadcastUpdate('session', null);
       return { ...session, replayableActionCount };
     },
@@ -918,6 +985,55 @@ const routes = [
       const action = dbApi.getActionById(Number(m[2]));
       if (action.session_id !== Number(m[1])) throw new HttpError(404, `action ${m[2]} does not belong to session ${m[1]}`);
       return action;
+    },
+  },
+  {
+    // Pure SQL aggregate (see db.mjs's getActionCostReport) - byType/
+    // estTokens ranking of which command types are actually costing a
+    // coding agent's own context window, plus flagged repeat-call loops
+    // (e.g. a poll-while-booting eval sequence). Neither query touches
+    // result_json content, so running this report never itself pays
+    // anything close to the bytes it measures.
+    method: 'GET',
+    pattern: /^\/sessions\/(\d+)\/token-report$/,
+    handler: async (_req, m) => ({
+      ...dbApi.getActionCostReport(Number(m[1])),
+      loops: dbApi.findRepeatedActionLoops(Number(m[1])),
+      // Same-result repeats spaced further apart than the loop window above
+      // catches - see db.mjs's findRedundantCalls for what counts.
+      redundantCalls: dbApi.findRedundantCalls(Number(m[1])),
+      // byType (above) can't say WHICH store/selector inside "idb.dump"/
+      // "dom.query" is the actual hotspot - byTarget can.
+      byTarget: dbApi.getActionCostByTarget(Number(m[1])),
+    }),
+  },
+  {
+    // savings is cross-session/global by nature (a macro or a golden-diff
+    // pair is reused across sessions, not scoped to one) - only surfaced on
+    // the all-time report, not the per-session one above. Combines db.mjs's
+    // real DB-backed ledgers (getTokenSavingsReport) with this process's own
+    // in-memory read-result-cache counter (runtimeCacheHitCount/
+    // runtimeCacheBytesSaved) - the one savings source that lives here, not
+    // in a table, and therefore resets on relay restart (labeled as such).
+    method: 'GET',
+    pattern: /^\/token-report$/,
+    handler: async () => {
+      const dbSavings = dbApi.getTokenSavingsReport();
+      const runtimeCache = {
+        hits: runtimeCacheHitCount,
+        bytesSaved: runtimeCacheBytesSaved,
+        estTokensSaved: Math.round(runtimeCacheBytesSaved / 4),
+        note: 'in-memory only - resets on relay restart, unlike the DB-backed ledgers above',
+      };
+      return {
+        ...dbApi.getActionCostReport(),
+        byTarget: dbApi.getActionCostByTarget(),
+        savings: {
+          ...dbSavings,
+          runtimeReadCache: runtimeCache,
+          totalEstTokensSaved: dbSavings.totalEstTokensSaved + runtimeCache.estTokensSaved,
+        },
+      };
     },
   },
   { method: 'GET', pattern: /^\/sessions\/(\d+)\/snapshots$/, handler: async (_req, m) => dbApi.listSnapshots(Number(m[1])) },
@@ -1250,6 +1366,18 @@ const routes = [
       const session = requireActiveSession();
       const dispatchTimeoutMs = LONG_POLL_TYPES.has(type) ? (Number(params?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS;
 
+      const cacheKey = READ_CACHEABLE_TYPES.has(type) ? `${type}::${JSON.stringify(params ?? {})}` : null;
+      if (cacheKey) {
+        const cached = readResultCache.get(session.id)?.get(cacheKey);
+        if (cached && cached.mutationCounter === getMutationCounter(session.id)) {
+          runtimeCacheHitCount += 1;
+          runtimeCacheBytesSaved += JSON.stringify(cached.result).length;
+          maybeCacheAwarenessNudge(session.id, res);
+          return { ...cached.result, __cacheHit: true, __cachedAt: cached.cachedAt };
+        }
+      }
+
+      let resultOut;
       if (session.strict_crv && STRICT_CRV_TYPES.has(type)) {
         // Scoped to session.strict_crv_stores when the session was started
         // with `--stores a,b,c` - unscoped (stores: undefined) still means
@@ -1275,16 +1403,23 @@ const routes = [
         broadcastUpdate('diff', session.id);
         maybeMidSessionNudge(session.id, res);
 
-        return {
+        resultOut = {
           data: triggering.result,
           crv: { before_snapshot_id: beforeSnap.id, after_snapshot_id: afterSnap.id, diff_id: savedDiff.id, diff_summary: savedDiff.summary },
         };
+      } else {
+        const { result } = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
+        broadcastUpdate('action', session.id);
+        maybeMidSessionNudge(session.id, res);
+        resultOut = result;
       }
 
-      const { result } = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
-      broadcastUpdate('action', session.id);
-      maybeMidSessionNudge(session.id, res);
-      return result;
+      if (MUTATING_TYPES.has(type)) bumpMutationCounter(session.id);
+      if (cacheKey) {
+        if (!readResultCache.has(session.id)) readResultCache.set(session.id, new Map());
+        readResultCache.get(session.id).set(cacheKey, { result: resultOut, mutationCounter: getMutationCounter(session.id), cachedAt: new Date().toISOString() });
+      }
+      return resultOut;
     },
   },
 
@@ -1327,15 +1462,31 @@ const routes = [
         idA = Number(body.idA);
         if (!idA) throw new HttpError(400, 'idA (snapshot id) or golden (name) is required');
       }
-      const { result, actionId } = await withLoggedAction(session.id, 'idb.diff', { idA, idB, golden: body.golden ?? undefined }, async () => {
-        const a = dbApi.getSnapshot(idA);
-        const b = dbApi.getSnapshot(idB);
-        const diff = computeDiff(a.stores, b.stores);
+      // Content-hash cache check (see db.mjs's findCachedDiff): two
+      // DIFFERENT snapshot ids whose own content is byte-identical to a
+      // pair already diffed produce the same diff - a repeat "suite run"
+      // (diff-golden re-checked every phase even when nothing changed) no
+      // longer pays to recompute OR receive that full diff body again.
+      const snapA = dbApi.getSnapshot(idA);
+      const snapB = dbApi.getSnapshot(idB);
+      const cached = dbApi.findCachedDiff(snapA.content_hash, snapB.content_hash);
+      const { result, actionId } = await withLoggedAction(session.id, 'idb.diff', { idA, idB, golden: body.golden ?? undefined, fromCache: !!cached }, async () => {
+        if (cached) return { diff: cached.diff, summary: cached.summary };
+        const diff = computeDiff(snapA.stores, snapB.stores);
         return { diff, summary: summarizeDiff(diff) };
       });
-      const saved = dbApi.saveDiff({ sessionId: session.id, actionId, fromId: idA, toId: idB, summary: result.summary, diff: result.diff });
+      const saved = dbApi.saveDiff({ sessionId: session.id, actionId, fromId: idA, toId: idB, summary: result.summary, diff: result.diff, servedFromDiffId: cached ? cached.id : null });
       broadcastUpdate('action', session.id);
       broadcastUpdate('diff', session.id);
+      if (cached) {
+        // The full diff is still SAVED (GET /diffs/:id has it, unabridged -
+        // data integrity for anyone who later wants full detail) but
+        // deliberately OMITTED from this immediate response - the caller
+        // already has it (it's identical to diff #cached.id), so re-sending
+        // it here would be pure waste. `diff: undefined` drops the key from
+        // the JSON response (JSON.stringify skips undefined properties).
+        return { ...saved, diff: undefined, fromCache: true, cachedFromDiffId: cached.id, note: `identical content to diff #${cached.id} - full diff omitted here (nothing changed since), not recomputed or re-sent. Fetch diff #${cached.id} (GET /diffs) for full detail if genuinely needed.` };
+      }
       return saved;
     },
   },
@@ -1542,6 +1693,7 @@ server.on('upgrade', (req, socket) => {
     return;
   }
   const agentName = searchParams.get('name') || DEFAULT_AGENT;
+  const loadId = searchParams.get('loadId') || null;
   const accept = crypto.createHash('sha1').update(key + WS_MAGIC).digest('base64');
   socket.write(
     'HTTP/1.1 101 Switching Protocols\r\n'
@@ -1557,7 +1709,7 @@ server.on('upgrade', (req, socket) => {
     log(`replacing previously connected agent '${agentName}'`);
     existing.socket.destroy();
   }
-  agents.set(agentName, { socket, buffer: Buffer.alloc(0), connectedAt: Date.now(), lastAckAt: null });
+  agents.set(agentName, { socket, buffer: Buffer.alloc(0), connectedAt: Date.now(), lastAckAt: null, loadId });
   log(`agent '${agentName}' connected from`, req.socket.remoteAddress);
   broadcastUpdate('agent', null);
 

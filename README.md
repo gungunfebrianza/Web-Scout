@@ -59,9 +59,24 @@ The core discipline, nicknamed **"CRV"** in this codebase:
 
 **Automation**
 - Record a session's actions as a reusable **macro**, then replay it later
+  (consecutive duplicate steps auto-compacted out at record time)
 - Bundle macros + assertions + golden-diffs into a repeatable **test suite**
   with one pass/fail result - CI-friendly exit codes included
 - Named multi-tab support - drive more than one browser tab at once
+
+**Token cost & waste prevention**
+- `token-report` ranks every action TYPE and TARGET (store/selector) by
+  estimated tokens spent reading its result back, cross-session or scoped
+  to one session - plus repeated-call loops, redundant re-checks, and a
+  `savings` block proving what the mechanisms below actually saved
+- Same-session read-result cache (identical read, nothing mutated since ->
+  answered from cache, never re-dispatched) and content-addressed result
+  dedup (an identical result, even across sessions, physically stored once)
+- Golden-diff memoization by content (not snapshot id) - a repeat
+  `diff-golden` check against unchanged data skips re-sending the full diff
+- Pre-call cost hints: a whole-page selector, or a store with real
+  historical cost, warns BEFORE you pay for it - with a learned number, not
+  a guess
 
 **Dashboard**
 - A realtime, no-refresh-needed web dashboard showing every session's
@@ -124,12 +139,13 @@ the full explanation behind any of these.
 
 **Sessions** (required before anything else)
 ```bash
-session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--auto-snapshot]
+session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--auto-snapshot] [--token-budget N]
                                # --stores scopes every strict-crv auto-snapshot to those
                                # stores - omitting it against a real-size db WILL time out.
                                # --auto-snapshot (needs --stores) takes+persists a snapshot
                                # right at start, so "session cleanup --since-snapshot" has a
                                # baseline without a separate manual "idb snapshot" call first
+                               # --token-budget is advisory only - warns once crossed, never blocks
 session end [id]              # defaults to the active session; nudges "macro record" if the
                                # session logged 5+ replayable actions and never saved one
 session current
@@ -143,6 +159,7 @@ session cleanup <id> [--confirm]
 **DOM**
 ```bash
 dom query "#some-element"
+dom query "#some-element" --meta   # skip outerHTML/text entirely - just tag/id/className/matchCount
 dom pick                      # click any element in the browser -> get its selector back
 dom click "#some-button"
 dom fill "#some-input" "value"
@@ -170,7 +187,9 @@ idb delete-many my_store '[1,2,3]'   # one transaction; response includes delete
 idb clear my_store
 idb wait my_store --count-gte 4 --timeout 15000
 idb snapshot --stores my_store --golden my-baseline   # named regression baseline
-idb diff 1 2                  # or: idb diff-golden my-baseline 2
+idb snapshot --since 12        # fresh snapshot, prints ONLY the delta vs. snapshot 12
+idb diff 1 2                  # or: idb diff-golden my-baseline 2 - both cache-aware: identical
+                               # content to an already-computed diff skips re-sending the full body
 idb restore --golden my-baseline
 ```
 
@@ -225,10 +244,25 @@ eval --file ./script.js       # Windows/Git Bash: --file /dev/stdin does NOT wor
 
 **Macros & suites**
 ```bash
-macro record "my-flow" <sessionId>
-macro run <id>
+macro record "my-flow" <sessionId>   # consecutive duplicate steps auto-compacted; cost stamped
+macro run <id>                # prints an estimated-cost NOTE (from the macro's own stamped cost)
+                               # before replaying, no live lookup needed
 suite run ./checks/my-suite.json
 ```
+
+**Token cost & waste prevention**
+```bash
+token-report                  # all-time byType/byTarget cost ranking + a "savings" block proving
+                               # what dedup/cache/compaction/diff-cache actually saved
+token-report --session <id>   # one session's own cost, plus repeated-call loops and redundant
+                               # (same-result) re-checks
+```
+Read calls (`idb dump/get/list`, `dom query/rect/style`, `net log`,
+`console log`) are answered from an in-relay cache when called twice IN A
+ROW with identical args and nothing mutating in between
+(`__cacheHit:true`); any result byte-identical to one already seen -
+even in a different session - is stored once at the DB level either way,
+no flag needed for either.
 
 **Other**
 ```bash
@@ -318,8 +352,10 @@ node tools/web-scout/cli.mjs dashboard   # prints the URL, e.g. http://127.0.0.1
 
 Open it in a browser to watch sessions update live: connected-tab status, a
 session picker, a merged action/snapshot/diff/console/network timeline,
-regression-check results, a macros panel, cross-session search, and an
-Ask-AI box. Updates arrive over Server-Sent Events - no manual refresh.
+regression-check results, a macros panel, cross-session search, a Token
+cost panel (budget burn-rate, per-type/per-target cost, cross-session
+trend, a Waste Radar banner for the session's single worst-cost type), and
+an Ask-AI box. Updates arrive over Server-Sent Events - no manual refresh.
 
 ## Security model, in short
 

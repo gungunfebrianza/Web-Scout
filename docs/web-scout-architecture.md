@@ -764,6 +764,65 @@ replaces the prior one (unchanged single-tab behavior). `state_snapshots`/
 **advisory** - diffing two snapshots from different tabs is a legitimate
 cross-tab comparison, never blocked.
 
+## Token cost internals
+
+See `docs/web-scout-roadmap.md`'s V22/V23 entries for the full history; this
+section is the schema/data-flow summary.
+
+Every estimate is `chars/4` over already-stored `result_json`/`params_json`
+byte lengths (`CHARS_PER_TOKEN_ESTIMATE` in `db.mjs`) - a rough proxy for
+ranking command types/targets against each other, never billed as exact.
+`token-report`'s aggregates are pure SQL (`SUM(LENGTH(...))  GROUP BY`),
+so running the report never itself pays anything close to the bytes it
+measures.
+
+- **`sessions.token_budget`** (nullable) - advisory only, set via `session
+  start --token-budget N`. Nothing blocks a command from running over it;
+  it only changes what `session end`/`session show`/the dashboard print
+  once crossed.
+- **`result_blobs` table + `actions.result_hash` column** - content-
+  addressed dedup. `logAction` (`db.mjs`) hashes every result with sha256;
+  a hash already in `result_blobs` means this row's own `result_json` is
+  left `NULL` and `ref_count` is bumped instead of storing a second
+  physical copy. `resolveResultJson(resultJson, resultHash)` is the read-
+  side counterpart - falls back to the blob by hash - used everywhere a
+  result is read (`listActions`, `getActionById`, `listActionsSummary`,
+  `listAllActions`). Every cost-report SQL query `LEFT JOIN`s
+  `result_blobs` (`COALESCE(a.result_json, rb.json, '')`) so LOGICAL byte
+  counts stay exact regardless of physical dedup - a caller's own
+  `printResult` output is unaffected either way.
+- **Same-session read-result cache** (`relay.mjs`, in-memory, NOT the same
+  mechanism as the DB-level dedup above) - `readResultCache: Map<sessionId,
+  Map<cacheKey, {result, mutationCounter, cachedAt}>>`, invalidated whole-
+  session by `sessionMutationCounters` bumping on any `MUTATING_TYPES`
+  dispatch. A hit skips `withLoggedAction` entirely - zero new action row,
+  zero page dispatch. Resets on relay restart (unlike everything else in
+  this section, which is real DB state) - `runtimeCacheHitCount`/
+  `runtimeCacheBytesSaved` are labeled as such in `token-report`'s
+  `savings.runtimeReadCache`.
+- **`state_snapshots.content_hash`** (sha256 of `stores_json`) +
+  **`state_diffs.served_from_diff_id`** (nullable FK) - `findCachedDiff`
+  looks up an existing, non-cached diff (`served_from_diff_id IS NULL`)
+  whose own from/to snapshots' `content_hash`es match the pair just asked
+  for. `POST /state/diff` still SAVES a new `state_diffs` row either way
+  (audit trail, `GET /diffs/:id` always has the full detail) but omits the
+  (possibly large) `diff` field from the immediate response when served
+  from cache - `fromCache:true`/`cachedFromDiffId`/`diffOmitted` instead.
+- **`macros.steps_cost_est`/`macros.compacted_steps_removed`** - both
+  stamped once at `createMacro`/`updateMacroSteps` time (`db.mjs`), not
+  computed live on every `macro run`. `compactMacroSteps` collapses
+  consecutive identical type+params steps before persisting (never
+  reorders or merges non-adjacent steps - a step's position can matter);
+  `estimateStepsTokenCost` sums each remaining step's own type's all-time
+  average `estTokens`/call from `getActionCostReport()`.
+- **`getTokenSavingsReport()`** (`db.mjs`) combines `getResultDedupSavings`,
+  `getGoldenDiffCacheSavings`, and a `SUM(compacted_steps_removed)` across
+  `macros` into one object - deliberately three separate real numbers, not
+  one fabricated composite score (same discipline as this project's other
+  "never invent a single score out of unrelated measurements" precedent).
+  `relay.mjs`'s `GET /token-report` (no `--session`) merges in the runtime
+  cache counters above and returns the combined `savings` block.
+
 ## Testing internals
 
 Three test files, all real-not-simulated (real processes, real relay, no
