@@ -1,27 +1,28 @@
 // Real, not simulated: spawns mcp-server.mjs as an actual child process and
-// speaks real JSON-RPC over its real stdio, against the real, already-
-// running relay (node tools/web-scout/relay.mjs) - same verification
-// discipline as the rest of this tool. Run with:
-//   node --test tools/web-scout/mcp-server.test.mjs
-// Requires the relay to be running first; a clear failure message says so
-// rather than hanging if it isn't.
+// speaks real JSON-RPC over its real stdio, against a real ephemeral relay
+// (see test-relay.mjs; WEBSCOUT_TEST_LIVE=1 uses the already-running one).
+// Run with: node --test tools/web-scout/mcp-server.test.mjs
 
-import { test, before } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { request } from './client.mjs';
+import { startTestRelay } from './test-relay.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// This file's tests share the relay's one mutable "active session" with
-// cli.test.mjs's tests - MUST run with `node --test --test-concurrency=1`
-// across both files (see README "Testing"), never in parallel. Defensive
-// best-effort cleanup: a previous run that crashed mid-test leaves a
-// dangling active session that would otherwise fail every `session start`
-// in this run too.
+const relay = await startTestRelay();
+after(() => relay.stop());
+// client.mjs reads WEBSCOUT_PORT once at import, so set it first. The spawned
+// mcp-server child inherits process.env, so it targets the same relay.
+process.env.WEBSCOUT_PORT = String(relay.port);
+const { request } = await import('./client.mjs');
+
+// Each test file owns its own relay, so files can run in parallel. The
+// cleanup only matters under WEBSCOUT_TEST_LIVE=1, where a crashed earlier
+// run may have left a dangling active session.
 before(async () => {
   try {
     const health = await request('GET', '/health');
@@ -122,16 +123,11 @@ test('an unknown tool name is rejected', async () => {
   });
 });
 
-test('session start -> dom/idb/eval against the active session -> session end (real relay + real connected tab)', async () => {
+test('session start -> dom/idb/eval against the active session -> session end (real relay + real connected tab)', async (t) => {
   await withServer(async (server) => {
     const health = await server.call('tools/call', { name: 'webscout_meta', arguments: { action: 'status' } });
     const { agents_connected } = JSON.parse(health.result.content[0].text);
-    if (!agents_connected.length) {
-      // No browser tab connected in this environment - skip the
-      // session-scoped assertions rather than fail on an environment gap
-      // unrelated to the MCP wrapper itself.
-      return;
-    }
+    if (!agents_connected.length) return t.skip('no browser tab connected to this relay - run with WEBSCOUT_TEST_LIVE=1 against a relay that has one');
 
     const start = await server.call('tools/call', { name: 'webscout_session', arguments: { action: 'start', params: { goal: 'mcp-server.test.mjs run', context: 'automated' } } });
     assert.equal(start.result.isError, undefined);

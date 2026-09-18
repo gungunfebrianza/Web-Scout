@@ -33,13 +33,21 @@ import { exec, execSync } from 'node:child_process';
 import * as dbApi from './db.mjs';
 import { buildPrompt, askAI, DEFAULT_BACKEND_URL } from './ai.mjs';
 import { buildReportMarkdown, buildReportJson } from './report.mjs';
+// Which command types are strict-CRV / mutating / macro-replayed / long-polling /
+// read-cacheable / timeout-verifiable / auto-screenshotted is declared once, per
+// type, in command-registry.mjs - see its header for each flag's meaning.
+import {
+  STRICT_CRV_TYPES, LONG_POLL_TYPES, DEFAULT_MACRO_TYPES, TIMEOUT_VERIFIABLE_TYPES,
+  AUTO_SCREENSHOT_ON_FAILURE_TYPES, READ_CACHEABLE_TYPES, MUTATING_TYPES, COMMAND_TYPES,
+} from './command-registry.mjs';
+import { RELAY_SOURCE_FILES, writePidfile, removePidfile } from './relay-control.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
 // Bumped alongside docs/web-scout-roadmap.md's latest "## VN" entry - purely
 // informational (the dashboard's About panel), never read by any behavior.
-const WEBSCOUT_VERSION = '0.17.0'; // bumped alongside docs/web-scout-roadmap.md's V21 entry
+const WEBSCOUT_VERSION = '0.18.0'; // bumped alongside docs/web-scout-roadmap.md's V29 entry
 const COMMAND_TIMEOUT_MS = 15000; // interactive dom/net/eval round trips
 const SNAPSHOT_TIMEOUT_MS = 60000; // bulk idb.snapshot reads can be large
 // Short, independent budgets for two round trips that must never inherit
@@ -55,38 +63,6 @@ const PING_TIMEOUT_MS = 3000;
 const DB_VERSION_DRIFT_TIMEOUT_MS = 3000;
 const WS_MAGIC = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const DEFAULT_AGENT = 'default';
-// Strict-CRV mode auto-snapshots before/after any command in this set -
-// deliberately includes idb.put/idb.delete/idb.clear/idb.deleteMany (the
-// tool's real write paths besides eval), since excluding them would leave
-// strict-CRV not covering the exact thing it exists to audit.
-const STRICT_CRV_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'eval', 'idb.put', 'idb.putMany', 'idb.patch', 'idb.delete', 'idb.clear', 'idb.deleteMany']);
-// dom.wait/idb.wait poll, dom.pick blocks on a real human click, and eval
-// now races its own page-side timeout (see inject.js's eval handler,
-// EVAL_TIMEOUT_MS) so an async hang gets a diagnostic reply instead of
-// silently masking as the relay's own generic timeout - all for up to
-// their own `timeoutMs` - the relay's own round-trip timeout must exceed
-// that or it fires first and masks the more informative in-page message.
-const LONG_POLL_TYPES = new Set(['dom.wait', 'dom.clickWait', 'dom.settle', 'idb.wait', 'net.wait', 'console.wait', 'dom.pick', 'eval']);
-// Default replayable action types for macro record - excludes read-only
-// query/dump/list/snapshot/net/console commands, which are noise in a
-// replay (nothing to "redo"). Pass {"all": true} to POST /macros to
-// include everything the session logged instead.
-const DEFAULT_MACRO_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'dom.wait', 'dom.settle', 'idb.wait', 'net.wait', 'console.wait', 'idb.put', 'idb.putMany', 'idb.patch', 'idb.delete', 'idb.deleteMany', 'idb.clear', 'page.reload', 'eval']);
-// Types whose reply the CLI should best-effort re-verify against live state
-// after a genuine TIMEOUT (not a real failure reply from the page) - a
-// timed-out reply does not prove the command never ran; the page may have
-// received and finished it, only the reply never made it back within
-// COMMAND_TIMEOUT_MS. Deliberately narrow: only types with an obvious,
-// cheap, generic way to re-check ("does this selector still/now look
-// right", "did this store's row count move") - see verifyAfterTimeout()
-// below.
-const TIMEOUT_VERIFIABLE_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'idb.put', 'idb.patch']);
-// A failure on one of these carries a selector worth screenshotting - the
-// broken state is often gone by the time a human goes looking for it by
-// hand (confirmed: this was previously a manual, opt-in-after-the-fact
-// step). Best-effort: capture failure never masks or replaces the original
-// error, it is logged as its own separate action row.
-const AUTO_SCREENSHOT_ON_FAILURE_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'dom.wait']);
 // macro run's cross-context guard threshold (see the route below) - a
 // crude, deliberately cheap Jaccard-similarity-of-goal-words check, not
 // real NLP. Low enough that two genuinely related goals ("verify P3.8
@@ -106,27 +82,20 @@ const MACRO_CONTEXT_SIMILARITY_THRESHOLD = 0.15;
 // read-only, because this file cannot tell a read eval from a write eval).
 // idb.snapshot is dispatched via POST /state/snapshot, never this route -
 // not applicable here either way.
-const READ_CACHEABLE_TYPES = new Set(['idb.dump', 'idb.get', 'idb.list', 'dom.query', 'dom.rect', 'dom.computedStyle', 'net.log', 'console.log', 'react.inspect', 'react.tree']);
-// Anything that can change DOM/IndexedDB/navigation state - a cache entry
-// recorded before one of these ran must never be served again.
-const MUTATING_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'eval', 'idb.put', 'idb.putMany', 'idb.patch', 'idb.delete', 'idb.deleteMany', 'idb.clear', 'page.reload', 'page.hardReload']);
 const sessionMutationCounters = new Map(); // sessionId -> counter, bumped on every MUTATING_TYPES dispatch
 const readResultCache = new Map(); // sessionId -> Map(`${type}::${JSON.stringify(params)}` -> { result, mutationCounter, cachedAt })
-// In-memory only (resets on relay restart, unlike db.mjs's getTokenSavingsReport
-// ledgers which are real DB rows) - still a REAL count of dispatches this
-// process actually skipped, surfaced via GET /token-report so this cache's
-// own savings are visible, not just its existence.
-let runtimeCacheHitCount = 0;
-let runtimeCacheBytesSaved = 0;
+// Cache-hit counts/bytes are persisted (db.mjs's bumpReadCacheSavings), so the
+// savings shown by GET /token-report and the dashboard survive a relay restart.
 // A cache hit skips withLoggedAction entirely (see both cache-hit sites
 // below) - no actions row, so dbApi.getSessionTokensSoFar (which sums the
 // actions table) never sees those bytes. But the cached result is still
 // returned in THIS reply's body and the calling agent still reads it off
 // stdout - so the running x-webscout-session-tokens total was silently
 // UNDERcounting a session with any cache hits. Tracked per-session (not
-// just the global runtimeCacheBytesSaved counter above) so the generic
+// just the global persisted counter above) so the generic
 // response wrapper can add exactly the right session's share back in.
 const sessionCacheHitBytes = new Map(); // sessionId -> bytes
+const lastReportedSessionTokens = new Map(); // sessionId -> last running total sent in x-webscout-session-tokens
 
 function getMutationCounter(sessionId) {
   return sessionMutationCounters.get(sessionId) || 0;
@@ -165,6 +134,31 @@ const sseClients = new Set(); // open dashboard EventSource responses
 
 function log(...args) {
   console.log('[web-scout relay]', ...args);
+}
+
+// ---------- Stale-relay detection ----------
+//
+// Node loads relay.mjs/db.mjs/... once at boot, so an edit to any of them is
+// invisible to this running process until it restarts - a real session ran
+// "24/24 pass" against a relay still executing the code from BEFORE the edit.
+// Recorded once at boot; compared against the files' current mtimes at
+// most every STALE_CHECK_TTL_MS so this stays off the hot path of every reply.
+const RELAY_STARTED_AT = new Date();
+const bootSourceMtimes = new Map();
+for (const f of RELAY_SOURCE_FILES) {
+  try { bootSourceMtimes.set(f, fs.statSync(path.join(__dirname, f)).mtimeMs); } catch { /* optional file */ }
+}
+const STALE_CHECK_TTL_MS = 2000;
+let staleCheckCache = { at: 0, files: [] };
+function getStaleSourceFiles() {
+  const now = Date.now();
+  if (now - staleCheckCache.at < STALE_CHECK_TTL_MS) return staleCheckCache.files;
+  const files = [];
+  for (const [f, bootMtime] of bootSourceMtimes) {
+    try { if (fs.statSync(path.join(__dirname, f)).mtimeMs > bootMtime) files.push(f); } catch { /* deleted mid-run */ }
+  }
+  staleCheckCache = { at: now, files };
+  return files;
 }
 
 // ---------- Realtime dashboard push (SSE) ----------
@@ -972,7 +966,11 @@ const routes = [
     // retrying and investigate instead.
     method: 'GET',
     pattern: /^\/health$/,
-    handler: async () => ({ status: 'ok', agents_connected: connectedAgentNames(), agents_detail: agentsDetail(), active_session: dbApi.getCurrentSession(), db_version_drift: await getDbVersionDrift(), pending_command_count: pending.size }),
+    handler: async () => ({
+      status: 'ok', agents_connected: connectedAgentNames(), agents_detail: agentsDetail(), active_session: dbApi.getCurrentSession(), db_version_drift: await getDbVersionDrift(), pending_command_count: pending.size,
+      // stale_source_files non-empty = this process is running OLDER code than what is on disk - restart it (`relay restart`).
+      relay: { pid: process.pid, started_at: RELAY_STARTED_AT.toISOString(), uptime_seconds: Math.round((Date.now() - RELAY_STARTED_AT.getTime()) / 1000), stale_source_files: getStaleSourceFiles() },
+    }),
   },
   {
     // Powers the dashboard's Settings dialog (Server config + About tabs).
@@ -1083,6 +1081,7 @@ const routes = [
       sessionMutationCounters.delete(sessionId);
       sessionCacheAwarenessNudged.delete(sessionId);
       sessionCacheHitBytes.delete(sessionId);
+      lastReportedSessionTokens.delete(sessionId);
       broadcastUpdate('session', null);
       return { ...session, replayableActionCount };
     },
@@ -1148,27 +1147,59 @@ const routes = [
     // savings is cross-session/global by nature (a macro or a golden-diff
     // pair is reused across sessions, not scoped to one) - only surfaced on
     // the all-time report, not the per-session one above. Combines db.mjs's
-    // real DB-backed ledgers (getTokenSavingsReport) with this process's own
-    // in-memory read-result-cache counter (runtimeCacheHitCount/
-    // runtimeCacheBytesSaved) - the one savings source that lives here, not
-    // in a table, and therefore resets on relay restart (labeled as such).
+    // real DB-backed ledgers (getTokenSavingsReport) with the relay's
+    // read-result-cache counter (persisted since the read_cache_savings table).
     method: 'GET',
     pattern: /^\/token-report$/,
     handler: async () => {
       const dbSavings = dbApi.getTokenSavingsReport();
       const runtimeCache = {
-        hits: runtimeCacheHitCount,
-        bytesSaved: runtimeCacheBytesSaved,
-        estTokensSaved: Math.round(runtimeCacheBytesSaved / 4),
-        note: 'in-memory only - resets on relay restart, unlike the DB-backed ledgers above',
+        ...dbApi.getReadCacheSavings(),
+        note: 'persisted across relay restarts (counts hits since the read_cache_savings table was added)',
       };
+      const cost = dbApi.getActionCostReport();
+      // Storage-side context for the "storage" ledgers: how big the database
+      // actually is on disk (main file + write-ahead log) and what it would
+      // have been without dedup. Approximate by nature (SQLite does not
+      // shrink its file when rows go away), so it is labeled as such.
+      const dbPath = process.env.WEBSCOUT_DB_PATH || path.join(__dirname, 'webscout.db');
+      let dbFileBytes = null;
+      try {
+        dbFileBytes = fs.statSync(dbPath).size;
+        try { dbFileBytes += fs.statSync(`${dbPath}-wal`).size; } catch { /* no WAL file right now */ }
+      } catch { /* db path unreadable - leave null */ }
+      const storageSaved = dbSavings.byKind.storage.bytesSaved;
       return {
-        ...dbApi.getActionCostReport(),
+        ...cost,
         byTarget: dbApi.getActionCostByTarget(),
         savings: {
           ...dbSavings,
           runtimeReadCache: runtimeCache,
           totalEstTokensSaved: dbSavings.totalEstTokensSaved + runtimeCache.estTokensSaved,
+          // The cache skips a page round trip and an action-log row, but the
+          // result is still delivered to the caller - a roundtrip saving,
+          // not a storage or delivery one.
+          ledgers: [...dbSavings.ledgers, {
+            key: 'runtimeReadCache', label: 'Read cache', kind: 'roundtrip', countedInTotal: true,
+            what: 'An identical read repeated with nothing mutating in between is answered from memory instead of asking the page again. The caller still receives the full result.',
+            bytesSaved: runtimeCache.bytesSaved, estTokensSaved: runtimeCache.estTokensSaved, uniqueBytes: null, logicalBytes: null, reductionPct: null,
+            refs: { unique: null, total: runtimeCache.hits, unit: 'cache hits' },
+            note: runtimeCache.note,
+          }],
+          byKind: {
+            ...dbSavings.byKind,
+            roundtrip: { bytesSaved: runtimeCache.bytesSaved, estTokensSaved: runtimeCache.estTokensSaved },
+          },
+          storageContext: {
+            dbFileBytes,
+            bytesWithoutDedup: dbFileBytes === null ? null : dbFileBytes + storageSaved,
+            reductionPct: dbFileBytes === null ? null : Math.round((storageSaved / (dbFileBytes + storageSaved)) * 1000) / 10,
+            note: 'approximate - SQLite keeps freed pages in its file, so the real without-dedup size is not exactly file + saved',
+          },
+          // Spend is what the CALLER read; every ledger above is storage or
+          // round-trip. They share a unit (chars/4) but not a meaning - the
+          // dashboard shows them side by side, never as a ratio.
+          spend: { calls: cost.totalCalls, estTokens: cost.totalEstTokens },
         },
       };
     },
@@ -1297,20 +1328,23 @@ const routes = [
       for (const a of actions) {
         if (!a.ok) continue;
         if (a.type === 'eval' && /\.(add|put|update|set|create)\s*\(/.test(String(a.params?.expr ?? ''))) evalWriteCount += 1;
-        if (a.type === 'idb.put' && a.params?.store !== undefined && a.result?.key !== undefined) {
+        // Which branch a type takes is its `cleanup` kind in command-registry.mjs,
+        // not a hardcoded type string - a new write command declares itself there.
+        const kind = COMMAND_TYPES[a.type]?.cleanup;
+        if (kind === 'put' && a.params?.store !== undefined && a.result?.key !== undefined) {
           state.set(`${a.params.store}::${JSON.stringify(a.result.key)}`, { store: a.params.store, key: a.result.key, live: true });
-        } else if (a.type === 'idb.putMany' && a.params?.store !== undefined && a.result?.keyPath !== undefined) {
+        } else if (kind === 'putMany' && a.params?.store !== undefined && a.result?.keyPath !== undefined) {
           const kp = a.result.keyPath;
           for (const row of a.result.rows ?? []) {
             const key = typeof kp === 'string' ? row?.[kp] : kp.map((k) => row?.[k]);
             if (key === undefined || (Array.isArray(key) && key.some((v) => v === undefined))) continue;
             state.set(`${a.params.store}::${JSON.stringify(key)}`, { store: a.params.store, key, live: true });
           }
-        } else if (a.type === 'idb.delete' && a.params?.store !== undefined && a.params?.key !== undefined) {
+        } else if (kind === 'delete' && a.params?.store !== undefined && a.params?.key !== undefined) {
           state.set(`${a.params.store}::${JSON.stringify(a.params.key)}`, { store: a.params.store, key: a.params.key, live: false });
-        } else if (a.type === 'idb.deleteMany' && a.params?.store !== undefined) {
+        } else if (kind === 'deleteMany' && a.params?.store !== undefined) {
           for (const key of a.params.keys ?? []) state.set(`${a.params.store}::${JSON.stringify(key)}`, { store: a.params.store, key, live: false });
-        } else if (a.type === 'idb.clear' && a.params?.store !== undefined) {
+        } else if (kind === 'clear' && a.params?.store !== undefined) {
           for (const [k, v] of state) if (v.store === a.params.store) v.live = false;
         }
       }
@@ -1322,7 +1356,7 @@ const routes = [
           evalWriteActionsNotTracked: evalWriteCount,
           note: (evalWriteCount
             ? `${evalWriteCount} eval action(s) in this session look like writes and are NOT tracked here - review manually. `
-            : '') + `This mode only tracks idb.put/idb.putMany/idb.delete/idb.deleteMany/idb.clear - it does NOT see writes made by clicking a real UI button. Pass {"sinceSnapshotId": <id>} instead to catch those too. Pass {"confirm":true} to delete the ${pending.length} row(s) listed above.${summaryOnly ? ' (--summary: per-store counts only, not full rows.)' : ''}`,
+            : '') + `This mode only tracks ${Object.entries(COMMAND_TYPES).filter(([, m]) => m.cleanup).map(([t]) => t).join('/')} - it does NOT see writes made by clicking a real UI button. Pass {"sinceSnapshotId": <id>} instead to catch those too. Pass {"confirm":true} to delete the ${pending.length} row(s) listed above.${summaryOnly ? ' (--summary: per-store counts only, not full rows.)' : ''}`,
         };
       }
       const deleted = [];
@@ -1483,9 +1517,8 @@ const routes = [
         if (cacheKey) {
           const cached = readResultCache.get(session.id)?.get(cacheKey);
           if (cached && cached.mutationCounter === getMutationCounter(session.id)) {
-            runtimeCacheHitCount += 1;
             const bytes = JSON.stringify(cached.result).length;
-            runtimeCacheBytesSaved += bytes;
+            dbApi.bumpReadCacheSavings(bytes);
             sessionCacheHitBytes.set(session.id, (sessionCacheHitBytes.get(session.id) || 0) + bytes);
             results.push({ type: step.type, ok: true, skipped: true, reason: 'read result served from same-session cache', result: cached.result, durationMs: 0 });
             continue;
@@ -1603,9 +1636,8 @@ const routes = [
       if (cacheKey) {
         const cached = readResultCache.get(session.id)?.get(cacheKey);
         if (cached && cached.mutationCounter === getMutationCounter(session.id)) {
-          runtimeCacheHitCount += 1;
           const bytes = JSON.stringify(cached.result).length;
-          runtimeCacheBytesSaved += bytes;
+          dbApi.bumpReadCacheSavings(bytes);
           sessionCacheHitBytes.set(session.id, (sessionCacheHitBytes.get(session.id) || 0) + bytes);
           maybeCacheAwarenessNudge(session.id, res);
           return { ...cached.result, __cacheHit: true, __cachedAt: cached.cachedAt };
@@ -1920,6 +1952,8 @@ const server = http.createServer(async (req, res) => {
     // post-hoc audit, well after the session that paid for it was over.
     // Best-effort - never blocks or fails a reply over this.
     try {
+      const staleFiles = getStaleSourceFiles();
+      if (staleFiles.length) res.setHeader('x-webscout-relay-stale', staleFiles.join(','));
       const activeSession = dbApi.getCurrentSession();
       if (activeSession) {
         // + cache-hit bytes: see sessionCacheHitBytes above - a cache hit
@@ -1927,7 +1961,15 @@ const server = http.createServer(async (req, res) => {
         // silently undercount the bytes this reply (and every earlier
         // cache-hit reply this session) actually put in front of the agent.
         const cacheHitTokens = Math.round((sessionCacheHitBytes.get(activeSession.id) || 0) / dbApi.CHARS_PER_TOKEN_ESTIMATE);
-        res.setHeader('x-webscout-session-tokens', String(dbApi.getSessionTokensSoFar(activeSession.id) + cacheHitTokens));
+        const totalTokens = dbApi.getSessionTokensSoFar(activeSession.id) + cacheHitTokens;
+        res.setHeader('x-webscout-session-tokens', String(totalTokens));
+        // What THIS call added to the running total. Known only once a first
+        // total was seen for the session by this process (a relay restarted
+        // mid-session has no baseline, so it sends nothing rather than
+        // reporting the whole prior total as one call's cost).
+        const prevTotal = lastReportedSessionTokens.get(activeSession.id);
+        if (prevTotal !== undefined) res.setHeader('x-webscout-call-tokens', String(Math.max(0, totalTokens - prevTotal)));
+        lastReportedSessionTokens.set(activeSession.id, totalTokens);
       }
     } catch { /* best-effort only */ }
     sendJson(res, 200, { ok: true, result });
@@ -2010,6 +2052,9 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, HOST, () => {
+  writePidfile(PORT);
+  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { removePidfile(PORT); process.exit(0); });
+  process.on('exit', () => removePidfile(PORT));
   log(`listening on http://${HOST}:${PORT} (bound to localhost only)`);
   log('waiting for the in-page agent to connect at /agent ...');
   const current = dbApi.getCurrentSession();

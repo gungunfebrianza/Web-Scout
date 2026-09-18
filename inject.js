@@ -1323,7 +1323,18 @@
       };
       check();
     }),
-    'net.log': () => ({ count: netLog.length, entries: netLog.slice() }),
+    // urlContains keeps only entries whose URL contains it; limit then keeps the
+    // N most recent of those. Filtered here, in the page, so a 500-entry ring
+    // buffer never crosses the wire when the caller wanted three entries.
+    // With neither param the reply is unchanged (count === entries.length).
+    'net.log': ({ limit, urlContains } = {}) => {
+      let entries = netLog.slice();
+      const filtered = typeof urlContains === 'string' && urlContains !== '';
+      if (filtered) entries = entries.filter((e) => String(e.url ?? '').includes(urlContains));
+      const capped = Number.isFinite(limit) && limit >= 0 && entries.length > limit;
+      if (capped) entries = limit === 0 ? [] : entries.slice(-limit);
+      return filtered || capped ? { count: entries.length, total: netLog.length, entries } : { count: entries.length, entries };
+    },
     'net.clear': () => {
       const cleared = netLog.length;
       netLog.length = 0;
@@ -1341,7 +1352,11 @@
       else if (typeof filter === 'string' && filter.trim()) captureBodyFilters.add(filter.trim());
       return { active: captureBodyFilters.size > 0, filters: [...captureBodyFilters], limit: NET_BODY_CAPTURE_LIMIT };
     },
-    'console.log': () => ({ count: consoleLog.length, entries: consoleLog.slice() }),
+    'console.log': ({ limit } = {}) => {
+      const capped = Number.isFinite(limit) && limit >= 0 && consoleLog.length > limit;
+      const entries = capped ? (limit === 0 ? [] : consoleLog.slice(-limit)) : consoleLog.slice();
+      return capped ? { count: entries.length, total: consoleLog.length, entries } : { count: entries.length, entries };
+    },
     'console.clear': () => {
       const cleared = consoleLog.length;
       consoleLog.length = 0;

@@ -294,3 +294,41 @@ test('verity runs: import computes pass/fail counts from steps, get/list/listAll
 
   db.endSession(s.id);
 });
+
+test('read-cache savings are persisted in the DB (they used to reset on every relay restart)', () => {
+  const before = db.getReadCacheSavings();
+  db.bumpReadCacheSavings(4000);
+  db.bumpReadCacheSavings(400);
+  const after = db.getReadCacheSavings();
+  assert.equal(after.hits, before.hits + 2);
+  assert.equal(after.bytesSaved, before.bytesSaved + 4400);
+  assert.equal(after.estTokensSaved, Math.round(after.bytesSaved / db.CHARS_PER_TOKEN_ESTIMATE));
+});
+
+test('getTokenSavingsReport labels each ledger by what it measures and only counts the counted ones', () => {
+  const r = db.getTokenSavingsReport();
+  const byKey = Object.fromEntries(r.ledgers.map((l) => [l.key, l]));
+  for (const key of ['resultDedup', 'textDedup', 'snapshotRowDedup', 'snapshotDedup', 'paramsDedup', 'stepBlobDedup', 'columnDictCompaction']) {
+    assert.equal(byKey[key].kind, 'storage', `${key} saves disk bytes, not agent tokens`);
+    assert.equal(byKey[key].countedInTotal, true);
+  }
+  assert.equal(byKey.goldenDiffCache.countedInTotal, false, 'overlaps resultDedup - shown, not double counted');
+  assert.match(byKey.goldenDiffCache.excludedBecause, /twice/);
+  assert.equal(byKey.macroCompaction.kind, 'workflow');
+  const countedBytes = r.ledgers.filter((l) => l.countedInTotal).reduce((sum, l) => sum + l.bytesSaved, 0);
+  assert.equal(countedBytes, r.totalBytesSaved, 'the counted ledgers foot to the reported total');
+  assert.equal(r.byKind.storage.bytesSaved, r.totalBytesSaved);
+});
+
+test('a ledger with a unique-bytes figure reports its real reduction percentage', () => {
+  const s = db.startSession({ goal: 'ledger reduction' });
+  const big = { rows: Array.from({ length: 40 }, (_, i) => ({ id: i, text: 'x'.repeat(50) })) };
+  for (let i = 0; i < 4; i += 1) {
+    db.logAction({ sessionId: s.id, type: 'idb.dump', params: { store: 'ledger_test' }, ok: true, result: big, startedAt: new Date().toISOString(), endedAt: new Date().toISOString() });
+  }
+  const ledger = db.getTokenSavingsReport().ledgers.find((l) => l.key === 'resultDedup');
+  assert.ok(ledger.logicalBytes > ledger.uniqueBytes, 'four identical results stored once');
+  assert.equal(ledger.reductionPct, Math.round((ledger.bytesSaved / ledger.logicalBytes) * 1000) / 10);
+  assert.ok(ledger.refs.total > ledger.refs.unique);
+  db.endSession(s.id);
+});
