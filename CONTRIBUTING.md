@@ -43,7 +43,12 @@ usually a faster path to a change that actually lands.
 
 ## Adding a new `dom.*`/`idb.*`/etc. command
 
-A new leaf command (say, `dom.hover`) touches up to 6 files, in this order:
+Start with `node tools/web-scout/scaffold-command.mjs dom.hover --params selector,nth`
+(add `--mutating` for a write, `--dry-run` to preview): it stubs the handler,
+registry row, CLI entry, `cli-spec` row, help text and MCP action, each marked
+`SCAFFOLD(dom.hover)`. `command-coverage.test.mjs` fails until every marker is
+replaced. The steps below say what each stub has to become. A new leaf command
+(say, `dom.hover`) touches up to 6 files, in this order:
 
 1. **`inject.js`** - add the actual implementation to the `handlers` object
    (`const handlers = { 'dom.query': (...) => {...}, ... }`). This is the
@@ -89,6 +94,11 @@ Run the full test suite before opening a PR (see "Testing" in the README):
 ```bash
 node --test --test-force-exit tools/web-scout/*.test.mjs
 ```
+
+A read handler that narrows what it returns (a filter, a limit, a projection)
+should report what it left out: take the second `ctx` argument and call
+`noteAvoided(ctx, unscopedBytes, deliveredBytes)` (see `idb.dump` in `inject.js`),
+so the saving reaches the `scopedReads` ledger.
 
 Nothing needs to be running: each relay-touching test file starts its own
 ephemeral relay on a free port with a throwaway database, so a green run

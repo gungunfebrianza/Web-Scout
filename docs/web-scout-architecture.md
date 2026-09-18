@@ -1000,3 +1000,24 @@ See `.github/workflows/web-scout-tests.yml`.
   is drawn from a session's own already-logged actions). It supports
   exactly 3 step types (`macro`/`assert`/`diff-golden`); anything more
   structural still needs a hand-written multi-command script.
+
+## Read cache validation and scoped-read accounting (V30)
+
+`inject.js` keeps `pageEpoch`, a counter bumped by a document MutationObserver,
+every fetch/XHR and console entry, and IndexedDB writes (`IDBObjectStore.put/
+add/delete/clear` on call and again on transaction commit, `IDBCursor.update/
+delete`). Every reply carries the value captured BEFORE the handler ran, so a
+change during a handler makes the next probe differ (conservative). The relay
+stores it beside a cached read (`readResultCache`, keyed by agent + type +
+params) and, on a hit, dispatches the tiny `page.epoch` command; equal means
+serve, different means drop the entry and re-read. A page that predates the
+counter has no epoch on its replies and falls back to the old relay-side check.
+
+Scoping handlers take a second `ctx` argument and call
+`noteAvoided(ctx, unscopedBytes, deliveredBytes)`; the message loop puts
+`ctx.avoidedBytes` on the reply as `avoided`. The relay reads `epoch` and
+`avoided` off the reply through WeakMaps keyed by the result object (which
+passes through `withLoggedAction` by reference), so no return shape changes.
+`avoided` feeds `savings_daily` (`scopedReads`); cache hits feed the same table
+(`readCache`) plus the persisted single-row counter.
+

@@ -83,8 +83,12 @@ export async function startTestRelay({ script = path.join(__dirname, 'relay.mjs'
 // expects {kind:'reply', id, ok, result|error} - so relay behavior that needs
 // a connected tab (dispatch, read-result cache, cleanup tracking, token
 // headers) is testable without a browser. `handlers` maps a command type to
-// (params) => result; an unhandled type replies {}.
-export async function connectFakeAgent(port, handlers = {}, { name = 'default' } = {}) {
+// (params) => result; an unhandled type replies {}. Opt in to the page-change
+// counter with `epoch: 0`: replies then carry `epoch: state.epoch`, `page.epoch`
+// answers it, and a test bumps `state.epoch` to simulate the page changing on
+// its own. `state.avoided = n` stamps n avoided bytes on the next reply only.
+export async function connectFakeAgent(port, handlers = {}, { name = 'default', epoch } = {}) {
+  const state = { epoch, avoided: undefined };
   const ws = new WebSocket(`ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(name)}&loadId=fake-agent`);
   const seen = [];
   ws.onmessage = async (ev) => {
@@ -92,9 +96,12 @@ export async function connectFakeAgent(port, handlers = {}, { name = 'default' }
     if (msg.kind !== 'command') return;
     seen.push(msg);
     try {
-      const handler = handlers[msg.type];
+      const handler = handlers[msg.type] ?? (msg.type === 'page.epoch' && state.epoch !== undefined ? () => ({ epoch: state.epoch }) : undefined);
+      const epochBefore = state.epoch;
       const result = handler ? await handler(msg.params ?? {}, msg) : {};
-      ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: true, result }));
+      const avoided = state.avoided;
+      state.avoided = undefined;
+      ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: true, result, ...(epochBefore !== undefined ? { epoch: epochBefore } : {}), ...(avoided ? { avoided } : {}) }));
     } catch (err) {
       ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: false, error: err.message }));
     }
@@ -106,5 +113,5 @@ export async function connectFakeAgent(port, handlers = {}, { name = 'default' }
     if (h.result?.agents_connected?.includes(name)) break;
     await new Promise((r) => setTimeout(r, 50));
   }
-  return { seen, close: () => ws.close() };
+  return { seen, state, close: () => ws.close() };
 }

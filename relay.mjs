@@ -83,7 +83,7 @@ const MACRO_CONTEXT_SIMILARITY_THRESHOLD = 0.15;
 // idb.snapshot is dispatched via POST /state/snapshot, never this route -
 // not applicable here either way.
 const sessionMutationCounters = new Map(); // sessionId -> counter, bumped on every MUTATING_TYPES dispatch
-const readResultCache = new Map(); // sessionId -> Map(`${type}::${JSON.stringify(params)}` -> { result, mutationCounter, cachedAt })
+const readResultCache = new Map(); // sessionId -> Map(`${agent}::${type}::${JSON.stringify(params)}` -> { result, mutationCounter, pageEpoch, cachedAt })
 // Cache-hit counts/bytes are persisted (db.mjs's bumpReadCacheSavings), so the
 // savings shown by GET /token-report and the dashboard survive a relay restart.
 // A cache hit skips withLoggedAction entirely (see both cache-hit sites
@@ -102,6 +102,63 @@ function getMutationCounter(sessionId) {
 }
 function bumpMutationCounter(sessionId) {
   sessionMutationCounters.set(sessionId, getMutationCounter(sessionId) + 1);
+}
+
+// inject.js stamps every reply with its page-change counter (pageEpoch). The
+// result object is the join key: it passes through withLoggedAction by
+// reference, so the cache can read the epoch without threading it through
+// every return shape.
+const replyEpochs = new WeakMap();
+let readCachePageStaleMisses = 0; // hits the page-change probe turned into misses (this relay run)
+
+const replyAvoided = new WeakMap(); // reply result -> bytes a scoped read left out (inject.js ctx.avoidedBytes)
+const sessionSavingsTally = new Map(); // sessionId -> { scopedCalls, avoidedBytes, cacheHits, cacheBytes } for the end-of-session receipt
+
+function tally(sessionId) {
+  if (!sessionSavingsTally.has(sessionId)) sessionSavingsTally.set(sessionId, { scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0 });
+  return sessionSavingsTally.get(sessionId);
+}
+
+function noteCacheHit(sessionId, bytes) {
+  dbApi.bumpReadCacheSavings(bytes);
+  sessionCacheHitBytes.set(sessionId, (sessionCacheHitBytes.get(sessionId) || 0) + bytes);
+  const t = tally(sessionId);
+  t.cacheHits += 1;
+  t.cacheBytes += bytes;
+}
+
+function noteScopedRead(sessionId, result) {
+  const avoided = result && typeof result === 'object' ? replyAvoided.get(result) : undefined;
+  if (!avoided) return;
+  dbApi.bumpSavingsDaily('scopedReads', avoided);
+  const t = tally(sessionId);
+  t.scopedCalls += 1;
+  t.avoidedBytes += avoided;
+}
+
+const readCacheKey = (agentName, type, params) => (READ_CACHEABLE_TYPES.has(type) ? `${agentName}::${type}::${JSON.stringify(params ?? {})}` : null);
+
+// A hit needs the relay-side mutation counter unchanged AND the page's own
+// change counter unchanged: a page that moved on its own (fetch landed, timer
+// re-render, app wrote IndexedDB) must not be answered from the cache. The
+// probe is one tiny round trip - the saving is the read's payload, not the trip.
+async function lookupReadCache(sessionId, cacheKey, agentName) {
+  const cached = readResultCache.get(sessionId)?.get(cacheKey);
+  if (!cached || cached.mutationCounter !== getMutationCounter(sessionId)) return null;
+  if (cached.pageEpoch === undefined) return cached; // page predates page.epoch - relay-side check only
+  try {
+    const { epoch } = await dispatchCommand('page.epoch', {}, PING_TIMEOUT_MS, agentName);
+    if (epoch === cached.pageEpoch) return cached;
+  } catch { /* unreachable page: fall through to a real dispatch, which reports the real error */ }
+  readResultCache.get(sessionId)?.delete(cacheKey);
+  readCachePageStaleMisses += 1;
+  return null;
+}
+
+function storeReadCache(sessionId, cacheKey, result) {
+  if (!readResultCache.has(sessionId)) readResultCache.set(sessionId, new Map());
+  const pageEpoch = result && typeof result === 'object' ? replyEpochs.get(result) : undefined;
+  readResultCache.get(sessionId).set(cacheKey, { result, mutationCounter: getMutationCounter(sessionId), pageEpoch, cachedAt: new Date().toISOString() });
 }
 
 function goalWordSet(goal) {
@@ -313,7 +370,13 @@ function handleAgentMessage(text, agentName) {
     // does not (see agentsDetail() above).
     const agentEntry = agents.get(agentName);
     if (agentEntry) agentEntry.lastAckAt = Date.now();
-    if (msg.ok) entry.resolve(msg.result);
+    if (msg.ok) {
+      if (msg.result && typeof msg.result === 'object') {
+        if (typeof msg.epoch === 'number') replyEpochs.set(msg.result, msg.epoch);
+        if (typeof msg.avoided === 'number' && msg.avoided > 0) replyAvoided.set(msg.result, msg.avoided);
+      }
+      entry.resolve(msg.result);
+    }
     else entry.reject(new Error(msg.error || 'agent command failed'));
     return;
   }
@@ -1082,8 +1145,10 @@ const routes = [
       sessionCacheAwarenessNudged.delete(sessionId);
       sessionCacheHitBytes.delete(sessionId);
       lastReportedSessionTokens.delete(sessionId);
+      const savingsReceipt = sessionSavingsTally.get(sessionId) ?? { scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0 };
+      sessionSavingsTally.delete(sessionId);
       broadcastUpdate('session', null);
-      return { ...session, replayableActionCount };
+      return { ...session, replayableActionCount, savingsReceipt };
     },
   },
   { method: 'GET', pattern: /^\/sessions$/, handler: async () => dbApi.listSessions() },
@@ -1158,6 +1223,7 @@ const routes = [
         note: 'persisted across relay restarts (counts hits since the read_cache_savings table was added)',
       };
       const cost = dbApi.getActionCostReport();
+      const scoped = dbApi.getScopedReadSavings();
       // Storage-side context for the "storage" ledgers: how big the database
       // actually is on disk (main file + write-ahead log) and what it would
       // have been without dedup. Approximate by nature (SQLite does not
@@ -1175,7 +1241,7 @@ const routes = [
         savings: {
           ...dbSavings,
           runtimeReadCache: runtimeCache,
-          totalEstTokensSaved: dbSavings.totalEstTokensSaved + runtimeCache.estTokensSaved,
+          totalEstTokensSaved: dbSavings.totalEstTokensSaved + runtimeCache.estTokensSaved + scoped.estTokensSaved,
           // The cache skips a page round trip and an action-log row, but the
           // result is still delivered to the caller - a roundtrip saving,
           // not a storage or delivery one.
@@ -1185,11 +1251,20 @@ const routes = [
             bytesSaved: runtimeCache.bytesSaved, estTokensSaved: runtimeCache.estTokensSaved, uniqueBytes: null, logicalBytes: null, reductionPct: null,
             refs: { unique: null, total: runtimeCache.hits, unit: 'cache hits' },
             note: runtimeCache.note,
+          }, {
+            key: 'scopedReads', label: 'Scoped reads', kind: 'delivery', countedInTotal: true,
+            what: 'A read narrowed with --where / --fields / --limit / --url-contains / --meta, or a whole-page selector answered with an outline, returns less than the unscoped call. Counted against the unscoped size the page measured (exact up to 2000 rows, sampled above).',
+            bytesSaved: scoped.bytesSaved, estTokensSaved: scoped.estTokensSaved, uniqueBytes: null, logicalBytes: null, reductionPct: null,
+            refs: { unique: null, total: scoped.calls, unit: 'scoped reads' },
+            note: 'measured against an unscoped call the caller may never have made - an upper bound on what scoping saved them',
           }],
           byKind: {
             ...dbSavings.byKind,
             roundtrip: { bytesSaved: runtimeCache.bytesSaved, estTokensSaved: runtimeCache.estTokensSaved },
+            delivery: { bytesSaved: scoped.bytesSaved, estTokensSaved: scoped.estTokensSaved },
           },
+          readCache: { pageStaleMisses: readCachePageStaleMisses, note: 'hits the page-change probe turned into misses since this relay started' },
+          trend: dbApi.getSavingsTrend(14),
           storageContext: {
             dbFileBytes,
             bytesWithoutDedup: dbFileBytes === null ? null : dbFileBytes + storageSaved,
@@ -1513,13 +1588,11 @@ const routes = [
         // this session) already asked the identical question with nothing
         // mutating in between. Wired through here too now, so a macro's
         // read steps get the exact same cache-hit short-circuit.
-        const cacheKey = READ_CACHEABLE_TYPES.has(step.type) ? `${step.type}::${JSON.stringify(step.params ?? {})}` : null;
+        const cacheKey = readCacheKey(agentName, step.type, step.params);
         if (cacheKey) {
-          const cached = readResultCache.get(session.id)?.get(cacheKey);
-          if (cached && cached.mutationCounter === getMutationCounter(session.id)) {
-            const bytes = JSON.stringify(cached.result).length;
-            dbApi.bumpReadCacheSavings(bytes);
-            sessionCacheHitBytes.set(session.id, (sessionCacheHitBytes.get(session.id) || 0) + bytes);
+          const cached = await lookupReadCache(session.id, cacheKey, agentName);
+          if (cached) {
+            noteCacheHit(session.id, JSON.stringify(cached.result).length);
             results.push({ type: step.type, ok: true, skipped: true, reason: 'read result served from same-session cache', result: cached.result, durationMs: 0 });
             continue;
           }
@@ -1537,10 +1610,8 @@ const routes = [
           // closes that correctness gap, not just enables the cache-hit
           // path above.
           if (MUTATING_TYPES.has(step.type)) bumpMutationCounter(session.id);
-          if (cacheKey) {
-            if (!readResultCache.has(session.id)) readResultCache.set(session.id, new Map());
-            readResultCache.get(session.id).set(cacheKey, { result, mutationCounter: getMutationCounter(session.id), cachedAt: new Date().toISOString() });
-          }
+          noteScopedRead(session.id, result);
+          if (cacheKey) storeReadCache(session.id, cacheKey, result);
           results.push({ type: step.type, ok: true, result, durationMs: Date.now() - stepStartedAt });
         } catch (err) {
           results.push({ type: step.type, ok: false, error: err.message, durationMs: Date.now() - stepStartedAt });
@@ -1632,13 +1703,11 @@ const routes = [
       const session = requireActiveSession();
       const dispatchTimeoutMs = LONG_POLL_TYPES.has(type) ? (Number(params?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS;
 
-      const cacheKey = READ_CACHEABLE_TYPES.has(type) ? `${type}::${JSON.stringify(params ?? {})}` : null;
+      const cacheKey = readCacheKey(agentName, type, params);
       if (cacheKey) {
-        const cached = readResultCache.get(session.id)?.get(cacheKey);
-        if (cached && cached.mutationCounter === getMutationCounter(session.id)) {
-          const bytes = JSON.stringify(cached.result).length;
-          dbApi.bumpReadCacheSavings(bytes);
-          sessionCacheHitBytes.set(session.id, (sessionCacheHitBytes.get(session.id) || 0) + bytes);
+        const cached = await lookupReadCache(session.id, cacheKey, agentName);
+        if (cached) {
+          noteCacheHit(session.id, JSON.stringify(cached.result).length);
           maybeCacheAwarenessNudge(session.id, res);
           return { ...cached.result, __cacheHit: true, __cachedAt: cached.cachedAt };
         }
@@ -1681,16 +1750,14 @@ const routes = [
         };
       } else {
         const { result } = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
+        noteScopedRead(session.id, result);
         broadcastUpdate('action', session.id);
         maybeMidSessionNudge(session.id, res);
         resultOut = result;
       }
 
       if (MUTATING_TYPES.has(type)) bumpMutationCounter(session.id);
-      if (cacheKey) {
-        if (!readResultCache.has(session.id)) readResultCache.set(session.id, new Map());
-        readResultCache.get(session.id).set(cacheKey, { result: resultOut, mutationCounter: getMutationCounter(session.id), cachedAt: new Date().toISOString() });
-      }
+      if (cacheKey) storeReadCache(session.id, cacheKey, resultOut);
       return resultOut;
     },
   },

@@ -611,13 +611,78 @@ const stmtBumpReadCacheSavings = db.prepare('UPDATE read_cache_savings SET hits 
 const stmtGetReadCacheSavings = db.prepare('SELECT hits, bytes_saved FROM read_cache_savings WHERE id = 1');
 
 export function bumpReadCacheSavings(bytes) {
-  stmtBumpReadCacheSavings.run(Math.max(0, Number(bytes) || 0));
+  const n = Math.max(0, Number(bytes) || 0);
+  stmtBumpReadCacheSavings.run(n);
+  bumpSavingsDaily('readCache', n);
 }
 
 export function getReadCacheSavings() {
   const row = stmtGetReadCacheSavings.get();
   const bytesSaved = row?.bytes_saved || 0;
   return { hits: row?.hits || 0, bytesSaved, estTokensSaved: Math.round(bytesSaved / CHARS_PER_TOKEN_ESTIMATE) };
+}
+
+// Per-day buckets of the two saving kinds that only exist at runtime - a read
+// answered from the relay cache, and a scoped read that returned less than the
+// unscoped call would have. Storage-dedup ledgers cannot be bucketed (they are
+// derived from ref counts, not events), so the trend covers delivery only.
+// `bytes` for 'scopedReads' is bytes NOT delivered; for 'readCache' it is the
+// bytes of a hit (still delivered, only the page round trip was skipped).
+db.exec(`
+CREATE TABLE IF NOT EXISTS savings_daily (
+  day   TEXT NOT NULL,
+  key   TEXT NOT NULL,
+  calls INTEGER NOT NULL DEFAULT 0,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, key)
+);
+`);
+const stmtBumpSavingsDaily = db.prepare(`
+  INSERT INTO savings_daily (day, key, calls, bytes) VALUES (?, ?, 1, ?)
+  ON CONFLICT (day, key) DO UPDATE SET calls = calls + 1, bytes = bytes + excluded.bytes
+`);
+const stmtSavingsDailyTotal = db.prepare('SELECT COALESCE(SUM(calls), 0) AS calls, COALESCE(SUM(bytes), 0) AS bytes FROM savings_daily WHERE key = ?');
+const stmtSavingsDailyRange = db.prepare('SELECT day, key, calls, bytes FROM savings_daily WHERE day >= ? ORDER BY day');
+const stmtDeliveredPerDay = db.prepare(`
+  SELECT substr(a.started_at, 1, 10) AS day, COUNT(*) AS calls,
+         SUM(COALESCE(LENGTH(a.result_json), (SELECT byte_length FROM result_blobs WHERE hash = a.result_hash), 0)) AS bytes
+  FROM actions a WHERE a.started_at >= ? GROUP BY day ORDER BY day
+`);
+
+export function bumpSavingsDaily(key, bytes) {
+  stmtBumpSavingsDaily.run(new Date().toISOString().slice(0, 10), key, Math.max(0, Number(bytes) || 0));
+}
+
+export function getScopedReadSavings() {
+  const row = stmtSavingsDailyTotal.get('scopedReads');
+  return { calls: row.calls, bytesSaved: row.bytes, estTokensSaved: Math.round(row.bytes / CHARS_PER_TOKEN_ESTIMATE) };
+}
+
+// Is the read strategy improving? Per day: what callers were actually handed
+// (delivered), what scoped reads left out (avoided), and how much of the
+// would-have-been total that is. Days with no activity are omitted.
+export function getSavingsTrend(days = 14) {
+  const since = new Date(Date.now() - (Math.max(1, days) - 1) * 86400000).toISOString().slice(0, 10);
+  const byDay = new Map();
+  const slot = (day) => {
+    if (!byDay.has(day)) byDay.set(day, { day, calls: 0, deliveredBytes: 0, scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0 });
+    return byDay.get(day);
+  };
+  for (const r of stmtDeliveredPerDay.all(`${since}T00:00:00`)) { const s = slot(r.day); s.calls = r.calls; s.deliveredBytes = r.bytes || 0; }
+  for (const r of stmtSavingsDailyRange.all(since)) {
+    const s = slot(r.day);
+    if (r.key === 'scopedReads') { s.scopedCalls = r.calls; s.avoidedBytes = r.bytes; }
+    if (r.key === 'readCache') { s.cacheHits = r.calls; s.cacheBytes = r.bytes; }
+  }
+  return [...byDay.values()].sort((a, b) => (a.day < b.day ? -1 : 1)).map((s) => {
+    const wouldHave = s.deliveredBytes + s.avoidedBytes;
+    return {
+      ...s,
+      deliveredTokens: Math.round(s.deliveredBytes / CHARS_PER_TOKEN_ESTIMATE),
+      avoidedTokens: Math.round(s.avoidedBytes / CHARS_PER_TOKEN_ESTIMATE),
+      avoidedPct: wouldHave ? Math.round((s.avoidedBytes / wouldHave) * 1000) / 10 : 0,
+    };
+  });
 }
 
 // ---------- sessions ----------

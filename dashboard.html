@@ -445,7 +445,11 @@
   .sv-target { display: block; font-size: 10px; color: var(--ink-muted); word-break: break-all; }
   .sv-bar { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; z-index: 0; background: rgba(41,226,255,.16); }
   .sv-bar-spend { background: rgba(255,157,0,.18); }
-  .sv-tip { color: var(--ink-muted); font-size: 11px; }
+  .sv-trend-row { display: grid; grid-template-columns: 56px 1fr 200px; gap: 8px; align-items: center; padding: 2px 0; font-size: 11px; }
+.sv-trend-bars { display: flex; height: 12px; background: rgba(255,255,255,.04); border-radius: 2px; overflow: hidden; }
+.sv-trend-read { background: rgba(255,157,0,.55); }
+.sv-trend-avoided { background: rgba(0,200,120,.6); }
+.sv-tip { color: var(--ink-muted); font-size: 11px; }
   .sv-tip code { color: var(--accent-alien); }
   #savingsSection table { font-size: 12px; }
 </style>
@@ -537,6 +541,10 @@
   <div class="muted">what each waste-prevention mechanism has saved across every session, split by what it actually measures - and where the spend still is</div>
   <div id="savingsStatStrip" class="hud-stat-strip" style="margin-top:8px;"></div>
   <div id="savingsNote" class="sv-note" hidden></div>
+  <div id="savingsTrendWrap" hidden>
+    <div class="sv-h3">Is it improving? Last 14 days (UTC)</div>
+    <div id="savingsTrend"></div>
+  </div>
   <div class="hud-grid-2" style="margin-top:6px;">
     <div>
       <div class="sv-h3">Savings by mechanism</div>
@@ -1857,7 +1865,7 @@ const SV_KIND_HELP = {
 };
 // How to shrink each big spender - the flags already exist in the CLI/MCP.
 const SV_CUT_HINTS = {
-  'dom.query': 'a specific selector instead of body/main; --meta for tag/id/class only; --full only when needed',
+  'dom.query': 'a specific selector (a whole-page one now returns an outline); --meta for tag/id/class only; --full only when needed',
   'idb.snapshot': '--since <baselineId> returns only the delta; --stores / --where scope it',
   'idb.dump': '--where / --fields / --limit filter in the page',
   'idb.list': 'returns every store name + count - call once, keep the answer',
@@ -1884,19 +1892,22 @@ function renderSavingsPanel(report) {
   const storage = sv.byKind?.storage || { bytesSaved: 0, estTokensSaved: 0 };
   const cache = sv.runtimeReadCache || { hits: 0, bytesSaved: 0 };
   const golden = sv.goldenDiffCache || { cacheHits: 0 };
+  const scoped = sv.byKind?.delivery || { bytesSaved: 0, estTokensSaved: 0 };
   const ctx = sv.storageContext || {};
   const tile = (label, value, hint, band) => `<div class="hud-tile${band ? ` hud-tile-${band}` : ''}" data-hint="${esc(hint)}"><div class="hud-tile-label">${esc(label)}</div><div class="hud-tile-value">${value}</div></div>`;
   el('savingsStatStrip').innerHTML = [
     tile('Read by callers', `~${svNum(spend.estTokens)}`, `Estimated tokens (chars/4) callers actually read off stdout across ${svNum(spend.calls)} calls - the real context-window spend. No ledger below reduces this number.`, 'warn'),
     tile('Disk avoided', svBytes(storage.bytesSaved), `Bytes dedup kept out of webscout.db. About ${svNum(storage.estTokensSaved)} tokens-EQUIVALENT (bytes / 4) - a storage saving, not tokens a caller avoided.`, 'ok'),
     tile('DB size cut', ctx.reductionPct === null || ctx.reductionPct === undefined ? '-' : `${ctx.reductionPct}%`, ctx.dbFileBytes ? `webscout.db is ${svBytes(ctx.dbFileBytes)} on disk; without dedup it would be about ${svBytes(ctx.bytesWithoutDedup)} (approximate - SQLite keeps freed pages).` : 'database size unavailable', 'ok'),
+    tile('Left out by scoping', `~${svNum(scoped.estTokensSaved)}`, `Tokens (bytes / 4) that scoped reads (--where / --fields / --limit / --meta / whole-page outline) did not return, measured against the unscoped call in the page. An upper bound: the caller may never have made the unscoped call.`, 'ok'),
     tile('Read-cache hits', svNum(cache.hits), `Repeat reads answered from memory (${svBytes(cache.bytesSaved)} not re-fetched from the page). The caller still received the full result - a round-trip saving, not a token one.`),
     tile('Golden-diff hits', svNum(golden.cacheHits), 'Repeat diff-golden checks answered with a pointer instead of the whole diff body again - a genuine delivery saving (excluded from the totals: it overlaps Action results).'),
   ].join('');
 
   const note = el('savingsNote');
   note.hidden = false;
-  note.innerHTML = `<strong>How to read this.</strong> Callers read ~${svNum(spend.estTokens)} estimated tokens; dedup kept ~${svBytes(storage.bytesSaved)} off disk (${svNum(storage.estTokensSaved)} tokens-<em>equivalent</em>${ctx.reductionPct !== null && ctx.reductionPct !== undefined ? `, ${ctx.reductionPct}% of the database` : ''}). Those are different currencies: dedup makes the database smaller, it does not shrink what a call returns. Not measured anywhere: bytes a caller avoided by scoping a call (<code>--where</code>, <code>--fields</code>, <code>--limit</code>, <code>--since</code>, <code>--meta</code>) - that spend is never incurred, so no ledger sees it.`;
+  note.innerHTML = `<strong>How to read this.</strong> Callers read ~${svNum(spend.estTokens)} estimated tokens; dedup kept ~${svBytes(storage.bytesSaved)} off disk (${svNum(storage.estTokensSaved)} tokens-<em>equivalent</em>${ctx.reductionPct !== null && ctx.reductionPct !== undefined ? `, ${ctx.reductionPct}% of the database` : ''}). Those are different currencies: dedup makes the database smaller, it does not shrink what a call returns. The one delivery-side saving is <em>Scoped reads</em> (<code>--where</code>, <code>--fields</code>, <code>--limit</code>, <code>--meta</code>, whole-page outlines): measured in the page against the unscoped call, so it is an upper bound. <code>--since</code> and other server-side scoping are not measured.`;
+  renderSavingsTrend(sv.trend || []);
 
   const counted = sv.ledgers.filter((l) => l.countedInTotal);
   const maxSaved = Math.max(1, ...counted.map((l) => l.bytesSaved));
@@ -1937,12 +1948,25 @@ function renderSavingsPanel(report) {
       <td class="sv-tip">${SV_CUT_HINTS[t.type] ? esc(SV_CUT_HINTS[t.type]) : '<span class="muted">-</span>'}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">no targets recorded yet</td></tr>';
 }
 
+// One row per active day: what callers were handed (orange) next to what scoped
+// reads left out (green). The percentage is left-out / (handed + left-out).
+function renderSavingsTrend(trend) {
+  const wrap = el('savingsTrendWrap');
+  wrap.hidden = !trend.length;
+  if (!trend.length) return;
+  const max = Math.max(1, ...trend.map((t) => t.deliveredTokens + t.avoidedTokens));
+  el('savingsTrend').innerHTML = trend.map((t) => `<div class="sv-trend-row" title="${esc(`${t.calls} calls, ${svNum(t.deliveredTokens)} tokens delivered, ${svNum(t.avoidedTokens)} tokens left out by ${t.scopedCalls} scoped reads, ${t.cacheHits} cache hits`)}">
+      <span>${esc(t.day.slice(5))}</span>
+      <div class="sv-trend-bars"><div class="sv-trend-read" style="width:${(t.deliveredTokens / max) * 100}%"></div><div class="sv-trend-avoided" style="width:${(t.avoidedTokens / max) * 100}%"></div></div>
+      <span class="sv-nowrap">${svNum(t.deliveredTokens)} read &middot; ${t.avoidedPct}% left out</span></div>`).join('');
+}
+
 let lastSavingsReport = null;
 async function refreshSavings(strict = false) {
   try {
     lastSavingsReport = await api('GET', '/token-report');
     renderSavingsPanel(lastSavingsReport);
-    return panelTickSig('savingsSection', JSON.stringify([lastSavingsReport?.totalEstTokens, (lastSavingsReport?.savings?.ledgers ?? []).map((l) => l.bytesSaved)]));
+    return panelTickSig('savingsSection', JSON.stringify([lastSavingsReport?.totalEstTokens, (lastSavingsReport?.savings?.ledgers ?? []).map((l) => l.bytesSaved), (lastSavingsReport?.savings?.trend ?? []).map((t) => [t.day, t.deliveredBytes, t.avoidedBytes])]));
   } catch (e) {
     // best-effort on the timers - the rest of the dashboard must not depend on this panel; the panel's own refresh button surfaces the failure
     if (strict) throw e;

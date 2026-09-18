@@ -76,7 +76,8 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   session end [id]                 end the given session, or the active one if omitted -
                                    prints a one-line token-cost receipt (calls, estTokens, top
                                    offender type; also a --token-budget warning if declared and
-                                   exceeded) and a "consider macro record" nudge when the
+                                   exceeded), a savings line (scoped reads and cache hits this
+                                   session) and a "consider macro record" nudge when the
                                    session logged 5+ replayable actions (dom.click/fill/wait,
                                    idb.put/delete/deleteMany/clear/wait, page.reload, eval) and
                                    was never saved as one - real repeatable shapes (seed/verify/
@@ -129,9 +130,10 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    id - safe regardless of how much real traffic interleaves.
 
   dom query <selector> [--full] [--meta]
-                                   warns on stderr BEFORE dispatching if selector looks like a
-                                   whole-page/root container (body/html/#app/#root/main/#main/*) -
-                                   likely a huge subtree, worth narrowing before paying for it.
+                                   a whole-page/root container (body/html/#app/#root/main/#main/*)
+                                   returns a depth-limited outline (tag#id.class [children, text
+                                   chars]) instead of markup - query a listed child to drill in;
+                                   --full returns the raw markup for it.
                                    outerHTML + basic attrs for the first match. outerHTML/text
                                    default-capped at 2000/1000 chars (outerHTMLTruncated/
                                    textTruncated say whether anything was actually cut) -
@@ -568,9 +570,12 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   dashboard                       print the dashboard URL (open it in a browser)
   (read-only commands - idb dump/get/list, dom query/rect/style, net log, console log,
    react inspect/tree - are
-   answered from an in-relay cache when called twice IN A ROW with identical args and no
-   mutating command (click/fill/eval/idb.put/patch/delete/clear/page.reload) ran in between.
-   Result carries __cacheHit:true when this happened - never dispatched to the page twice for
+   answered from an in-relay cache when called twice IN A ROW with identical args (same tab)
+   and no mutating command (click/fill/eval/idb.put/patch/delete/clear/page.reload) ran in
+   between AND the page did not change on its own: every hit is first checked against the
+   page's own change counter (DOM mutations, fetch/XHR and console entries, IndexedDB
+   writes), so a page that moved by itself is re-read, never served stale. Result carries
+   __cacheHit:true when this happened - never dispatched to the page twice for
    nothing the page could possibly have changed. The FIRST time this fires in a session, a
    one-time stderr NOTE explains it and points at "token-report"'s savings block. Separately,
    any result byte-identical to one already seen - even in a DIFFERENT session - is physically
@@ -591,7 +596,13 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    params.macroId (non-macro calls bucket under macroId: null), to
                                    pinpoint WHICH replayed macro/CRV phase actually cost the tokens
                                    instead of only the command type. The all-time form (no
-                                   --session) ALSO carries a "savings" block - real, measured
+                                   --session) ALSO carries a "savings" block - a "trend" of the
+                                   last 14 days (per day: tokens delivered to callers, tokens
+                                   scoped reads left out, avoidedPct, cache hits) that shows
+                                   whether the read strategy is improving, a scopedReads ledger
+                                   (what --where/--fields/--limit/--url-contains/--meta and
+                                   whole-page outlines left out, vs the unscoped call the page
+                                   measured), and real, measured
                                    proof of what the mechanisms below actually saved: resultDedup
                                    (bytesSaved/estTokensSaved never physically duplicated on disk),
                                    goldenDiffCache (bytes never re-sent for a repeat diff-golden
