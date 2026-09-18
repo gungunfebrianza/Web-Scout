@@ -425,6 +425,24 @@ The **Action log** panel is built for fast debugging:
 - Collapse threshold for runs of identical actions is configurable in
   Settings > Display
 
+Every dashboard panel shares one header, so these work the same everywhere:
+
+- **Collapse** a panel by clicking its title (remembered per browser); empty
+  panels fold themselves down to a title row and reopen when data arrives
+  (Settings > Panels turns this off)
+- **Count and failure badges** in the title ("Console 42, 3 errors"), a
+  **freshness stamp** ("2s", "stale 40s" if the relay stops answering,
+  "frozen" once a session has ended) and corner brackets that turn red for a
+  failure you have not scrolled to yet
+- A sticky **jump bar** with a chip per panel: red failure count, `+N` for
+  new rows while the panel is offscreen, click to jump (the URL hash is a
+  deep link, e.g. `/dashboard#netSection`), plus **Collapse all**
+- Per-panel tools: **height** cycle (compact/normal/tall/auto), **maximize**
+  (Esc closes), **pause** (Timeline, Snapshots, Diffs, Console, Network,
+  Verity), **refresh now**, and **export** (Markdown/JSON copy, JSON download)
+- **Settings > Panels** shows, hides and reorders panels
+- **Print** (or the browser's save-as-PDF) gives a light, fully expanded report
+
 ## Security model, in short
 
 - The relay only ever binds to `127.0.0.1` - never reachable over the

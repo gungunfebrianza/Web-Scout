@@ -123,6 +123,74 @@
   .hud-scroll-body { max-height: 420px; overflow-y: auto; }
   @media (max-width: 900px) { .hud-grid-2 { grid-template-columns: 1fr; } }
 
+  /* ---- panel shell: shared head, collapse, counts, freshness, maximize, nav ---- */
+  .hud-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 0 4px; align-items: start; }
+  .hud-panels > .hud-wide { grid-column: 1 / -1; }
+  .hud-panels > .hud-section { min-width: 0; }
+  .hud-toggle svg { width: 12px; height: 12px; }
+  @media (max-width: 900px) { .hud-panels { grid-template-columns: 1fr; } }
+  .hud-section { scroll-margin-top: calc(var(--hud-nav-h, 34px) + 6px); }
+  .hud-section.panel-hidden { display: none !important; }
+  .hud-section-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; margin: 2px 0 8px; min-height: 24px; cursor: pointer; user-select: none; }
+  .hud-section-head h2 { margin: 0; }
+  .hud-section.collapsed > .hud-section-head, .hud-section.auto-collapsed > .hud-section-head { margin-bottom: 0; }
+  .hud-section.collapsed > .hud-section-body, .hud-section.auto-collapsed > .hud-section-body { display: none; }
+  .hud-toggle { background: none; border: none; box-shadow: none; padding: 2px; line-height: 0; color: var(--ink-muted); }
+  .hud-toggle:hover { border: none; box-shadow: none; color: var(--accent-info); }
+  .hud-chevron { display: inline-block; transition: transform .15s; }
+  .hud-section.collapsed .hud-chevron, .hud-section.auto-collapsed .hud-chevron { transform: rotate(-90deg); }
+  .hud-count, .hud-fail, .hud-new { font-size: 10px; line-height: 16px; padding: 0 7px; border-radius: 9px; border: 1px solid var(--border-hud); white-space: nowrap; letter-spacing: .03em; }
+  .hud-count { color: var(--ink-muted); background: var(--bg-panel-raised); }
+  .hud-count.is-empty-badge { font-style: italic; opacity: .7; }
+  .hud-fail { color: var(--fail-fg); background: var(--fail-bg); border-color: var(--accent-danger); }
+  .hud-new { color: var(--warn-fg); background: var(--warn-bg); border-color: var(--accent-predator); cursor: pointer; text-transform: none; font-family: inherit; }
+  .hud-fresh { margin-left: auto; font-size: 10px; color: var(--ink-muted); white-space: nowrap; }
+  .hud-fresh::before { content: ''; display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--accent-alien); margin-right: 4px; vertical-align: middle; }
+  .hud-fresh.stale { color: var(--accent-predator); }
+  .hud-fresh.stale::before { background: var(--accent-predator); }
+  .hud-fresh.idle::before { background: var(--ink-muted); }
+  .hud-tools { display: flex; align-items: center; gap: 4px; opacity: .55; transition: opacity .15s; }
+  .hud-section:hover .hud-tools, .hud-section:focus-within .hud-tools, .hud-section.maximized .hud-tools { opacity: 1; }
+  @media (hover: none) { .hud-tools { opacity: 1; } }
+  .hud-btn { padding: 3px 5px; line-height: 0; }
+  .hud-btn svg { width: 12px; height: 12px; }
+  .hud-btn[aria-pressed="true"] { border-color: var(--accent-predator); color: var(--accent-predator); }
+  .hud-btn.spin svg { animation: spin .7s linear infinite; }
+  select.hud-export { font-size: 11px; padding: 2px 4px; max-width: 78px; }
+  .hud-section[data-state="fail"]::before, .hud-section[data-state="fail"]::after { border-color: var(--accent-danger); opacity: 1; box-shadow: 0 0 6px rgba(255,42,61,.55); }
+  .hud-section[data-state="stale"]::before, .hud-section[data-state="stale"]::after { border-color: var(--ink-muted); border-style: dashed; opacity: .6; }
+  .hud-scroll-body thead th { position: sticky; top: 0; z-index: 2; background: var(--bg-panel); border-bottom: none; box-shadow: inset 0 -1px 0 var(--accent-predator); }
+  .hud-section[data-h="compact"] .hud-scroll-body { max-height: 200px; }
+  .hud-section[data-h="tall"] .hud-scroll-body { max-height: 760px; }
+  .hud-section[data-h="auto"] .hud-scroll-body { max-height: none; overflow: visible; }
+  .hud-section[data-h="auto"] .hud-scroll-body thead th { top: var(--hud-nav-h, 34px); }
+  #hudBackdrop { position: fixed; inset: 0; background: rgba(5,7,10,.85); z-index: 8999; }
+  .hud-section.maximized { position: fixed; inset: 16px; z-index: 9000; margin: 0; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 0 40px rgba(0,0,0,.8), var(--glow-predator); }
+  .hud-section.maximized > .hud-section-body { flex: 1; min-height: 0; overflow: auto; }
+  .hud-section.maximized .hud-scroll-body { max-height: none; overflow: visible; }
+  .hud-section.maximized .hud-scroll-body thead th { top: 0; }
+  body.has-maximized { overflow: hidden; }
+  .hud-nav { position: sticky; top: 0; z-index: 60; display: flex; align-items: center; gap: 8px; margin: 0 -16px 6px; padding: 4px 16px; background: var(--bg-void); border-bottom: 1px solid var(--border-hud); }
+  .hud-nav-chips { display: flex; gap: 4px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+  .hud-chip { display: inline-flex; align-items: center; gap: 4px; flex: none; padding: 2px 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-muted); border: 1px solid var(--border-hud); border-radius: 10px; background: var(--bg-panel-raised); text-decoration: none; }
+  .hud-chip:hover { color: var(--accent-info); border-color: var(--accent-info); }
+  .hud-chip.active { color: var(--accent-predator); border-color: var(--accent-predator); }
+  .hud-chip.chip-empty { opacity: .45; }
+  .hud-chip .chip-fail { color: var(--fail-fg); background: var(--fail-bg); border-radius: 8px; padding: 0 5px; font-size: 10px; }
+  .hud-chip .chip-new { color: var(--warn-fg); background: var(--warn-bg); border-radius: 8px; padding: 0 5px; font-size: 10px; }
+  .hud-nav-tools { display: flex; gap: 4px; flex: none; }
+  .hud-nav-tools button { font-size: 11px; padding: 2px 8px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent-info); outline-offset: 2px; }
+  .hud-section-head:focus-within .hud-toggle { color: var(--accent-info); }
+  .panels-list { list-style: none; margin: 8px 0; padding: 0; }
+  .panels-list li { display: flex; align-items: center; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--border-hud); }
+  .panels-list li .panels-name { flex: 1; }
+  .panels-list li.is-hidden .panels-name { opacity: .45; text-decoration: line-through; }
+  .panels-list button { padding: 1px 7px; font-size: 11px; }
+  .settings-tab input[type="checkbox"] { width: auto; }
+  .settings-tab label.inline { display: flex; align-items: center; gap: 8px; }
+
   /* ---- action log: target summary, gaps, duration bars, agent chips, toolbar ---- */
   #actionsTable td.act-result { max-width: 300px; }
   #actionsTable td:first-child, #actionsTable td:nth-child(2) { white-space: nowrap; }
@@ -322,7 +390,8 @@
   @keyframes hud-sweep-sequence { 0% { top: 0; opacity: 1; } 100% { top: 100%; opacity: 0; } }
   .hud-section.just-updated::before, .hud-section.just-updated::after { border-color: var(--accent-alien); box-shadow: 0 0 8px var(--accent-alien); }
   @media (prefers-reduced-motion: reduce) {
-    body::before, .hud-pulse, .radar-sweep, .spinner, .skeleton-row .skeleton-bar { animation: none !important; }
+    body::before, .hud-pulse, .radar-sweep, .spinner, .skeleton-row .skeleton-bar, .hud-btn.spin svg { animation: none !important; }
+    .hud-chevron, .hud-tools { transition: none; }
     #hudSweepBar.sweep-run { animation: none !important; opacity: 0 !important; }
   }
   dialog#settingsDialog { background: var(--bg-panel); color: var(--ink-primary); border: 1px solid var(--border-hud); border-radius: 4px; padding: 16px; max-width: 640px; width: 90vw; position: relative; }
@@ -339,6 +408,25 @@
   .settings-tab input { width: 200px; }
   #serverConfigView td { padding: 4px 10px 4px 0; border: none; vertical-align: top; }
   #aboutContent p { margin: 6px 0; }
+
+  /* ---- print / "save as PDF": light palette, every user-collapsed panel expanded, no chrome ---- */
+  @media print {
+    :root { color-scheme: light; --bg-void: #fff; --bg-panel: #fff; --bg-panel-raised: #f3f5f4; --bg-panel-inset: #f3f5f4; --border-hud: #c9d2cc; --accent-predator: #a85d00; --accent-alien: #1d7a1d; --accent-danger: #c4121f; --accent-info: #0a5a73; --ink-primary: #111; --ink-muted: #555; --ok-bg: #dff5df; --fail-bg: #fbe0e2; --warn-bg: #fdeccf; --active-bg: #d9eef5; }
+    body { padding: 0; font-size: 11px; }
+    body::before, #hudSweepBar, #wsToast, #hudBackdrop, .hud-nav, .hud-tools, .hud-new, .hud-fresh, .hud-toggle, dialog, .radar-sweep, #hudRadar, .hud-radar-legend, .actions-toolbar, .kbd-hint, #dbVersionToggle, #wasteToggle, #frictionToggle, #dbVersionReloadBtn, #askForm, #hudSparkline, .verity-dropzone { display: none !important; }
+    pre, .hud-section, .hud-scroll-body { background: #fff !important; color: #111 !important; }
+    .hud-section.collapsed > .hud-section-body { display: block !important; }
+    .hud-section.auto-collapsed > .hud-section-body { display: none !important; }
+    .hud-section.collapsed .hud-chevron { transform: none; }
+    .hud-scroll-body { max-height: none !important; overflow: visible !important; }
+    .hud-scroll-body thead th { position: static; }
+    .hud-section { break-inside: auto; margin-bottom: 10px; box-shadow: none !important; }
+    .hud-section.maximized { position: static; inset: auto; box-shadow: none; display: block; }
+    .hud-section-head { break-after: avoid; }
+    .hud-panels { display: block; }
+    tr { break-inside: avoid; }
+    .hud-section::before, .hud-section::after { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -385,20 +473,30 @@
   </div>
 </div>
 
+<nav id="hudNav" class="hud-nav" aria-label="Jump to panel">
+  <div id="hudNavChips" class="hud-nav-chips"></div>
+  <div class="hud-nav-tools">
+    <button type="button" id="hudCollapseAll" title="Collapse every panel down to its title row (or expand them all again)">Collapse all</button>
+    <button type="button" id="hudPanelsBtn" title="Show, hide and reorder panels">Panels</button>
+    <button type="button" id="hudPrintBtn" title="Print / save as PDF - every panel expanded, light palette">Print</button>
+  </div>
+</nav>
+<div id="hudLive" class="sr-only" role="status" aria-live="polite"></div>
+
 <section class="hud-section" id="allSessionsHero">
   <h2>All sessions</h2>
   <div id="allSessionsStatStrip" class="hud-stat-strip"></div>
 </section>
 
 <div class="hud-grid-2">
-  <section class="hud-section hud-scroll-col">
+  <section class="hud-section hud-scroll-col" id="heatmapSection">
   <h2>Failure heatmap</h2>
   <div class="muted">action type &times; last 15 sessions - color = fail rate, brightness = call volume</div>
   <div class="hud-scroll-body" id="heatmapContainer"></div>
   <div id="heatmapEmpty" class="empty" hidden>No actions recorded yet.</div>
   </section>
 
-  <section class="hud-section hud-scroll-col">
+  <section class="hud-section hud-scroll-col" id="selectorsSection">
   <h2>Recurring selector failures</h2>
   <div class="muted">selectors that failed more than once, linked to the action type they failed on - line thickness = fail count</div>
   <div class="hud-scroll-body" id="selectorGraphContainer"></div>
@@ -406,7 +504,7 @@
   </section>
 </div>
 
-<section class="hud-section">
+<section class="hud-section" id="burnSection">
   <h2>Token burn, all sessions</h2>
   <div class="muted">cumulative estimated tokens across every session, chronological - a red dot marks a session that finished over its own declared budget</div>
   <div id="burnChartContainer"></div>
@@ -414,14 +512,14 @@
 </section>
 
 <div class="hud-grid-2">
-  <section class="hud-section hud-scroll-col">
+  <section class="hud-section hud-scroll-col" id="durationSection">
   <h2>Duration by action type</h2>
   <div class="muted">p50 / p95 / max across every session - spots a type with a long tail, not just a slow single call</div>
   <div class="hud-scroll-body" id="durationChartContainer"></div>
   <div id="durationChartEmpty" class="empty" hidden>No actions recorded yet.</div>
   </section>
 
-  <section class="hud-section hud-scroll-col">
+  <section class="hud-section hud-scroll-col" id="punchcardSection">
   <h2>Activity punchcard</h2>
   <div class="muted">sessions started, by hour of day &times; day of week</div>
   <div class="hud-scroll-body" id="punchcardContainer"></div>
@@ -437,6 +535,7 @@
     </div>
     <div class="settings-tabs row">
       <button type="button" class="settings-tab-btn" data-tab="Display">Display</button>
+      <button type="button" class="settings-tab-btn" data-tab="Panels">Panels</button>
       <button type="button" class="settings-tab-btn" data-tab="Server">Server config</button>
       <button type="button" class="settings-tab-btn" data-tab="About">About / Project</button>
       <div id="settingsTabIndicator" class="settings-tab-indicator"></div>
@@ -452,6 +551,16 @@
       <div class="row" style="margin-top:10px;">
         <button type="button" id="settingsApplyBtn">Apply</button>
         <button type="button" id="settingsResetBtn">Reset to defaults</button>
+      </div>
+    </section>
+
+    <section id="settingsTabPanels" class="settings-tab" hidden>
+      <div class="muted">Show, hide and reorder dashboard panels. Applies immediately and is remembered in this browser. Collapse state, height and layout are all stored here.</div>
+      <label class="inline"><input type="checkbox" id="setAutoCollapseEmpty"> Auto-collapse empty panels to their title row (they reopen when data arrives)</label>
+      <div id="panelsListGlobal"></div>
+      <div id="panelsListSession"></div>
+      <div class="row" style="margin-top:10px;">
+        <button type="button" id="panelsResetBtn">Reset layout</button>
       </div>
     </section>
 
@@ -516,7 +625,7 @@
   </div>
 
   <div class="hud-grid-2">
-  <section class="hud-section hud-scroll-col">
+  <section class="hud-section hud-scroll-col" id="timelineSection">
   <h2>Timeline</h2>
   <div class="row" id="timelineKindFilter" style="gap: 4px; margin-bottom: 6px;">
     <button type="button" class="tl-filter-chip active" data-kind="all">All</button>
@@ -557,7 +666,7 @@
   </div>
 
   <div class="hud-grid-2">
-  <section class="hud-section hud-scroll-col">
+  <section class="hud-section hud-scroll-col" id="tokenSection">
   <h2>Token cost (estimated)</h2>
   <div class="muted">chars/4 estimate over each action's own result_json - the same bytes a coding agent reads off stdout. Read-only calls (idb dump/get/list, dom query/rect/style, net log, console log) are served from cache when nothing could have changed since the last identical call - see "token-report" in the CLI help.</div>
   <div id="tokenBudgetBar" hidden style="margin-top:8px;"></div>
@@ -572,7 +681,7 @@
   <div id="tokenCostEmpty" class="empty" hidden>No actions recorded yet.</div>
   </section>
 
-  <section class="hud-section hud-scroll-col">
+  <section class="hud-section hud-scroll-col" id="assertSection">
   <h2>Regression checks</h2>
   <div class="muted">results of <code>session assert</code> - declarative checks against LIVE state (see the CLI's own "session assert" doc)</div>
   <div id="assertRunsList" class="hud-scroll-body" style="margin-top: 4px;"></div>
@@ -625,7 +734,7 @@
   <div id="verityEmpty" class="empty" hidden>No Verity results imported for this session yet.</div>
   </section>
 
-  <section class="hud-section hud-scroll-col">
+  <section class="hud-section hud-scroll-col" id="macrosSection">
   <h2>Macros</h2>
   <div class="row">
     <button id="recordMacroBtn">Record macro from this session</button>
@@ -688,6 +797,8 @@ let lastDiffs = [];
 let lastConsoleEntries = [];
 let lastNetEntries = [];
 let lastVerityRuns = [];
+let lastMacros = [];
+let lastQa = [];
 // Token-cost/budget/trend state (see refreshTokenReport/renderTokenReport
 // below) - lastSessionFull is the full session row (needs token_budget,
 // unlike currentSessionStatus which only tracks its status string).
@@ -1543,6 +1654,7 @@ function applyKbdFocus(scroll) {
 // state noticed reading the dashboard fresh.
 function renderAssertRuns(actions) {
   const runs = actions.filter((a) => a.type === 'session.assert' && Array.isArray(a.result));
+  panelTickSig('assertSection', `${runs.length}:${runs.filter((a) => a.result.every((c) => c.pass)).length}`);
   el('assertRunsEmpty').hidden = runs.length > 0;
   if (!runs.length) { el('assertRunsList').innerHTML = ''; return; }
   const passedCount = runs.filter((a) => a.result.every((c) => c.pass)).length;
@@ -1675,14 +1787,17 @@ function renderTokenReport(report) {
 async function refreshTokenReport() {
   if (!currentSessionId) return;
   try {
-    renderTokenReport(await api('GET', `/sessions/${currentSessionId}/token-report`));
+    const report = await api('GET', `/sessions/${currentSessionId}/token-report`);
+    renderTokenReport(report);
     renderStatStrip();
+    panelTickSig('tokenSection', `${report.totalCalls}:${report.totalEstTokens}`);
   } catch { /* best-effort - a transient fetch failure here shouldn't break the rest of the dashboard */ }
 }
 
 let timelineKindFilter = 'all';
 
 function renderTimeline() {
+  if (panelHold('timelineSection', timelineTotal() - panelState('timelineSection').shownN)) return;
   // Merges the already-fetched panels into one lane by timestamp - answers
   // "which diff came from that click, right after that console error"
   // without cross-referencing 5 separate tables by eye (real friction hit
@@ -1703,6 +1818,8 @@ function renderTimeline() {
       <div class="timeline-label">${esc(i.label)}</div>
       <div>${esc(i.text)}</div>
     </div>`).join('');
+  panelState('timelineSection').shownN = timelineTotal();
+  panelTickSig('timelineSection', `${timelineKindFilter}:${items.length}:${items[0]?.at ?? ''}`);
   renderHud();
 }
 
@@ -1910,6 +2027,7 @@ function renderNetLatencyStrip(entries) {
 }
 
 function renderQA(qa) {
+  lastQa = qa;
   el('qaList').innerHTML = qa.length ? qa.map((q) => `
     <div class="qa-item">
       <div class="qa-q">Q: ${esc(q.question)}</div>
@@ -2026,6 +2144,7 @@ async function refreshVerityRuns() { if (currentSessionId) renderVerityRuns(awai
 
 async function refreshMacros() {
   const macros = await api('GET', '/macros');
+  lastMacros = macros;
   el('macrosEmpty').hidden = macros.length > 0;
   const body = document.querySelector('#macrosTable tbody');
   body.innerHTML = '';
@@ -2064,6 +2183,7 @@ async function refreshMacros() {
     });
     body.appendChild(tr);
   }
+  panelTickSig('macrosSection', `${macros.length}:${macros.map((m) => m.id).join(',')}`);
 }
 
 // Set by refreshSessionMeta, read by refreshSessionDetail - an 'ended'
@@ -2133,32 +2253,34 @@ async function refreshActions() {
   if (actionsPaused && lastActionsFp !== null) {
     pausedLatest = actions;
     updatePausePill();
-    return false;
+    return panelTick('actionsSection', false);
   }
   const fp = fingerprintRows(actions);
-  if (fp === lastActionsFp) return false;
+  if (fp === lastActionsFp) return panelTick('actionsSection', false);
   lastActionsFp = fp;
   renderActions(actions);
   renderAssertRuns(actions);
-  return true;
+  return panelTick('actionsSection', true);
 }
 async function refreshSnapshots() {
   if (!currentSessionId) return false;
   const snapshots = await api('GET', `/sessions/${currentSessionId}/snapshots`);
   const fp = fingerprintRows(snapshots);
-  if (fp === lastSnapshotsFp) return false;
+  if (fp === lastSnapshotsFp) return panelTick('snapshotsSection', false);
+  if (panelHold('snapshotsSection', snapshots.length - lastSnapshots.length)) return false;
   lastSnapshotsFp = fp;
   renderSnapshots(snapshots);
-  return true;
+  return panelTick('snapshotsSection', true);
 }
 async function refreshDiffs() {
   if (!currentSessionId) return false;
   const diffs = await api('GET', `/sessions/${currentSessionId}/diffs`);
   const fp = fingerprintRows(diffs);
-  if (fp === lastDiffsFp) return false;
+  if (fp === lastDiffsFp) return panelTick('diffsSection', false);
+  if (panelHold('diffsSection', diffs.length - lastDiffs.length)) return false;
   lastDiffsFp = fp;
   renderDiffs(diffs);
-  return true;
+  return panelTick('diffsSection', true);
 }
 // Capped server-side (not just discarded client-side after receiving it
 // all) - a long-running session's console/net capture only grows, and this
@@ -2169,38 +2291,41 @@ async function refreshConsole() {
   if (lastConsoleFp === null) showSkeletonRows('consoleTable', 4);
   const entries = await api('GET', `/sessions/${currentSessionId}/console?limit=${settings.consoleNetFetchLimit}`);
   const fp = fingerprintRows(entries);
-  if (fp === lastConsoleFp) return false;
+  if (fp === lastConsoleFp) return panelTick('consoleSection', false);
+  if (panelHold('consoleSection', entries.length - lastConsoleEntries.length)) return false;
   lastConsoleFp = fp;
   renderConsole(entries);
-  return true;
+  return panelTick('consoleSection', true);
 }
 async function refreshNet() {
   if (!currentSessionId) return false;
   if (lastNetFp === null) showSkeletonRows('netTable', 4);
   const entries = await api('GET', `/sessions/${currentSessionId}/net?limit=${settings.consoleNetFetchLimit}`);
   const fp = fingerprintRows(entries);
-  if (fp === lastNetFp) return false;
+  if (fp === lastNetFp) return panelTick('netSection', false);
+  if (panelHold('netSection', entries.length - lastNetEntries.length)) return false;
   lastNetFp = fp;
   renderNet(entries);
-  return true;
+  return panelTick('netSection', true);
 }
 async function refreshQA() {
   if (!currentSessionId) return false;
   const qa = await api('GET', `/sessions/${currentSessionId}/qa`);
   const fp = fingerprintRows(qa);
-  if (fp === lastQaFp) return false;
+  if (fp === lastQaFp) return panelTick('qaSection', false);
   lastQaFp = fp;
   renderQA(qa);
-  return true;
+  return panelTick('qaSection', true);
 }
 async function refreshVerityRuns() {
   if (!currentSessionId) return false;
   const runs = await api('GET', `/sessions/${currentSessionId}/verity-runs`);
   const fp = fingerprintRows(runs);
-  if (fp === lastVerityFp) return false;
+  if (fp === lastVerityFp) return panelTick('veritySection', false);
+  if (panelHold('veritySection', runs.length - lastVerityRuns.length)) return false;
   lastVerityFp = fp;
   renderVerityRuns(runs);
-  return true;
+  return panelTick('veritySection', true);
 }
 
 // refreshSessionDetail() is called both on an actual session switch AND by
@@ -2220,6 +2345,7 @@ async function refreshSessionDetail() {
     expandedActionIds.clear();
     if (actionsPaused) { actionsPaused = false; pausedLatest = null; el('actionsPauseBtn').textContent = 'Pause live'; el('actionsNewPill').hidden = true; }
     kbdFocusKey = null;
+    panelsResetForSession();
     lastActionsFp = lastSnapshotsFp = lastDiffsFp = lastConsoleFp = lastNetFp = lastQaFp = lastVerityFp = null;
     lastDetailSessionId = currentSessionId;
   }
@@ -2237,7 +2363,7 @@ async function refreshSessionDetail() {
 // fired only when a poll tick's fingerprint check found genuinely new data
 // (never on an idle tick, never on a plain session switch) - a glanceable
 // "new evidence just landed, here" cue matching what this tool watches for.
-const SWEEP_SECTION_IDS = ['actionsSection', 'snapshotsSection', 'diffsSection', 'consoleSection', 'netSection', 'qaSection', 'veritySection'];
+const SWEEP_SECTION_IDS = ['actionsSection', 'snapshotsSection', 'diffsSection', 'consoleSection', 'netSection', 'qaSection', 'veritySection', 'tokenSection'];
 function triggerSweep(changedFlags) {
   if (!changedFlags.some(Boolean)) return;
   const bar = el('hudSweepBar');
@@ -2461,6 +2587,7 @@ async function refreshFriction() {
     renderCrossSessionCharts(a);
     renderFriction(a);
     renderTokenTrend();
+    panelTickAnalytics(a);
   } catch {
     // Best-effort - a relay that can't even answer /health has already
     // surfaced its own error via refreshHealth's catch below.
@@ -2613,7 +2740,7 @@ el('actionsTable').addEventListener('click', async (e) => {
       await api('POST', '/ask', { session_id: currentSessionId, question: `Why did action #${a.id} (${a.type}) fail with: ${clip(a.error, 500)} ? What should I try next?` });
       if (status) status.textContent = 'answered - see Q&A below';
       await refreshQA();
-      el('qaSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      goToPanel('qaSection', { updateHash: false });
     } catch (err) {
       if (status) status.textContent = 'ask failed: ' + err.message;
     } finally {
@@ -2861,6 +2988,657 @@ function restartPolling() {
   refreshAllTimer = setInterval(refreshAll, settings.pollIntervalMs);
 }
 
+// ---------- Panel shell ----------
+// Every .hud-section panel shares one head (collapse chevron, title, count +
+// failure badges, freshness stamp, "N new" pill, per-panel tools) and one
+// body. The head is built here at load time from the PANELS registry rather
+// than hand-written into 17 <section>s, so a new panel is one registry entry.
+// Prefs (collapsed/hidden/height/order) live in localStorage; runtime state
+// (loaded, freshness, unseen counts, pause) is per-page-load only.
+const PANEL_PREFS_KEY = 'webscoutPanelPrefs';
+const PANEL_HEIGHTS = ['compact', 'normal', 'tall', 'auto'];
+const PANEL_ICONS = {
+  chevron: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4.5 6 8l3.5-3.5"/></svg>',
+  refresh: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 6a4 4 0 1 1-1.2-2.85"/><path d="M10 1.5v2.2H7.8"/></svg>',
+  pause: '<svg viewBox="0 0 12 12" fill="currentColor"><rect x="2.5" y="2" width="2.6" height="8" rx=".5"/><rect x="6.9" y="2" width="2.6" height="8" rx=".5"/></svg>',
+  play: '<svg viewBox="0 0 12 12" fill="currentColor"><path d="M3 1.8v8.4L10 6z"/></svg>',
+  max: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 4.5v-3h3M7.5 1.5h3v3M10.5 7.5v3h-3M4.5 10.5h-3v-3"/></svg>',
+  restore: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 1.5v3h-3M10.5 4.5h-3v-3M7.5 10.5v-3h3M1.5 7.5h3v3"/></svg>',
+  height: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 1.5v9M3.5 4 6 1.5 8.5 4M3.5 8 6 10.5 8.5 8"/></svg>',
+};
+
+const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+const isErrLevel = (l) => /error|uncaught|unhandledrejection/.test(l || '');
+const timelineTotal = () => lastActions.length + lastSnapshots.length + lastDiffs.length + lastConsoleEntries.length + lastNetEntries.length + lastVerityRuns.length;
+const assertRuns = () => lastActions.filter((a) => a.type === 'session.assert' && Array.isArray(a.result));
+const analyticsRows = (pick) => { const a = lastAnalyticsData; return a ? pick(a) : null; };
+
+// Registry order = default on-screen order. `count` returns {n, fail?, text?,
+// title?} or null when nothing is loaded; `exportRows` returns plain row
+// objects (list responses already redact heavy payloads) or null.
+const PANELS = {
+  allSessionsHero: { group: 'global', wide: true, label: 'Overview', count: () => (lastAnalyticsData ? { n: lastAnalyticsData.totals.sessions, title: 'sessions ever recorded' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => Object.entries(a.totals).map(([metric, value]) => ({ metric, value }))) },
+  heatmapSection: { group: 'global', label: 'Heatmap', autoEmpty: true, count: () => (lastAnalyticsData ? { n: lastAnalyticsData.heatmap?.types?.length ?? 0, title: 'action types tracked' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.heatmap?.cells ?? []) },
+  selectorsSection: { group: 'global', label: 'Selectors', autoEmpty: true, failLabel: 'recurring', count: () => { const n = lastAnalyticsData?.topFailedSelectors?.length; return n === undefined ? null : { n, fail: n, title: 'selectors that failed more than once' }; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.topFailedSelectors ?? []) },
+  burnSection: { group: 'global', wide: true, label: 'Burn', autoEmpty: true, failLabel: 'over budget', count: () => { const t = lastAnalyticsData?.sessionTokenTotals; return t ? { n: t.filter((s) => s.totalEstTokens > 0).length, fail: t.filter((s) => s.tokenBudget && s.totalEstTokens > s.tokenBudget).length, title: 'sessions with recorded token use' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.sessionTokenTotals ?? []) },
+  durationSection: { group: 'global', label: 'Duration', autoEmpty: true, count: () => (lastAnalyticsData ? { n: lastAnalyticsData.durationByType?.length ?? 0, title: 'action types with timing data' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.durationByType ?? []) },
+  punchcardSection: { group: 'global', label: 'Punchcard', autoEmpty: true, count: () => (lastAnalyticsData ? { n: (lastAnalyticsData.activityPunchcard ?? []).flat().reduce((s, v) => s + v, 0), title: 'sessions started' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => (a.activityPunchcard ?? []).flatMap((hours, day) => hours.map((count, hour) => ({ day: PUNCHCARD_DAY_LABELS[day], hour, count })).filter((r) => r.count))) },
+  timelineSection: { group: 'session', label: 'Timeline', autoEmpty: true, pausable: true, count: () => ({ n: timelineTotal(), title: 'events merged from every panel' }), refresh: async () => { renderTimeline(); } },
+  actionsSection: { group: 'session', label: 'Actions', autoEmpty: true, failLabel: 'failed', count: () => ({ n: lastActions.length, fail: lastActions.filter((a) => !a.ok).length, title: 'actions recorded' }), refresh: () => refreshActions() },
+  tokenSection: { group: 'session', label: 'Tokens', autoEmpty: true, failLabel: 'over budget', count: () => { const r = lastTokenReport; if (!r) return null; const budget = lastSessionFull?.token_budget; return { n: r.totalCalls, text: `~${fmtK(r.totalEstTokens)} tok`, fail: budget && r.totalEstTokens > budget ? 1 : 0, title: `${r.totalCalls} call(s), ~${r.totalEstTokens} estimated tokens` }; }, refresh: () => refreshTokenReport(), exportRows: () => lastTokenReport?.byType ?? null },
+  assertSection: { group: 'session', label: 'Asserts', autoEmpty: true, failLabel: 'failing', count: () => { const runs = assertRuns(); return { n: runs.length, fail: runs.filter((a) => !a.result.every((c) => c.pass)).length, title: 'session assert runs' }; }, refresh: () => refreshActions(), exportRows: () => assertRuns().map((a) => ({ time: a.started_at, passed: a.result.every((c) => c.pass), checks: a.result.length, failing: a.result.filter((c) => !c.pass).map((c) => c.detail).join('; ') })) },
+  snapshotsSection: { group: 'session', label: 'Snapshots', autoEmpty: true, pausable: true, count: () => ({ n: lastSnapshots.length, title: 'state snapshots' }), refresh: () => refreshSnapshots(), exportRows: () => lastSnapshots },
+  diffsSection: { group: 'session', label: 'Diffs', autoEmpty: true, pausable: true, count: () => ({ n: lastDiffs.length, title: 'state diffs' }), refresh: () => refreshDiffs(), exportRows: () => lastDiffs },
+  consoleSection: { group: 'session', label: 'Console', autoEmpty: true, pausable: true, failLabel: 'errors', count: () => ({ n: lastConsoleEntries.length, fail: lastConsoleEntries.filter((c) => isErrLevel(c.level)).length, title: 'console entries captured' }), refresh: () => refreshConsole(), exportRows: () => lastConsoleEntries },
+  netSection: { group: 'session', label: 'Network', autoEmpty: true, pausable: true, failLabel: 'errors', count: () => ({ n: lastNetEntries.length, fail: lastNetEntries.filter((n) => (n.status != null && n.status >= 400) || n.error).length, title: 'network entries captured' }), refresh: () => refreshNet(), exportRows: () => lastNetEntries },
+  veritySection: { group: 'session', label: 'Verity', pausable: true, failLabel: 'failing', count: () => ({ n: lastVerityRuns.length, fail: lastVerityRuns.filter((v) => v.passed === false).length, title: 'imported Verity runs' }), refresh: () => refreshVerityRuns(), exportRows: () => lastVerityRuns },
+  macrosSection: { group: 'session', label: 'Macros', sticky: true, count: () => ({ n: lastMacros.length, title: 'recorded macros' }), refresh: () => refreshMacros(), exportRows: () => lastMacros.map((m) => ({ id: m.id, name: m.name, steps: m.steps.length, source_session_id: m.source_session_id, created_at: m.created_at })) },
+  qaSection: { group: 'session', wide: true, label: 'Ask AI', failLabel: 'errors', count: () => ({ n: lastQa.length, fail: lastQa.filter((q) => q.error).length, title: 'questions asked' }), refresh: () => refreshQA(), exportRows: () => lastQa },
+};
+const PANEL_IDS = Object.keys(PANELS);
+// A tick on the key also counts as a fresh fetch for the derived panels
+// listed (their own change signature is still computed by their renderer).
+const PANEL_FEEDS = {
+  actionsSection: ['assertSection', 'timelineSection'], snapshotsSection: ['timelineSection'], diffsSection: ['timelineSection'],
+  consoleSection: ['timelineSection'], netSection: ['timelineSection'], veritySection: ['timelineSection'],
+};
+
+function loadPanelPrefs() {
+  const base = { collapsed: {}, hidden: {}, height: {}, order: {}, autoCollapseEmpty: true };
+  try {
+    const p = JSON.parse(localStorage.getItem(PANEL_PREFS_KEY));
+    if (p && typeof p === 'object') return { ...base, ...p, collapsed: { ...p.collapsed }, hidden: { ...p.hidden }, height: { ...p.height }, order: { ...p.order } };
+  } catch { /* private window / blocked storage - layout just won't persist */ }
+  return base;
+}
+let panelPrefs = loadPanelPrefs();
+function savePanelPrefs() { try { localStorage.setItem(PANEL_PREFS_KEY, JSON.stringify(panelPrefs)); } catch { /* still applies for this page load */ } }
+
+const panelStates = {};
+function panelState(id) {
+  return panelStates[id] || (panelStates[id] = { loaded: false, fetchedAt: 0, newCount: 0, pending: 0, paused: false, inView: false, peek: false, ackFail: 0, lastFail: 0, lastN: 0, shownN: 0, sig: null, count: null, seenTimer: null });
+}
+const headRefs = {};
+let maximizedId = null;
+let pendingHash = null;
+let panelUpdateQueued = false;
+
+function panelCount(id) { try { return PANELS[id].count() ?? null; } catch { return null; } }
+function panelIsPaused(id) { return id === 'actionsSection' ? actionsPaused : panelState(id).paused; }
+function panelIsCollapsed(id) { const s = el(id); return !!s && (s.classList.contains('collapsed') || s.classList.contains('auto-collapsed')) && !s.classList.contains('maximized'); }
+function panelIsSeen(id) { return panelState(id).inView && !document.hidden && !panelIsCollapsed(id); }
+
+function panelTouch(id, markLoaded = true) {
+  const st = panelState(id);
+  st.fetchedAt = Date.now();
+  if (markLoaded && !st.loaded) {
+    st.loaded = true;
+    const c = panelCount(id);
+    st.lastN = c?.n ?? 0;
+    st.lastFail = c?.fail ?? 0;
+  }
+}
+
+function panelArmSeen(id) {
+  const st = panelState(id);
+  clearTimeout(st.seenTimer);
+  st.seenTimer = setTimeout(() => {
+    if (!panelIsSeen(id)) return;
+    st.newCount = 0;
+    st.ackFail = st.count?.fail || 0;
+    schedulePanelUpdate();
+  }, 800);
+}
+
+function flashPanel(id) {
+  const sec = el(id);
+  if (!sec) return;
+  sec.classList.remove('just-updated');
+  void sec.offsetWidth;
+  sec.classList.add('just-updated');
+  setTimeout(() => sec.classList.remove('just-updated'), 700);
+}
+
+// Called by every refresh path with "did the data change". Returns `changed`
+// unchanged so refreshX() can `return panelTick(...)`.
+function panelTick(id, changed) {
+  if (!PANELS[id]) return changed;
+  const st = panelState(id);
+  const first = !st.loaded;
+  panelTouch(id);
+  for (const feed of PANEL_FEEDS[id] || []) panelTouch(feed, false);
+  if (changed && !first) {
+    const n = panelCount(id)?.n ?? 0;
+    const delta = Math.max(1, n - st.lastN);
+    st.lastN = n;
+    if (!panelIsSeen(id)) st.newCount += delta;
+    flashPanel(id);
+  }
+  if (panelIsSeen(id)) panelArmSeen(id);
+  schedulePanelUpdate();
+  return changed;
+}
+function panelTickSig(id, sig) {
+  const st = panelState(id);
+  const changed = st.sig !== null && st.sig !== sig;
+  st.sig = sig;
+  return panelTick(id, changed);
+}
+function panelTickAnalytics(a) {
+  const slices = { allSessionsHero: [a.totals, a.failureRateByType], heatmapSection: a.heatmap, selectorsSection: a.topFailedSelectors, burnSection: a.sessionTokenTotals, durationSection: a.durationByType, punchcardSection: a.activityPunchcard };
+  for (const [id, slice] of Object.entries(slices)) panelTickSig(id, JSON.stringify(slice ?? null));
+}
+
+// While a pausable panel is paused its render is skipped (fingerprint left
+// stale on purpose, so the same fetch is re-detected and rendered on resume);
+// `pending` is how many rows are waiting.
+function panelHold(id, delta) {
+  const st = panelState(id);
+  if (!st.paused || !st.loaded) {
+    if (st.pending) { st.pending = 0; schedulePanelUpdate(); }
+    return false;
+  }
+  st.pending = Math.max(1, delta);
+  st.fetchedAt = Date.now();
+  schedulePanelUpdate();
+  return true;
+}
+function setPanelPaused(id, paused) {
+  const st = panelState(id);
+  st.paused = paused;
+  if (!paused) {
+    st.pending = 0;
+    if (id === 'timelineSection') renderTimeline(); else PANELS[id].refresh?.();
+  }
+  schedulePanelUpdate();
+}
+
+function panelsResetForSession() {
+  for (const id of PANEL_IDS) {
+    if (PANELS[id].group !== 'session' || PANELS[id].sticky) continue;
+    const st = panelState(id);
+    clearTimeout(st.seenTimer);
+    Object.assign(st, { loaded: false, fetchedAt: 0, newCount: 0, pending: 0, paused: false, peek: false, ackFail: 0, lastFail: 0, lastN: 0, shownN: 0, sig: null, count: null });
+  }
+  schedulePanelUpdate();
+}
+
+function orderedPanelIds(group) {
+  const def = PANEL_IDS.filter((id) => PANELS[id].group === group);
+  const saved = (panelPrefs.order[group] || []).filter((id) => def.includes(id));
+  return [...saved, ...def.filter((id) => !saved.includes(id))];
+}
+function applyPanelOrder() {
+  for (const group of ['global', 'session']) {
+    const host = el(group === 'global' ? 'globalPanels' : 'sessionPanels');
+    for (const id of orderedPanelIds(group)) { const s = el(id); if (s) host.appendChild(s); }
+  }
+}
+
+function buildPanelGrids() {
+  const globalHost = document.createElement('div');
+  globalHost.className = 'hud-panels';
+  globalHost.id = 'globalPanels';
+  el('allSessionsHero').before(globalHost);
+  const sessionHost = document.createElement('div');
+  sessionHost.className = 'hud-panels';
+  sessionHost.id = 'sessionPanels';
+  el('sessionPanel').querySelector(':scope > .panel').after(sessionHost);
+  for (const id of PANEL_IDS) el(id)?.classList.toggle('hud-wide', !!PANELS[id].wide);
+  applyPanelOrder();
+  document.querySelectorAll('.hud-grid-2').forEach((g) => { if (!g.children.length) g.remove(); });
+}
+
+function panelBtn(icon, label, key) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'hud-btn';
+  b.dataset.hud = key;
+  b.title = label;
+  b.setAttribute('aria-label', label);
+  b.innerHTML = icon;
+  return b;
+}
+
+function upgradeSection(id) {
+  const meta = PANELS[id];
+  const sec = el(id);
+  const h2 = sec?.querySelector(':scope > h2');
+  if (!h2) return;
+  meta.title = h2.textContent.trim();
+  h2.id = `${id}Title`;
+  sec.setAttribute('aria-labelledby', h2.id);
+  const head = document.createElement('div');
+  head.className = 'hud-section-head';
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'hud-toggle';
+  toggle.setAttribute('aria-expanded', 'true');
+  toggle.setAttribute('aria-controls', `${id}Body`);
+  toggle.innerHTML = `<span class="hud-chevron" aria-hidden="true">${PANEL_ICONS.chevron}</span>`;
+  const count = document.createElement('span');
+  count.className = 'hud-count';
+  count.hidden = true;
+  const fail = document.createElement('span');
+  fail.className = 'hud-fail';
+  fail.hidden = true;
+  const newPill = document.createElement('button');
+  newPill.type = 'button';
+  newPill.className = 'hud-new';
+  newPill.hidden = true;
+  const fresh = document.createElement('span');
+  fresh.className = 'hud-fresh';
+  const tools = document.createElement('div');
+  tools.className = 'hud-tools';
+  const refs = { toggle, count, fail, newPill, fresh };
+  if (meta.exportRows) {
+    const sel = document.createElement('select');
+    sel.className = 'hud-export';
+    sel.title = `Export ${meta.title}`;
+    sel.setAttribute('aria-label', `Export ${meta.title}`);
+    sel.innerHTML = '<option value="">Export…</option><option value="md">Copy Markdown</option><option value="json">Copy JSON</option><option value="dl">Download JSON</option>';
+    tools.append(sel);
+    refs.exportSel = sel;
+  }
+  if (sec.querySelector('.hud-scroll-body')) tools.append((refs.heightBtn = panelBtn(PANEL_ICONS.height, 'Panel height', 'height')));
+  if (meta.pausable) tools.append((refs.pauseBtn = panelBtn(PANEL_ICONS.pause, 'Pause live updates', 'pause')));
+  if (meta.refresh) tools.append((refs.refreshBtn = panelBtn(PANEL_ICONS.refresh, `Refresh ${meta.title} now`, 'refresh')));
+  tools.append((refs.maxBtn = panelBtn(PANEL_ICONS.max, `Maximize ${meta.title}`, 'max')));
+  sec.insertBefore(head, h2);
+  head.append(toggle, h2, count, fail, newPill, fresh, tools);
+  const body = document.createElement('div');
+  body.className = 'hud-section-body';
+  body.id = `${id}Body`;
+  while (head.nextSibling) body.appendChild(head.nextSibling);
+  sec.appendChild(body);
+  headRefs[id] = refs;
+}
+
+function expandPanel(id) {
+  const st = panelState(id);
+  delete panelPrefs.collapsed[id];
+  if (panelPrefs.autoCollapseEmpty && PANELS[id].autoEmpty && st.count && st.count.n === 0) st.peek = true;
+  savePanelPrefs();
+}
+function collapsePanel(id) { panelPrefs.collapsed[id] = true; savePanelPrefs(); }
+function togglePanel(id) {
+  const sec = el(id);
+  if (sec.classList.contains('auto-collapsed')) panelState(id).peek = true;
+  else if (panelPrefs.collapsed[id]) expandPanel(id);
+  else collapsePanel(id);
+  applyPanelChrome();
+  if (panelIsSeen(id)) panelArmSeen(id);
+}
+function visiblePanelIds() { return PANEL_IDS.filter((id) => { const s = el(id); return s && !panelPrefs.hidden[id] && s.getClientRects().length > 0; }); }
+
+function goToPanel(id, { updateHash = true } = {}) {
+  const sec = el(id);
+  if (!sec) return;
+  if (panelPrefs.hidden[id]) { delete panelPrefs.hidden[id]; savePanelPrefs(); }
+  if (panelPrefs.collapsed[id] || sec.classList.contains('auto-collapsed')) expandPanel(id);
+  applyPanelChrome();
+  panelState(id).newCount = 0;
+  sec.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+  if (updateHash) { try { history.replaceState(null, '', `#${id}`); } catch { /* hash is only a convenience */ } }
+  schedulePanelUpdate();
+}
+
+function setMaximized(id) {
+  if (maximizedId) {
+    const prev = el(maximizedId);
+    prev.classList.remove('maximized');
+    prev.removeAttribute('role');
+    prev.removeAttribute('aria-modal');
+    const prevRefs = headRefs[maximizedId];
+    prevRefs.maxBtn.innerHTML = PANEL_ICONS.max;
+    prevRefs.maxBtn.setAttribute('aria-pressed', 'false');
+    prevRefs.maxBtn.focus();
+  }
+  const same = maximizedId === id;
+  maximizedId = same ? null : id;
+  el('hudBackdrop').hidden = !maximizedId;
+  document.body.classList.toggle('has-maximized', !!maximizedId);
+  if (maximizedId) {
+    const sec = el(id);
+    if (panelPrefs.collapsed[id] || sec.classList.contains('auto-collapsed')) expandPanel(id);
+    sec.classList.add('maximized');
+    sec.setAttribute('role', 'dialog');
+    sec.setAttribute('aria-modal', 'true');
+    headRefs[id].maxBtn.innerHTML = PANEL_ICONS.restore;
+    headRefs[id].maxBtn.setAttribute('aria-pressed', 'true');
+    headRefs[id].maxBtn.focus();
+  }
+  applyPanelChrome();
+  schedulePanelUpdate();
+}
+
+function rowsToMarkdown(title, rows) {
+  if (!rows.length) return `## ${title}\n\n_(no rows)_\n`;
+  const cols = [...new Set(rows.flatMap((r) => Object.keys(r)))];
+  const cell = (v) => (v === null || v === undefined ? '' : clip((typeof v === 'object' ? JSON.stringify(v) : String(v)).replace(/\s+/g, ' '), 160).replace(/\|/g, '\\|'));
+  return `## ${title}\n\n| ${cols.join(' | ')} |\n| ${cols.map(() => '---').join(' | ')} |\n${rows.map((r) => `| ${cols.map((c) => cell(r[c])).join(' | ')} |`).join('\n')}\n`;
+}
+function exportPanel(id, mode) {
+  const meta = PANELS[id];
+  const st = panelState(id);
+  const rows = st.loaded ? meta.exportRows() : null;
+  if (!rows || !rows.length) { toast(`${meta.title}: nothing to export`); return; }
+  const slug = id.replace(/Section$/, '');
+  if (mode === 'md') copyText(rowsToMarkdown(meta.title, rows), `${meta.title} (markdown, ${rows.length} rows)`);
+  else if (mode === 'json') copyText(JSON.stringify(rows, null, 2), `${meta.title} (JSON, ${rows.length} rows)`);
+  else if (mode === 'dl') { downloadFile(`webscout-${slug}${meta.group === 'session' && currentSessionId ? `-session-${currentSessionId}` : ''}.json`, JSON.stringify(rows, null, 2), 'application/json'); toast(`${meta.title}: downloaded`); }
+}
+
+async function refreshPanel(id) {
+  const meta = PANELS[id];
+  const btn = headRefs[id].refreshBtn;
+  if (panelIsPaused(id)) { toast(`${meta.title} is paused - resume to refresh`); return; }
+  btn.classList.add('spin');
+  try {
+    const changed = await meta.refresh();
+    toast(`${meta.title}: ${changed === false ? 'already up to date' : 'refreshed'}`);
+  } catch {
+    toast(`${meta.title}: refresh failed`);
+  } finally {
+    btn.classList.remove('spin');
+  }
+}
+
+let announceQueue = [];
+let announceTimer = null;
+function announce(msg) {
+  announceQueue.push(msg);
+  clearTimeout(announceTimer);
+  announceTimer = setTimeout(() => {
+    el('hudLive').textContent = announceQueue.join('. ');
+    announceQueue = [];
+  }, 400);
+}
+
+function fmtAge(ms) {
+  const s = Math.floor(ms / 1000);
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h`;
+}
+
+// Cheap per-second pass: only the freshness text and the corner-bracket
+// state (fail beats stale) - counts are recomputed in updatePanels().
+function updateFreshness() {
+  const now = Date.now();
+  const staleAfter = Math.max((settings.pollIntervalMs || 3000) * 3, 10000);
+  const frozen = currentSessionStatus === 'ended';
+  for (const id of PANEL_IDS) {
+    const sec = el(id);
+    const refs = headRefs[id];
+    if (!sec || !refs) continue;
+    const meta = PANELS[id];
+    const st = panelState(id);
+    let text = '', cls = 'hud-fresh', title = '';
+    if (panelIsPaused(id)) { text = 'paused'; cls += ' idle'; title = 'updates are paused'; }
+    else if (meta.group === 'session' && !meta.sticky && frozen && st.fetchedAt) { text = 'frozen'; cls += ' idle'; title = 'session ended - nothing left to fetch'; }
+    else if (st.fetchedAt) {
+      const age = now - st.fetchedAt;
+      const stale = age > staleAfter;
+      text = stale ? `stale ${fmtAge(age)}` : fmtAge(age);
+      title = stale ? `last fetched ${fmtAge(age)} ago - the relay may be unreachable` : `last fetched ${fmtAge(age)} ago`;
+      if (stale) cls += ' stale';
+    }
+    if (refs.fresh.textContent !== text) refs.fresh.textContent = text;
+    if (refs.fresh.className !== cls) refs.fresh.className = cls;
+    refs.fresh.title = title;
+    const unseenFail = (st.count?.fail || 0) > st.ackFail;
+    const state = unseenFail ? 'fail' : cls.includes('stale') ? 'stale' : '';
+    if (state) sec.dataset.state = state; else sec.removeAttribute('data-state');
+  }
+}
+
+// Collapsed/hidden/height classes from prefs + runtime empty state.
+function applyPanelChrome() {
+  for (const id of PANEL_IDS) {
+    const sec = el(id);
+    const refs = headRefs[id];
+    if (!sec || !refs) continue;
+    const meta = PANELS[id];
+    const st = panelState(id);
+    const maximized = sec.classList.contains('maximized');
+    const user = !!panelPrefs.collapsed[id] && !maximized;
+    const auto = !user && !maximized && panelPrefs.autoCollapseEmpty && !!meta.autoEmpty && st.loaded && !st.peek && !!st.count && st.count.n === 0;
+    sec.classList.toggle('collapsed', user);
+    sec.classList.toggle('auto-collapsed', auto);
+    sec.classList.toggle('panel-hidden', !!panelPrefs.hidden[id]);
+    sec.dataset.h = panelPrefs.height[id] || 'normal';
+    const open = !user && !auto;
+    refs.toggle.setAttribute('aria-expanded', String(open));
+    refs.toggle.setAttribute('aria-label', `${open ? 'Collapse' : 'Expand'} ${meta.title}`);
+    if (refs.heightBtn) {
+      const cur = panelPrefs.height[id] || 'normal';
+      const next = PANEL_HEIGHTS[(PANEL_HEIGHTS.indexOf(cur) + 1) % PANEL_HEIGHTS.length];
+      refs.heightBtn.title = `Height: ${cur} - click for ${next}`;
+      refs.heightBtn.setAttribute('aria-label', refs.heightBtn.title);
+    }
+    refs.maxBtn.title = maximized ? `Restore ${meta.title} (Esc)` : `Maximize ${meta.title}`;
+    refs.maxBtn.setAttribute('aria-label', refs.maxBtn.title);
+  }
+}
+
+function updatePanels() {
+  panelUpdateQueued = false;
+  for (const id of PANEL_IDS) {
+    const refs = headRefs[id];
+    if (!refs) continue;
+    const meta = PANELS[id];
+    const st = panelState(id);
+    const c = st.loaded ? panelCount(id) : null;
+    st.count = c;
+    if (c && c.n > 0) st.peek = false;
+    const fail = c?.fail || 0;
+    if (fail < st.ackFail) st.ackFail = fail;
+    if (st.loaded && fail > st.lastFail) announce(`${meta.title}: ${fail - st.lastFail} new, ${fail} ${meta.failLabel || 'failed'} total`);
+    st.lastFail = fail;
+    if (!c) refs.count.hidden = true;
+    else {
+      refs.count.hidden = false;
+      refs.count.textContent = c.n === 0 ? 'empty' : (c.text ?? String(c.n));
+      refs.count.className = c.n === 0 ? 'hud-count is-empty-badge' : 'hud-count';
+      refs.count.title = c.n === 0 ? 'nothing here yet - click the title to peek' : (c.title || '');
+    }
+    refs.fail.hidden = !fail;
+    refs.fail.textContent = `${fail} ${meta.failLabel || 'failed'}`;
+    const paused = panelIsPaused(id);
+    if (paused && st.pending > 0) { refs.newPill.hidden = false; refs.newPill.dataset.mode = 'resume'; refs.newPill.textContent = `${st.pending} new - resume`; }
+    else if (st.newCount > 0) { refs.newPill.hidden = false; refs.newPill.dataset.mode = 'jump'; refs.newPill.textContent = `${st.newCount} new`; }
+    else refs.newPill.hidden = true;
+    if (refs.pauseBtn) {
+      refs.pauseBtn.innerHTML = paused ? PANEL_ICONS.play : PANEL_ICONS.pause;
+      refs.pauseBtn.title = paused ? `Resume ${meta.title}` : `Pause ${meta.title} (freeze it while you read)`;
+      refs.pauseBtn.setAttribute('aria-label', refs.pauseBtn.title);
+      refs.pauseBtn.setAttribute('aria-pressed', String(paused));
+    }
+  }
+  applyPanelChrome();
+  updateFreshness();
+  updateNav();
+  if (pendingHash && el(pendingHash)?.getClientRects().length) { const id = pendingHash; pendingHash = null; goToPanel(id, { updateHash: false }); }
+}
+function schedulePanelUpdate() {
+  if (panelUpdateQueued) return;
+  panelUpdateQueued = true;
+  if (document.hidden) setTimeout(updatePanels, 100); else requestAnimationFrame(updatePanels);
+}
+
+// ---- jump nav ----
+function buildNavChips() {
+  const chips = el('hudNavChips');
+  chips.innerHTML = '';
+  for (const group of ['global', 'session']) {
+    for (const id of orderedPanelIds(group)) {
+      const a = document.createElement('a');
+      a.className = 'hud-chip';
+      a.href = `#${id}`;
+      a.dataset.panel = id;
+      a.innerHTML = `<span class="chip-label"></span><span class="chip-fail" hidden></span><span class="chip-new" hidden></span>`;
+      a.querySelector('.chip-label').textContent = PANELS[id].label;
+      chips.appendChild(a);
+    }
+  }
+}
+function updateNav() {
+  const visible = new Set(visiblePanelIds());
+  let active = null;
+  for (const chip of el('hudNavChips').children) {
+    const id = chip.dataset.panel;
+    const st = panelState(id);
+    chip.hidden = !visible.has(id);
+    if (chip.hidden) continue;
+    if (!active && st.inView) active = id;
+    chip.classList.toggle('chip-empty', !!st.count && st.count.n === 0);
+    const fail = st.count?.fail || 0;
+    const f = chip.querySelector('.chip-fail');
+    f.hidden = !fail;
+    f.textContent = fail;
+    f.title = `${fail} ${PANELS[id].failLabel || 'failed'}`;
+    const n = chip.querySelector('.chip-new');
+    const newN = st.newCount + (panelIsPaused(id) ? st.pending : 0);
+    n.hidden = !newN;
+    n.textContent = `+${newN}`;
+    n.title = `${newN} new since you last looked`;
+  }
+  for (const chip of el('hudNavChips').children) chip.classList.toggle('active', chip.dataset.panel === active);
+  const anyOpen = [...visible].some((id) => !panelIsCollapsed(id));
+  el('hudCollapseAll').textContent = anyOpen ? 'Collapse all' : 'Expand all';
+}
+
+// ---- Settings > Panels ----
+function renderPanelsSettings() {
+  el('setAutoCollapseEmpty').checked = panelPrefs.autoCollapseEmpty;
+  for (const group of ['global', 'session']) {
+    const ids = orderedPanelIds(group);
+    el(group === 'global' ? 'panelsListGlobal' : 'panelsListSession').innerHTML =
+      `<h3 style="margin:12px 0 0; font-size:12px; color:var(--accent-info);">${group === 'global' ? 'All-sessions panels' : 'Session panels'}</h3><ul class="panels-list">` +
+      ids.map((id, i) => `<li class="${panelPrefs.hidden[id] ? 'is-hidden' : ''}">
+        <input type="checkbox" data-panel-vis="${id}" ${panelPrefs.hidden[id] ? '' : 'checked'} aria-label="Show ${esc(PANELS[id].title)}">
+        <span class="panels-name">${esc(PANELS[id].title)}</span>
+        <button type="button" data-panel-move="${id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(PANELS[id].title)} up">&#9650;</button>
+        <button type="button" data-panel-move="${id}" data-dir="1" ${i === ids.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(PANELS[id].title)} down">&#9660;</button>
+      </li>`).join('') + '</ul>';
+  }
+}
+function movePanel(id, dir) {
+  const group = PANELS[id].group;
+  const ids = orderedPanelIds(group);
+  const i = ids.indexOf(id);
+  const j = i + dir;
+  if (j < 0 || j >= ids.length) return;
+  [ids[i], ids[j]] = [ids[j], ids[i]];
+  panelPrefs.order[group] = ids;
+  savePanelPrefs();
+  applyPanelOrder();
+  buildNavChips();
+  renderPanelsSettings();
+  schedulePanelUpdate();
+}
+
+function initPanelShell() {
+  el('sessionPanel').before(Object.assign(document.createElement('div'), { id: 'hudBackdrop', hidden: true }));
+  buildPanelGrids();
+  for (const id of PANEL_IDS) upgradeSection(id);
+  buildNavChips();
+
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const st = panelState(e.target.id);
+      st.inView = e.isIntersecting;
+      if (st.inView && panelIsSeen(e.target.id)) panelArmSeen(e.target.id);
+    }
+    schedulePanelUpdate();
+  });
+  for (const id of PANEL_IDS) { const s = el(id); if (s) io.observe(s); }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { for (const id of PANEL_IDS) if (panelIsSeen(id)) panelArmSeen(id); schedulePanelUpdate(); } });
+
+  document.addEventListener('click', (e) => {
+    const head = e.target.closest('.hud-section-head');
+    if (head) {
+      const id = head.parentElement.id;
+      if (!PANELS[id]) return;
+      const pill = e.target.closest('.hud-new');
+      if (pill) { if (pill.dataset.mode === 'resume') setPanelPaused(id, false); else { panelState(id).newCount = 0; goToPanel(id); } return; }
+      const btn = e.target.closest('[data-hud]');
+      if (btn) {
+        const k = btn.dataset.hud;
+        if (k === 'max') setMaximized(id);
+        else if (k === 'height') { const cur = panelPrefs.height[id] || 'normal'; panelPrefs.height[id] = PANEL_HEIGHTS[(PANEL_HEIGHTS.indexOf(cur) + 1) % PANEL_HEIGHTS.length]; savePanelPrefs(); applyPanelChrome(); }
+        else if (k === 'pause') setPanelPaused(id, !panelState(id).paused);
+        else if (k === 'refresh') refreshPanel(id);
+        return;
+      }
+      if (e.target.closest('.hud-tools')) return;
+      togglePanel(id);
+      return;
+    }
+    const chip = e.target.closest('a.hud-chip');
+    if (chip) { e.preventDefault(); goToPanel(chip.dataset.panel); }
+    if (e.target.id === 'hudBackdrop' && maximizedId) setMaximized(maximizedId);
+  });
+  document.addEventListener('change', (e) => {
+    const sel = e.target.closest?.('select.hud-export');
+    if (!sel) return;
+    const id = sel.closest('.hud-section').id;
+    const mode = sel.value;
+    sel.value = '';
+    if (mode) exportPanel(id, mode);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && maximizedId && !el('settingsDialog').open) setMaximized(maximizedId);
+  });
+  window.addEventListener('beforeprint', () => { if (maximizedId) setMaximized(maximizedId); });
+  window.addEventListener('hashchange', () => { const id = location.hash.slice(1); if (PANELS[id]) goToPanel(id, { updateHash: false }); });
+
+  el('hudCollapseAll').addEventListener('click', () => {
+    const ids = visiblePanelIds();
+    const anyOpen = ids.some((id) => !panelIsCollapsed(id));
+    for (const id of ids) { if (anyOpen) collapsePanel(id); else expandPanel(id); }
+    applyPanelChrome();
+    schedulePanelUpdate();
+  });
+  el('hudPanelsBtn').addEventListener('click', () => { el('settingsBtn').click(); showSettingsTab('Panels'); });
+  el('hudPrintBtn').addEventListener('click', () => window.print());
+  el('setAutoCollapseEmpty').addEventListener('change', (e) => { panelPrefs.autoCollapseEmpty = e.target.checked; savePanelPrefs(); applyPanelChrome(); schedulePanelUpdate(); });
+  el('panelsResetBtn').addEventListener('click', () => {
+    panelPrefs = { collapsed: {}, hidden: {}, height: {}, order: {}, autoCollapseEmpty: true };
+    savePanelPrefs();
+    applyPanelOrder();
+    buildNavChips();
+    renderPanelsSettings();
+    applyPanelChrome();
+    schedulePanelUpdate();
+  });
+  el('settingsTabPanels').addEventListener('change', (e) => {
+    const vis = e.target.dataset?.panelVis;
+    if (!vis) return;
+    if (e.target.checked) delete panelPrefs.hidden[vis]; else panelPrefs.hidden[vis] = true;
+    if (maximizedId === vis && !e.target.checked) setMaximized(vis);
+    savePanelPrefs();
+    renderPanelsSettings();
+    applyPanelChrome();
+    schedulePanelUpdate();
+  });
+  el('settingsTabPanels').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-panel-move]');
+    if (b) movePanel(b.dataset.panelMove, Number(b.dataset.dir));
+  });
+
+  const nav = el('hudNav');
+  const syncNavHeight = () => document.documentElement.style.setProperty('--hud-nav-h', `${nav.offsetHeight}px`);
+  syncNavHeight();
+  if (window.ResizeObserver) new ResizeObserver(syncNavHeight).observe(nav);
+
+  const hash = location.hash.slice(1);
+  if (PANELS[hash]) pendingHash = hash;
+  setInterval(() => { if (!document.hidden) updateFreshness(); }, 1000);
+  applyPanelChrome();
+  schedulePanelUpdate();
+}
+initPanelShell();
+
 refreshAll();
 connectEvents();
 restartPolling();
@@ -2879,6 +3657,7 @@ function populateSettingsForm() {
 function showSettingsTab(name) {
   document.querySelectorAll('.settings-tab-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === name));
   document.querySelectorAll('.settings-tab').forEach((sec) => { sec.hidden = sec.id !== `settingsTab${name}`; });
+  if (name === 'Panels') renderPanelsSettings();
   const activeBtn = document.querySelector(`.settings-tab-btn[data-tab="${name}"]`);
   const indicator = el('settingsTabIndicator');
   if (activeBtn && indicator) {
