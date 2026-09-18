@@ -123,6 +123,39 @@
   .hud-scroll-body { max-height: 420px; overflow-y: auto; }
   @media (max-width: 900px) { .hud-grid-2 { grid-template-columns: 1fr; } }
 
+  /* ---- action log: target summary, gaps, duration bars, agent chips, toolbar ---- */
+  #actionsTable td.act-result { max-width: 300px; }
+  #actionsTable td:first-child, #actionsTable td:nth-child(2) { white-space: nowrap; }
+  .act-target { display: inline-block; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; margin-left: 6px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-primary); }
+  .act-err { color: var(--accent-danger); font-size: 11px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
+  .tok-badge { color: var(--ink-muted); font-size: 10px; margin-left: 6px; white-space: nowrap; }
+  .tok-badge.tok-heavy { color: var(--accent-predator); font-weight: 600; }
+  .act-gap { display: block; color: var(--ink-muted); font-size: 10px; font-style: italic; }
+  .agent-chip { display: inline-block; padding: 0 6px; border-radius: 9px; font-size: 11px; border: 1px solid var(--border-hud); color: var(--ink-muted); }
+  .agent-chip[style*="--h"] { color: hsl(var(--h) 70% 68%); border-color: hsl(var(--h) 45% 28%); background: hsl(var(--h) 45% 12%); }
+  .dur-cell { position: relative; min-width: 56px; }
+  .dur-fill { position: absolute; left: 0; top: 1px; bottom: 1px; background: var(--bg-panel-raised); border-radius: 2px; z-index: 0; }
+  .dur-cell.dur-slow .dur-fill { background: var(--warn-bg); box-shadow: inset 0 0 0 1px var(--accent-predator); }
+  .dur-num { position: relative; z-index: 1; padding: 0 3px; }
+  .fail-dot { cursor: pointer; }
+  .fail-dot:hover { transform: scale(1.8); }
+  .detail-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 6px; }
+  .detail-actions button { font-size: 11px; padding: 2px 8px; }
+  .act-explain-status { font-size: 11px; color: var(--ink-muted); align-self: center; }
+  mark { background: var(--warn-bg); color: var(--accent-predator); outline: 1px solid var(--accent-predator); border-radius: 2px; padding: 0 1px; }
+  tr.kbd-focus > td:first-child { box-shadow: inset 2px 0 0 var(--accent-predator); }
+  tr.kbd-focus { background: var(--bg-panel-raised); }
+  tr.act-flash { animation: act-flash 1.2s ease-out; }
+  @keyframes act-flash { from { background: var(--warn-bg); } to { background: transparent; } }
+  .actions-toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; font-size: 11px; }
+  .actions-toolbar button, .actions-toolbar select { font-size: 11px; padding: 2px 8px; }
+  .actions-pill { background: var(--warn-bg); color: var(--warn-fg); border: 1px solid var(--accent-predator); border-radius: 10px; padding: 1px 10px; cursor: pointer; font-size: 11px; }
+  .kbd-hint { color: var(--ink-muted); font-size: 10px; margin-left: auto; }
+  .kbd-hint kbd { border: 1px solid var(--border-hud); border-radius: 2px; padding: 0 3px; font-family: var(--font-mono); }
+  .empty code { display: inline-block; margin-top: 4px; padding: 2px 6px; background: var(--bg-panel-inset); border-radius: 2px; font-style: normal; color: var(--ink-primary); }
+  #wsToast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--bg-panel-raised); color: var(--ink-primary); border: 1px solid var(--accent-predator); border-radius: 3px; padding: 6px 14px; font-size: 12px; z-index: 9999; opacity: 0; pointer-events: none; transition: opacity .2s; }
+  #wsToast.show { opacity: 1; }
+
   /* ---- cross-session viz block ---- */
   .heatmap-table { border-collapse: collapse; font-size: 11px; }
   .heatmap-table th, .heatmap-table td { border: 1px solid var(--border-hud); padding: 3px 6px; white-space: nowrap; }
@@ -415,6 +448,7 @@
       <label>Action rows rendered (cap)<input id="setActionsCap" type="number" min="50" step="50"></label>
       <label>Console/net rows fetched (cap)<input id="setConsoleNetLimit" type="number" min="100" step="100"></label>
       <label>Slow-request highlight threshold (ms)<input id="setNetSlowMs" type="number" min="500" step="500"></label>
+      <label>Collapse runs of N+ identical actions (0 = never collapse)<input id="setActionGroupMin" type="number" min="0" step="1"></label>
       <div class="row" style="margin-top:10px;">
         <button type="button" id="settingsApplyBtn">Apply</button>
         <button type="button" id="settingsResetBtn">Reset to defaults</button>
@@ -503,9 +537,21 @@
     <select id="actionTypeFilter"><option value="">all types</option></select>
     <select id="actionOkFilter"><option value="">ok + fail</option><option value="ok">ok only</option><option value="fail">fail only</option></select>
     <input id="actionSearch" placeholder="search params/result...">
+    <span id="actionFilterCount" class="muted"></span>
+    <button type="button" id="actionClearFilters" hidden>Clear filters</button>
+  </div>
+  <div class="actions-toolbar">
+    <button type="button" id="actionsPauseBtn" title="Freeze the table so it stops rebuilding while you read a long result">Pause live</button>
+    <span id="actionsNewPill" class="actions-pill" hidden></span>
+    <select id="actionExport" title="Download the currently filtered rows">
+      <option value="">Export view...</option>
+      <option value="json">JSON</option>
+      <option value="md">Markdown</option>
+    </select>
+    <span class="kbd-hint"><kbd>j</kbd>/<kbd>k</kbd> move &middot; <kbd>Enter</kbd> expand &middot; <kbd>c</kbd> copy CLI</span>
   </div>
   <div id="actionsFailStrip" class="fail-burst-strip"></div>
-  <div class="hud-scroll-body"><table id="actionsTable"><thead><tr><th>Time</th><th>Agent</th><th>Type</th><th>Result</th><th id="actionDurationHeader" class="sortable" title="Click to sort by duration">ms</th></tr></thead><tbody></tbody></table></div>
+  <div class="hud-scroll-body"><table id="actionsTable"><thead><tr><th>Time</th><th>Agent</th><th>Type</th><th>Target / result</th><th id="actionDurationHeader" class="sortable" title="Click to sort by duration">ms</th></tr></thead><tbody></tbody></table></div>
   <div id="actionsEmpty" class="empty" hidden>No actions recorded yet.</div>
   </section>
   </div>
@@ -605,6 +651,7 @@
   </section>
 </div>
 
+<div id="wsToast" role="status" aria-live="polite"></div>
 <script>
 const BASE = location.origin;
 let currentSessionId = null;
@@ -615,7 +662,7 @@ let allSessions = [];
 // target app, or a user who just wants different tradeoffs (more history
 // vs. less render/fetch cost), doesn't need to edit this file to get them.
 const SETTINGS_STORAGE_KEY = 'webscoutDashboardSettings';
-const DEFAULT_SETTINGS = { pollIntervalMs: 3000, actionsRenderCap: 500, consoleNetFetchLimit: 2000, netSlowMs: 10000 };
+const DEFAULT_SETTINGS = { pollIntervalMs: 3000, actionsRenderCap: 500, consoleNetFetchLimit: 2000, netSlowMs: 10000, actionGroupMin: 3 };
 
 function loadSettings() {
   try {
@@ -732,6 +779,177 @@ async function api(method, path, body) {
 function el(id) { return document.getElementById(id); }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function fmtTime(iso) { return iso ? new Date(iso).toLocaleTimeString() : ''; }
+
+// ---------- Action-log helpers (target summary, CLI rebuild, copy/export) ----------
+function fmtDur(ms) {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
+}
+function fmtAgo(iso) {
+  if (!iso) return '';
+  const ms = Date.now() - new Date(iso).getTime();
+  return ms < 0 ? '' : `${fmtDur(ms)} ago`;
+}
+function clip(s, n) { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+
+let toastTimer = null;
+function toast(msg) {
+  const t = el('wsToast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
+}
+async function copyText(text, label) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch { toast('copy failed'); ta.remove(); return; }
+    ta.remove();
+  }
+  toast(`${label || 'copied'} - copied`);
+}
+function downloadFile(name, text, mime) {
+  const url = URL.createObjectURL(new Blob([text], { type: mime }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// One-line "what did this action touch" summary - the Type column already
+// says WHAT ran, so this only carries the target/args a reader would
+// otherwise have to expand the row to see.
+function actionTarget(a) {
+  const p = a.params || {};
+  const parts = [];
+  if (p.selector) parts.push(p.selector + (p.nth !== undefined && p.nth !== null ? ` [${p.nth}]` : ''));
+  if (p.store) parts.push(p.store);
+  if (p.key !== undefined && p.key !== null) parts.push(`key=${JSON.stringify(p.key)}`);
+  else if (p.row && typeof p.row === 'object' && p.row.id !== undefined) parts.push(`id=${JSON.stringify(p.row.id)}`);
+  if (p.keys && Array.isArray(p.keys)) parts.push(`${p.keys.length} keys`);
+  if (a.type === 'dom.fill' && p.value !== undefined) parts.push(`= ${JSON.stringify(p.value)}`);
+  if (p.text) parts.push(`text=${JSON.stringify(p.text)}`);
+  if (p.urlPattern) parts.push(p.urlPattern);
+  if (p.substr) parts.push(p.substr);
+  if (p.expr) parts.push(String(p.expr).replace(/\s+/g, ' '));
+  if (p.question) parts.push(p.question);
+  if (!parts.length) {
+    const keys = Object.keys(p);
+    if (keys.length) parts.push(JSON.stringify(p));
+  }
+  return parts.join(' ');
+}
+
+const CLI_PREFIX = 'node tools/web-scout/cli.mjs';
+function shq(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
+// Rebuilds the CLI invocation for an action from its type + params - the
+// inverse of cli.mjs's own command table. Returns null for a type with no
+// 1:1 CLI form (session.*, ai.ask, dom.clickWait...), so the button hides.
+function actionToCli(a) {
+  const p = a.params || {};
+  const flag = (name, v) => (v === undefined || v === null || v === false ? '' : (v === true ? ` --${name}` : ` --${name} ${typeof v === 'number' ? v : shq(v)}`));
+  const nth = flag('nth', p.nth);
+  const timeout = flag('timeout', p.timeoutMs);
+  const c = (rest) => `${CLI_PREFIX} ${rest}`;
+  switch (a.type) {
+    case 'dom.query': return c(`dom query ${shq(p.selector)}${flag('full', p.full)}${flag('meta', p.meta)}`);
+    case 'dom.click': return c(`dom click ${shq(p.selector)}${nth}`);
+    case 'dom.fill': return c(`dom fill ${shq(p.selector)} ${shq(p.value ?? '')}${nth}`);
+    case 'dom.rect': return c(`dom rect ${shq(p.selector)}`);
+    case 'dom.computedStyle': return c(`dom style ${shq(p.selector)}${p.properties ? ' ' + shq(p.properties.join(',')) : ''}`);
+    case 'dom.wait': return c(`dom wait ${shq(p.selector)}${flag('text', p.text)}${timeout}${flag('changed', p.changed)}${flag('stable', p.stable)}${flag('stable-count', p.stableCount)}`);
+    case 'dom.settle': return c(`dom settle${p.selector ? ' ' + shq(p.selector) : ''}${flag('quiet-ms', p.quietMs)}${timeout}`);
+    case 'dom.screenshot': return c(`dom screenshot ${shq(p.selector)}`);
+    case 'react.inspect': return c(`react inspect ${shq(p.selector)}${nth}`);
+    case 'react.tree': return c(`react tree ${shq(p.selector)}${nth}${p.maxDepth !== undefined && p.maxDepth !== null ? ' ' + p.maxDepth : ''}`);
+    case 'idb.list': return c('idb list');
+    case 'idb.dump': return c(`idb dump ${shq(p.store)}${p.where ? flag('where', JSON.stringify(p.where)) : ''}${p.fields ? flag('fields', p.fields.join(',')) : ''}${flag('limit', p.limit)}`);
+    case 'idb.get': return c(`idb get ${shq(p.store)} ${shq(JSON.stringify(p.key))}`);
+    case 'idb.put': return c(`idb put ${shq(p.store)} ${shq(JSON.stringify(p.row))}`);
+    case 'idb.patch': return c(`idb patch ${shq(p.store)} ${shq(JSON.stringify(p.key))} ${shq(JSON.stringify(p.patch))}`);
+    case 'idb.delete': return c(`idb delete ${shq(p.store)} ${shq(JSON.stringify(p.key))}`);
+    case 'idb.deleteMany': return c(`idb delete-many ${shq(p.store)} ${shq(JSON.stringify(p.keys))}`);
+    case 'idb.clear': return c(`idb clear ${shq(p.store)}`);
+    case 'idb.wait': return c(`idb wait ${shq(p.store)}${flag('count-gte', p.countGte)}${timeout}`);
+    case 'net.log': return c('net log');
+    case 'net.clear': return c('net clear');
+    case 'net.wait': return c(`net wait ${shq(p.urlPattern)}${timeout}${flag('grace', p.graceMs)}`);
+    case 'console.log': return c('console log');
+    case 'console.clear': return c('console clear');
+    case 'console.wait': return c(`console wait ${shq(p.substr)}${timeout}${flag('grace', p.graceMs)}`);
+    case 'page.reload': return c('page reload');
+    case 'page.hardReload': return c('page reload --hard');
+    case 'eval': return c(`eval ${shq(p.expr ?? '')}${timeout}`);
+    default: return null;
+  }
+}
+
+function actionResultText(a) {
+  if (!a.ok) return String(a.error ?? '');
+  return JSON.stringify(a.result, null, 2);
+}
+
+// Same chars/4 estimate the Token cost panel uses. A redacted list-view row
+// (screenshot/snapshot/net.log) only carries its stub, so it's a lower bound.
+const rowTokCache = new Map();
+function rowTokens(a) {
+  if (rowTokCache.has(a.id)) return rowTokCache.get(a.id);
+  const v = { n: Math.ceil(JSON.stringify(a.ok ? (a.result ?? '') : (a.error ?? '')).length / 4), lower: !!a.result?.redacted };
+  if (rowTokCache.size > 5000) rowTokCache.clear();
+  rowTokCache.set(a.id, v);
+  return v;
+}
+
+function agentChipHtml(name) {
+  const n = name ?? 'default';
+  if (n === 'default') return `<span class="agent-chip">${esc(n)}</span>`;
+  let h = 0;
+  for (let i = 0; i < n.length; i++) h = (h * 31 + n.charCodeAt(i)) % 360;
+  return `<span class="agent-chip" style="--h:${h}">${esc(n)}</span>`;
+}
+
+// Wraps case-insensitive matches of `term` inside root's <pre> blocks and
+// target cells in <mark>, so a search hit shows WHY the row matched. Done on
+// the live DOM (not in the cached detail HTML) since the term changes.
+function highlightMatches(root, term) {
+  if (!term) return;
+  const lower = term.toLowerCase();
+  let budget = 200;
+  for (const scope of root.querySelectorAll('pre, .act-target')) {
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    let n;
+    while ((n = walker.nextNode())) nodes.push(n);
+    for (const node of nodes) {
+      const text = node.nodeValue;
+      const lowerText = text.toLowerCase();
+      let i = lowerText.indexOf(lower);
+      if (i === -1 || budget <= 0) continue;
+      const frag = document.createDocumentFragment();
+      let pos = 0;
+      while (i !== -1 && budget > 0) {
+        frag.append(text.slice(pos, i));
+        const m = document.createElement('mark');
+        m.textContent = text.slice(i, i + term.length);
+        frag.append(m);
+        budget -= 1;
+        pos = i + term.length;
+        i = lowerText.indexOf(lower, pos);
+      }
+      frag.append(text.slice(pos));
+      node.replaceWith(frag);
+    }
+  }
+}
 
 function toggleRow(tr, detailHtml) {
   const next = tr.nextElementSibling;
@@ -967,7 +1185,7 @@ function actionMatchesFilters(a) {
 
 function populateActionTypeFilter(actions) {
   const select = el('actionTypeFilter');
-  const prev = select.value;
+  const prev = select.value || savedTypeFilter;
   const types = [...new Set(actions.map((a) => a.type))].sort();
   select.innerHTML = '<option value="">all types</option>' + types.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
   if (types.includes(prev)) select.value = prev;
@@ -996,7 +1214,7 @@ function renderPendingRows(tbody) {
     const tr = document.createElement('tr');
     tr.className = 'pending-row';
     tr.dataset.startedAt = p.startedAt;
-    tr.innerHTML = `<td>${fmtTime(p.startedAt)}</td><td>${esc(p.agentName)}</td><td>${esc(p.type)}</td><td><span class="spinner"></span>running...</td><td>${elapsed}s</td>`;
+    tr.innerHTML = `<td>${fmtTime(p.startedAt)}</td><td>${agentChipHtml(p.agentName)}</td><td>${esc(p.type)}</td><td><span class="spinner"></span>running...</td><td>${elapsed}s</td>`;
     tbody.insertBefore(tr, tbody.firstChild);
   }
   if (!pendingTickTimer) pendingTickTimer = setInterval(() => { if (pendingActions.size) tickPendingRows(); }, 500);
@@ -1041,7 +1259,9 @@ async function actionDetailHtml(a) {
   const resultHtml = (full.type === 'dom.screenshot' && full.ok && full.result?.dataUrl)
     ? `<img src="${esc(full.result.dataUrl)}" alt="screenshot" style="max-width:480px;border:1px solid var(--border-hud);border-radius:4px;display:block;margin-top:4px;"><div class="muted">${full.result.width}x${full.result.height}</div>`
     : `<pre>${esc(full.ok ? JSON.stringify(full.result, null, 2) : full.error)}</pre>`;
-  const html = `<strong>params</strong><pre>${esc(JSON.stringify(full.params, null, 2))}</pre><strong>${full.ok ? 'result' : 'error'}</strong>${resultHtml}`;
+  const btn = (act, label) => `<button type="button" data-act="${act}" data-id="${a.id}">${label}</button>`;
+  const toolbar = `<div class="detail-actions">${actionToCli(full) ? btn('copy-cli', 'Copy CLI') : ''}${btn('copy-params', 'Copy params')}${full.type === 'dom.screenshot' ? '' : btn('copy-result', full.ok ? 'Copy result' : 'Copy error')}${full.ok ? '' : btn('explain', 'Explain failure (Ask AI)') + '<span class="act-explain-status"></span>'}</div>`;
+  const html = `${toolbar}<strong>params</strong><pre>${esc(JSON.stringify(full.params, null, 2))}</pre><strong>${full.ok ? 'result' : 'error'}</strong>${resultHtml}`;
   renderedDetailHtmlCache.set(a.id, html);
   return html;
 }
@@ -1094,21 +1314,34 @@ function appendActionRow(a, body, scrollTops) {
   tr.className = 'expandable';
   tr.dataset.actionId = a.id;
   tr.setAttribute('aria-expanded', expandedActionIds.has(a.id) ? 'true' : 'false');
-  tr.innerHTML = `<td class="${actionTypeAccentClass(a.type)}"><span class="chevron">&#9656;</span>${fmtTime(a.started_at)}</td><td>${esc(a.agent_name ?? 'default')}</td><td>${esc(a.type)}</td><td><span class="badge ${a.ok ? 'badge-ok' : 'badge-fail'}">${a.ok ? 'ok' : 'fail'}</span></td><td>${a.duration_ms ?? ''}</td>`;
+  tr.dataset.kbd = `a${a.id}`;
+  const target = actionTarget(a);
+  const gap = actionGapMs.get(a.id);
+  const tok = rowTokens(a);
+  const tokHtml = tok.n >= 20 ? `<span class="tok-badge${tok.n >= 1000 ? ' tok-heavy' : ''}" title="estimated tokens an agent reads for this result (chars/4)${tok.lower ? ' - lower bound, heavy payload redacted from this list' : ''}">~${tok.n}${tok.lower ? '+' : ''} tok</span>` : '';
+  const errHtml = a.ok ? '' : `<div class="act-err" title="${esc(a.error)}">${esc(clip(a.error, 60))}</div>`;
+  const durMs = a.duration_ms;
+  const durPct = durMs != null && actionDurP95 > 0 ? Math.min(100, Math.round((durMs / actionDurP95) * 100)) : 0;
+  const durSlow = durMs != null && actionDurP95 > 0 && durMs >= actionDurP95 && durMs >= 500;
+  tr.innerHTML = `<td class="${actionTypeAccentClass(a.type)}" title="${esc(fmtAgo(a.started_at))}"><span class="chevron">&#9656;</span>${fmtTime(a.started_at)}${gap >= 1000 ? `<span class="act-gap" title="idle since the previous action finished">+${esc(fmtDur(gap))}</span>` : ''}</td><td>${agentChipHtml(a.agent_name)}</td><td>${esc(a.type)}</td><td class="act-result"><span class="badge ${a.ok ? 'badge-ok' : 'badge-fail'}">${a.ok ? 'ok' : 'fail'}</span>${target ? `<span class="act-target" title="${esc(target)}">${esc(clip(target, 120))}</span>` : ''}${tokHtml}${errHtml}</td><td><div class="dur-cell${durSlow ? ' dur-slow' : ''}" ${durMs != null ? `title="${durSlow ? 'at or above this session\'s p95' : 'bar = share of this session\'s p95'} (${esc(fmtDur(actionDurP95))})"` : ''}><span class="dur-fill" style="width:${durPct}%"></span><span class="dur-num">${durMs ?? ''}</span></div></td>`;
   tr.addEventListener('click', async () => {
+    kbdFocusKey = tr.dataset.kbd;
     const existing = tr.nextElementSibling;
     if (existing && existing.classList.contains('detail-row')) { existing.remove(); expandedActionIds.delete(a.id); tr.setAttribute('aria-expanded', 'false'); return; }
     expandedActionIds.add(a.id);
     tr.setAttribute('aria-expanded', 'true');
     toggleRow(tr, await actionDetailHtml(a));
+    highlightMatches(tr.nextElementSibling, el('actionSearch').value.trim());
   });
   body.appendChild(tr);
+  highlightMatches(tr, el('actionSearch').value.trim());
   if (expandedActionIds.has(a.id)) {
     actionDetailHtml(a).then((html) => {
       // Guard against a race with a newer rebuild that already replaced
       // this <tr> (or re-opened it) by the time the lazy fetch resolves.
       if (body.contains(tr) && !(tr.nextElementSibling && tr.nextElementSibling.classList.contains('detail-row'))) {
         toggleRow(tr, html);
+        highlightMatches(tr.nextElementSibling, el('actionSearch').value.trim());
         restoreDetailScrollTop(tr, scrollTops, a.id);
       }
     }).catch(() => {
@@ -1119,7 +1352,69 @@ function appendActionRow(a, body, scrollTops) {
   }
 }
 
-let actionsSortByDuration = false;
+// Action-log view prefs (filters + sort) survive a reload - per-viewer
+// convenience only, so every read/write is wrapped and the UI works without it.
+const ACTION_PREFS_KEY = 'webscoutActionLogPrefs';
+function loadActionPrefs() {
+  try { return JSON.parse(localStorage.getItem(ACTION_PREFS_KEY)) || {}; } catch { return {}; }
+}
+function saveActionPrefs() {
+  try {
+    localStorage.setItem(ACTION_PREFS_KEY, JSON.stringify({
+      type: savedTypeFilter, ok: el('actionOkFilter').value,
+      search: el('actionSearch').value, sortDuration: actionsSortByDuration,
+    }));
+  } catch { /* prefs just won't persist */ }
+}
+const initialActionPrefs = loadActionPrefs();
+let savedTypeFilter = initialActionPrefs.type || '';
+let actionsSortByDuration = !!initialActionPrefs.sortDuration;
+
+let actionsPaused = false;
+let pausedLatest = null;
+let pausedBaseMaxId = 0;
+let kbdFocusKey = null;
+let actionsKbdActive = false;
+let actionDurP95 = 0;
+const actionGapMs = new Map();
+const actionGroupHead = new Map(); // action id -> head id of its collapsed-eligible run
+
+function setActionsPaused(next) {
+  actionsPaused = next;
+  el('actionsPauseBtn').textContent = next ? 'Resume live' : 'Pause live';
+  el('actionsNewPill').hidden = true;
+  if (next) {
+    pausedBaseMaxId = lastActions.reduce((m, a) => Math.max(m, a.id), 0);
+    pausedLatest = null;
+  } else if (pausedLatest) {
+    const latest = pausedLatest;
+    pausedLatest = null;
+    lastActionsFp = fingerprintRows(latest);
+    renderActions(latest);
+    renderAssertRuns(latest);
+    renderTimeline();
+  }
+}
+
+function updatePausePill() {
+  const pill = el('actionsNewPill');
+  const n = pausedLatest ? pausedLatest.filter((a) => a.id > pausedBaseMaxId).length : 0;
+  pill.hidden = n === 0;
+  pill.textContent = `${n} new - click to resume`;
+}
+
+function activeFilterCount() {
+  return (el('actionTypeFilter').value ? 1 : 0) + (el('actionOkFilter').value ? 1 : 0) + (el('actionSearch').value.trim() ? 1 : 0);
+}
+
+function clearActionFilters() {
+  el('actionTypeFilter').value = '';
+  el('actionOkFilter').value = '';
+  el('actionSearch').value = '';
+  savedTypeFilter = '';
+  saveActionPrefs();
+  renderActions(lastActions);
+}
 
 // One dot per visible row, oldest-to-newest left-to-right - a burst of
 // failures clustered in time shows up as a run of red dots, which the
@@ -1129,15 +1424,63 @@ function renderFailBurstStrip(rows) {
   const container = el('actionsFailStrip');
   if (!container) return;
   container.innerHTML = rows.length < 2 ? '' : rows.slice().reverse().map((a) =>
-    `<span class="fail-dot ${a.ok ? '' : 'fail'}" title="${esc(a.type)} - ${a.ok ? 'ok' : 'fail'}"></span>`
+    `<span class="fail-dot ${a.ok ? '' : 'fail'}" data-action-id="${a.id}" title="${esc(a.type)} - ${a.ok ? 'ok' : 'fail'} - click to jump to this row"></span>`
   ).join('');
+}
+
+// Fail-strip dots jump to their own row: opens the collapsed run it lives in
+// (if any), expands it, scrolls it into view and flashes it.
+function revealAction(id) {
+  const head = actionGroupHead.get(id);
+  if (head !== undefined) expandedGroupIds.add(head);
+  expandedActionIds.add(id);
+  kbdFocusKey = `a${id}`;
+  renderActions(lastActions);
+  const tr = document.querySelector(`#actionsTable tr[data-kbd="a${id}"]`);
+  if (!tr) return;
+  tr.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  tr.classList.remove('act-flash');
+  void tr.offsetWidth;
+  tr.classList.add('act-flash');
+}
+
+// Gap between an action starting and the previous one FINISHING (agent
+// "think time"), plus this session's p95 duration for the slow-row bar.
+function computeActionTiming(actions) {
+  actionGapMs.clear();
+  const chron = [...actions].sort((x, y) => Date.parse(x.started_at) - Date.parse(y.started_at));
+  for (let i = 1; i < chron.length; i++) {
+    const prevEnd = Date.parse(chron[i - 1].started_at) + (chron[i - 1].duration_ms ?? 0);
+    actionGapMs.set(chron[i].id, Math.max(0, Date.parse(chron[i].started_at) - prevEnd));
+  }
+  const durs = actions.map((a) => a.duration_ms).filter((d) => Number.isFinite(d)).sort((x, y) => x - y);
+  actionDurP95 = durs.length >= 5 ? durs[Math.min(durs.length - 1, Math.floor(durs.length * 0.95))] : 0;
+}
+
+function renderActionsEmpty(totalCount, filteredCount) {
+  const box = el('actionsEmpty');
+  const filters = activeFilterCount();
+  if (filteredCount > 0 || pendingActions.size > 0) { box.hidden = true; return; }
+  box.hidden = false;
+  if (totalCount > 0 && filters) {
+    box.innerHTML = `0 of ${totalCount} actions match the current filters. <a href="#" id="actionEmptyClear">Clear filters</a>`;
+    return;
+  }
+  const hint = currentSessionStatus === 'ended'
+    ? `${CLI_PREFIX} session start "what you want to verify"`
+    : `${CLI_PREFIX} dom query "body" --meta`;
+  box.innerHTML = `No actions recorded yet.<br>${currentSessionStatus === 'ended' ? 'This session has ended - start a new one:' : 'Run one and it shows up here live:'}<br><code>${esc(hint)}</code> <button type="button" data-copy-hint="${esc(hint)}">Copy</button>`;
 }
 
 function renderActions(actions) {
   lastActions = actions;
   populateActionTypeFilter(actions);
+  computeActionTiming(actions);
   const filtered = actions.filter(actionMatchesFilters);
-  el('actionsEmpty').hidden = filtered.length > 0 || pendingActions.size > 0;
+  const nFilters = activeFilterCount();
+  el('actionClearFilters').hidden = nFilters === 0;
+  el('actionFilterCount').textContent = nFilters ? `${filtered.length} of ${actions.length} match` : '';
+  renderActionsEmpty(actions.length, filtered.length);
   const visible = filtered.slice(0, settings.actionsRenderCap);
   renderFailBurstStrip(visible);
   const visibleIds = new Set(visible.map((a) => a.id));
@@ -1147,17 +1490,21 @@ function renderActions(actions) {
   const scrollTops = captureDetailScrollTops(body);
   body.innerHTML = '';
   const groupSource = actionsSortByDuration ? [...visible].sort((a, b) => (b.duration_ms ?? -1) - (a.duration_ms ?? -1)) : visible;
+  const groupMin = settings.actionGroupMin >= 2 ? settings.actionGroupMin : Infinity;
+  actionGroupHead.clear();
   for (const group of groupConsecutiveActions(groupSource)) {
-    if (group.length >= 3 && !expandedGroupIds.has(group[0].id)) {
+    if (group.length >= groupMin) for (const a of group) actionGroupHead.set(a.id, group[0].id);
+    if (group.length >= groupMin && !expandedGroupIds.has(group[0].id)) {
       const first = group[0], last = group[group.length - 1]; // visible is newest-first, so first = newest, last = oldest
       const tr = document.createElement('tr');
       tr.className = 'expandable';
+      tr.dataset.kbd = `g${first.id}`;
       tr.innerHTML = `<td colspan="5"><span class="badge badge-crv">${esc(first.type)} &times;${group.length} (collapsed)</span> <span class="muted">${fmtTime(last.started_at)} &rarr; ${fmtTime(first.started_at)} - click to expand</span></td>`;
-      tr.addEventListener('click', () => { expandedGroupIds.add(group[0].id); renderActions(lastActions); });
+      tr.addEventListener('click', () => { kbdFocusKey = tr.dataset.kbd; expandedGroupIds.add(group[0].id); renderActions(lastActions); });
       body.appendChild(tr);
       continue;
     }
-    if (group.length >= 3) {
+    if (group.length >= groupMin) {
       const collapseTr = document.createElement('tr');
       collapseTr.innerHTML = `<td colspan="5" class="muted" style="cursor:pointer;">&uarr; collapse ${group.length} &times; ${esc(group[0].type)}</td>`;
       collapseTr.addEventListener('click', () => { expandedGroupIds.delete(group[0].id); renderActions(lastActions); });
@@ -1171,6 +1518,17 @@ function renderActions(actions) {
     body.appendChild(tr);
   }
   renderPendingRows(body);
+  applyKbdFocus(false);
+}
+
+function applyKbdFocus(scroll) {
+  const body = document.querySelector('#actionsTable tbody');
+  body.querySelectorAll('tr.kbd-focus').forEach((r) => r.classList.remove('kbd-focus'));
+  if (!kbdFocusKey) return;
+  const tr = body.querySelector(`tr[data-kbd="${kbdFocusKey}"]`);
+  if (!tr) return;
+  tr.classList.add('kbd-focus');
+  if (scroll) tr.scrollIntoView({ block: 'nearest' });
 }
 
 // session.assert's action row only stores the raw per-check array (see
@@ -1772,6 +2130,11 @@ async function refreshActions() {
   if (!currentSessionId) return false;
   if (lastActionsFp === null) showSkeletonRows('actionsTable', 4);
   const actions = await api('GET', `/sessions/${currentSessionId}/actions`);
+  if (actionsPaused && lastActionsFp !== null) {
+    pausedLatest = actions;
+    updatePausePill();
+    return false;
+  }
   const fp = fingerprintRows(actions);
   if (fp === lastActionsFp) return false;
   lastActionsFp = fp;
@@ -1855,6 +2218,8 @@ async function refreshSessionDetail() {
     actionDetailCache = new Map();
     renderedDetailHtmlCache = new Map();
     expandedActionIds.clear();
+    if (actionsPaused) { actionsPaused = false; pausedLatest = null; el('actionsPauseBtn').textContent = 'Pause live'; el('actionsNewPill').hidden = true; }
+    kbdFocusKey = null;
     lastActionsFp = lastSnapshotsFp = lastDiffsFp = lastConsoleFp = lastNetFp = lastQaFp = lastVerityFp = null;
     lastDetailSessionId = currentSessionId;
   }
@@ -2151,7 +2516,7 @@ async function refreshAll() {
 // threading problem (the DOM is single-thread regardless of how the data
 // arrives), just uncoalesced rebuild churn. Collapsing a burst into one
 // trailing refresh per 250ms fixes it.
-const debouncedPendingRerender = debounce(() => renderActions(lastActions), 100);
+const debouncedPendingRerender = debounce(() => { if (!actionsPaused) renderActions(lastActions); }, 100);
 const debouncedActionRefresh = debounce(async () => { await refreshActions(); await refreshTokenReport(); renderTimeline(); }, 250);
 const debouncedConsoleRefresh = debounce(async () => { await refreshConsole(); renderTimeline(); }, 250);
 const debouncedNetRefresh = debounce(async () => { await refreshNet(); renderTimeline(); }, 250);
@@ -2201,9 +2566,116 @@ function connectEvents() {
 el('sessionPicker').addEventListener('change', (e) => { currentSessionId = Number(e.target.value); refreshSessionDetail(); });
 el('tagFilter').addEventListener('input', () => refreshSessionPicker());
 
-el('actionTypeFilter').addEventListener('change', () => renderActions(lastActions));
-el('actionOkFilter').addEventListener('change', () => renderActions(lastActions));
-el('actionSearch').addEventListener('input', () => renderActions(lastActions));
+el('actionTypeFilter').addEventListener('change', () => { savedTypeFilter = el('actionTypeFilter').value; saveActionPrefs(); renderActions(lastActions); });
+el('actionOkFilter').addEventListener('change', () => { saveActionPrefs(); renderActions(lastActions); });
+el('actionSearch').addEventListener('input', () => { saveActionPrefs(); renderActions(lastActions); });
+el('actionClearFilters').addEventListener('click', clearActionFilters);
+el('actionOkFilter').value = initialActionPrefs.ok || '';
+el('actionSearch').value = initialActionPrefs.search || '';
+if (actionsSortByDuration) el('actionDurationHeader').textContent = 'ms ▼';
+
+el('actionsPauseBtn').addEventListener('click', () => setActionsPaused(!actionsPaused));
+el('actionsNewPill').addEventListener('click', () => setActionsPaused(false));
+
+// Fail-strip dot -> jump to that row.
+el('actionsFailStrip').addEventListener('click', (e) => {
+  const dot = e.target.closest('.fail-dot');
+  if (dot) revealAction(Number(dot.dataset.actionId));
+});
+
+// Empty-state links/buttons.
+el('actionsEmpty').addEventListener('click', (e) => {
+  if (e.target.id === 'actionEmptyClear') { e.preventDefault(); clearActionFilters(); return; }
+  const hint = e.target.closest('[data-copy-hint]');
+  if (hint) copyText(hint.dataset.copyHint, 'command');
+});
+
+function actionById(id) {
+  return actionDetailCache.get(id) ?? lastActions.find((a) => a.id === id);
+}
+
+// Expanded-row toolbar (delegated - detail rows are rebuilt on every refresh).
+el('actionsTable').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const a = actionById(Number(btn.dataset.id));
+  if (!a) return;
+  if (btn.dataset.act === 'copy-cli') { const cli = actionToCli(a); if (cli) copyText(cli, 'CLI command'); }
+  else if (btn.dataset.act === 'copy-params') copyText(JSON.stringify(a.params, null, 2), 'params');
+  else if (btn.dataset.act === 'copy-result') copyText(actionResultText(a), a.ok ? 'result' : 'error');
+  else if (btn.dataset.act === 'explain') {
+    const status = btn.parentElement.querySelector('.act-explain-status');
+    btn.disabled = true;
+    if (status) status.innerHTML = '<span class="spinner"></span>asking...';
+    try {
+      // The relay already feeds the whole session (params included) to the AI,
+      // so only the action id + error need to travel - no duplicated payload.
+      await api('POST', '/ask', { session_id: currentSessionId, question: `Why did action #${a.id} (${a.type}) fail with: ${clip(a.error, 500)} ? What should I try next?` });
+      if (status) status.textContent = 'answered - see Q&A below';
+      await refreshQA();
+      el('qaSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (err) {
+      if (status) status.textContent = 'ask failed: ' + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+});
+
+// Export the currently filtered rows (heavy screenshot/snapshot payloads
+// stay redacted, same as the list view).
+el('actionExport').addEventListener('change', () => {
+  const fmt = el('actionExport').value;
+  el('actionExport').value = '';
+  if (!fmt) return;
+  const rows = lastActions.filter(actionMatchesFilters).slice().reverse();
+  if (!rows.length) { toast('nothing to export'); return; }
+  const base = `web-scout-session-${currentSessionId}-actions`;
+  if (fmt === 'json') {
+    downloadFile(`${base}.json`, JSON.stringify(rows.map((a) => ({ id: a.id, started_at: a.started_at, agent: a.agent_name ?? 'default', type: a.type, ok: !!a.ok, duration_ms: a.duration_ms, params: a.params, result: a.result, error: a.error ?? null })), null, 2), 'application/json');
+  } else {
+    const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+    const lines = [`# Session ${currentSessionId} - action log (${rows.length} row(s))`, '', '| Time | Agent | Type | Target | Status | ms |', '| --- | --- | --- | --- | --- | --- |'];
+    for (const a of rows) lines.push(`| ${cell(a.started_at)} | ${cell(a.agent_name ?? 'default')} | ${cell(a.type)} | ${cell(clip(actionTarget(a), 100))} | ${a.ok ? 'ok' : 'FAIL'} | ${cell(a.duration_ms)} |`);
+    const fails = rows.filter((a) => !a.ok);
+    if (fails.length) {
+      lines.push('', '## Failures', '');
+      for (const a of fails) lines.push(`- #${a.id} \`${a.type}\` ${cell(clip(actionTarget(a), 100))}: ${cell(clip(a.error, 300))}`);
+    }
+    downloadFile(`${base}.md`, lines.join('\n') + '\n', 'text/markdown');
+  }
+  toast(`exported ${rows.length} row(s) as ${fmt.toUpperCase()}`);
+});
+
+// Keyboard nav - only while the pointer/focus is inside the Action log so it
+// never steals j/k/c/Enter from typing or from the rest of the page.
+const actionsSectionEl = el('actionsSection');
+actionsSectionEl.addEventListener('mouseenter', () => { actionsKbdActive = true; });
+actionsSectionEl.addEventListener('mouseleave', () => { actionsKbdActive = actionsSectionEl.contains(document.activeElement); });
+actionsSectionEl.addEventListener('focusin', () => { actionsKbdActive = true; });
+document.addEventListener('keydown', (e) => {
+  if (!actionsKbdActive || e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+  if (document.querySelector('dialog[open]')) return;
+  const rows = [...document.querySelectorAll('#actionsTable tbody tr.expandable[data-kbd]')];
+  if (!rows.length) return;
+  const idx = rows.findIndex((r) => r.dataset.kbd === kbdFocusKey);
+  if (e.key === 'j' || e.key === 'k') {
+    e.preventDefault();
+    const next = e.key === 'j' ? Math.min(rows.length - 1, idx + 1) : Math.max(0, idx === -1 ? 0 : idx - 1);
+    kbdFocusKey = rows[next].dataset.kbd;
+    applyKbdFocus(true);
+  } else if (e.key === 'Enter' && idx !== -1 && !(t && t.tagName === 'BUTTON')) {
+    e.preventDefault();
+    rows[idx].click();
+  } else if (e.key === 'c' && idx !== -1) {
+    const id = Number(String(kbdFocusKey).slice(1));
+    const a = kbdFocusKey.startsWith('a') ? actionById(id) : null;
+    const cli = a ? actionToCli(a) : null;
+    if (cli) copyText(cli, 'CLI command'); else toast('no CLI form for this row');
+  }
+});
 
 async function runGlobalSearch() {
   const q = el('globalSearch').value.trim();
@@ -2241,6 +2713,7 @@ el('netDurationHeader').addEventListener('click', () => {
 el('actionDurationHeader').addEventListener('click', () => {
   actionsSortByDuration = !actionsSortByDuration;
   el('actionDurationHeader').textContent = actionsSortByDuration ? 'ms ▼' : 'ms';
+  saveActionPrefs();
   renderActions(lastActions);
 });
 el('timelineKindFilter').addEventListener('click', (e) => {
@@ -2400,6 +2873,7 @@ function populateSettingsForm() {
   el('setActionsCap').value = settings.actionsRenderCap;
   el('setConsoleNetLimit').value = settings.consoleNetFetchLimit;
   el('setNetSlowMs').value = settings.netSlowMs;
+  el('setActionGroupMin').value = settings.actionGroupMin;
 }
 
 function showSettingsTab(name) {
@@ -2431,6 +2905,7 @@ el('settingsApplyBtn').addEventListener('click', () => {
     actionsRenderCap: Math.max(50, Number(el('setActionsCap').value) || DEFAULT_SETTINGS.actionsRenderCap),
     consoleNetFetchLimit: Math.max(100, Number(el('setConsoleNetLimit').value) || DEFAULT_SETTINGS.consoleNetFetchLimit),
     netSlowMs: Math.max(500, Number(el('setNetSlowMs').value) || DEFAULT_SETTINGS.netSlowMs),
+    actionGroupMin: Number.isFinite(Number(el('setActionGroupMin').value)) && el('setActionGroupMin').value !== '' ? Math.max(0, Math.floor(Number(el('setActionGroupMin').value))) : DEFAULT_SETTINGS.actionGroupMin,
   });
   applyDisplaySettingsNow();
 });

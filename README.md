@@ -35,16 +35,10 @@ The core discipline, nicknamed **"CRV"** in this codebase:
 **Browser control**
 - Query, click, and fill real DOM elements (with ambiguous-selector
   protection - it refuses to guess which element you meant)
-- Read and write IndexedDB directly (`dump`, `put`, `put-many`, `patch`,
-  `delete`, `clear`) - `put`/`put-many` support `--dry-run` to validate a
-  row's shape against the store's real keyPath/autoIncrement with zero
-  mutation
+- Read and write IndexedDB directly (`dump`, `put`, `delete`, `clear`)
 - Run arbitrary JavaScript in the page (`eval`), with a timeout and a safe
   fallback for values that can't be JSON-serialized
-- Read captured console errors/warnings and network requests - optionally
-  arm response-BODY capture for requests matching one or more URL
-  substrings (`net capture <substr>`, repeatable to watch several endpoints
-  at once)
+- Read captured console errors/warnings and network requests
 - Reload the page, including a "hard reload" that clears Service Worker
   caches when a plain reload isn't enough
 - Take a best-effort DOM screenshot
@@ -63,8 +57,7 @@ The core discipline, nicknamed **"CRV"** in this codebase:
 - Declarative `session assert` checks against live state (e.g. "store X
   has at least 1 row where field Y equals Z")
 - Session cleanup tools that find and remove synthetic/test data you wrote
-  during a session - `--summary` collapses a large diff to per-store counts
-  plus an estBytes/estTokens size estimate, instead of a full row dump
+  during a session
 
 **Automation**
 - Record a session's actions as a reusable **macro**, then replay it later
@@ -74,16 +67,10 @@ The core discipline, nicknamed **"CRV"** in this codebase:
 - Named multi-tab support - drive more than one browser tab at once
 
 **Token cost & waste prevention**
-- `token-report` ranks every action TYPE, TARGET (store/selector), and now
-  MACRO (which replayed macro/CRV phase actually cost the tokens, ad-hoc
-  calls bucket separately) by estimated tokens spent reading its result
-  back, cross-session or scoped to one session - plus repeated-call loops,
-  redundant re-checks, and a `savings` block proving what the mechanisms
-  below actually saved
-- A running per-session token total on every reply
-  (`x-webscout-session-tokens` header, printed past a threshold - override
-  with `WEBSCOUT_TOKEN_THRESHOLD=<n>`) - correctly counts same-session
-  cache hits too, not just freshly-dispatched calls
+- `token-report` ranks every action TYPE and TARGET (store/selector) by
+  estimated tokens spent reading its result back, cross-session or scoped
+  to one session - plus repeated-call loops, redundant re-checks, and a
+  `savings` block proving what the mechanisms below actually saved
 - Same-session read-result cache (identical read, nothing mutated since ->
   answered from cache, never re-dispatched), wired into both `/command` and
   `macro run`'s own replay loop
@@ -292,9 +279,8 @@ suite run ./checks/my-suite.json
 ```bash
 token-report                  # all-time byType/byTarget cost ranking + a "savings" block proving
                                # what dedup/cache/compaction/diff-cache actually saved
-token-report --session <id>   # one session's own cost, plus repeated-call loops, redundant
-                               # (same-result) re-checks, and byMacro (which replayed macro/CRV
-                               # phase actually cost the tokens - ad-hoc calls bucket separately)
+token-report --session <id>   # one session's own cost, plus repeated-call loops and redundant
+                               # (same-result) re-checks
 ```
 Read calls (`idb dump/get/list`, `dom query/rect/style`, `net log`,
 `console log`, `react inspect/tree`) are answered from an in-relay cache
@@ -302,14 +288,7 @@ when called twice IN A ROW with identical args and nothing mutating in
 between
 (`__cacheHit:true`); any result byte-identical to one already seen -
 even in a different session - is stored once at the DB level either way,
-no flag needed for either. A cache hit still counts toward the running
-`x-webscout-session-tokens` total on every reply (see below) - it skips
-the DB action log, but the result bytes still land in your terminal and
-still get read.
-
-Every reply also carries a running per-session token total, printed to
-stderr once it crosses a threshold (default ~5000, override with
-`WEBSCOUT_TOKEN_THRESHOLD=<n>`).
+no flag needed for either.
 
 **Other**
 ```bash
@@ -403,6 +382,27 @@ regression-check results, a macros panel, cross-session search, a Token
 cost panel (budget burn-rate, per-type/per-target cost, cross-session
 trend, a Waste Radar banner for the session's single worst-cost type), and
 an Ask-AI box. Updates arrive over Server-Sent Events - no manual refresh.
+
+The **Action log** panel is built for fast debugging:
+
+- Each row shows its target (selector, store/key, `eval` expression, or the
+  error's first 60 characters on a failure), an idle gap since the previous
+  action, a per-row token estimate, and a duration bar scaled to the
+  session's p95 - so most rows never need expanding
+- Expanded rows have **Copy CLI** (rebuilds the exact `cli.mjs` command),
+  **Copy params/result/error**, and **Explain failure (Ask AI)** on a fail
+- Filters (type/status/search) show an "N of M match" count with a one-click
+  clear, highlight matches inside expanded params/results, and persist across
+  reloads along with the sort order
+- Click a red/green dot in the strip above the table to jump to that row
+  (opens the collapsed run it lives in)
+- **Pause live** freezes the table while you read a long result; a pill
+  counts what arrived meanwhile
+- **Export view...** downloads the filtered rows as JSON or Markdown
+- Keyboard: `j`/`k` move, `Enter` expands, `c` copies the CLI command (only
+  while the pointer is over the panel)
+- Collapse threshold for runs of identical actions is configurable in
+  Settings > Display
 
 ## Security model, in short
 
