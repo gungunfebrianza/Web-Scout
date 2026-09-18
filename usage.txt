@@ -12,8 +12,10 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    port - and refuses to kill one that does not answer /health like
                                    a web-scout relay) and wait for it to go away
   relay restart                   stop + start
-  relay status                    pid, start time, stale_source_files - works even when the relay
-                                   is down. All four use WEBSCOUT_PORT (default 8973). They replace
+  relay status                    pid, start time, stale_source_files, stale_agents (tabs running an
+                                   older inject.js than the file on disk) and events24h (client
+                                   autostarts, and unclean exits = something killed the relay) - works
+                                   even when the relay is down. All four use WEBSCOUT_PORT (default 8973). They replace
                                    `pkill` (silently does nothing against a Windows-native node
                                    process) and the netstat + taskkill dance. Not exposed over MCP
                                    on purpose.
@@ -35,7 +37,7 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    blocked RIGHT NOW (another tab - web-scout-connected or not -
                                    holding a connection at the older version), and by what, instead
                                    of only reporting THAT a version-bump "page reload" hasn't taken.
-  session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--token-budget N] [--agent <name>]
+  session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--token-budget N] [--no-briefing] [--agent <name>]
                                    declare context/goal - REQUIRED before any action.
                                    --strict-crv auto-snapshots+diffs before/after every
                                    dom.click/dom.fill/eval/idb.put/idb.delete in this session.
@@ -60,9 +62,12 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    that step was easy to forget until after the writes already
                                    happened, at which point there is no way to retroactively
                                    recover a "before" state.
-                                   --token-budget N is purely advisory - nothing blocks a command from
-                                   running over it, but "session end"/"session show"/dashboard's Token
-                                   cost panel warn once the session's own estTokens total crosses it.
+                                   --token-budget N never blocks a command, but it does arm the read guard
+                                   (see "Reading with fewer tokens"): past 60% of N large reads return
+                                   their shape, past 85% the limit tightens. "session end"/"session
+                                   show"/dashboard's Token cost panel also warn once the DELIVERED
+                                   estTokens total crosses it. --no-briefing skips the warm-start
+                                   briefing (store counts, DB version, tab freshness) in the reply.
   session assert <id> '<checks-json>' [--agent <name>]
                                    declarative regression checks against LIVE state - a single
                                    check object or a JSON array of them, each:
@@ -129,7 +134,7 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    {"__crv":true}' to enumerate exact ids and 'idb delete-many' by
                                    id - safe regardless of how much real traffic interleaves.
 
-  dom query <selector> [--full] [--meta]
+  dom query <selector> [--full] [--meta] [--peek] [--table] [--if-changed] [--delta] [--no-guard]
                                    a whole-page/root container (body/html/#app/#root/main/#main/*)
                                    returns a depth-limited outline (tag#id.class [children, text
                                    chars]) instead of markup - query a listed child to drill in;
@@ -230,7 +235,7 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   idb list                        list IndexedDB object store names + a per-store row count
                                    (cheap store.count(), not a full dump) - check this before
                                    an unscoped "idb snapshot" on a store you suspect is large
-  idb dump <store> [--where '<json-field-map>'] [--fields a,b,c] [--limit N]
+  idb dump <store> [--where '<json-field-map>'] [--fields a,b,c] [--limit N] [--peek] [--table] [--if-changed] [--delta]
                                    dump rows (+ real keyPath) in one store - --where filters by
                                    exact-equality field match (same semantics as "session
                                    assert"'s own where), e.g. --where '{"__synthetic_tag":"MY-TAG"}'.
@@ -331,7 +336,7 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    printing a line per change. Stops at --count-gte (if given) or
                                    --timeout (default 30000ms), whichever first, or Ctrl+C.
 
-  net log [--limit <n>] [--url <substr>]
+  net log [--limit <n>] [--url <substr>] [--peek] [--table] [--if-changed] [--delta]
                                    captured fetch/XHR request/response entries since last clear -
                                    LIVE in-page ring buffer, capped at 500, evicted by background
                                    traffic (e.g. sync polling) within minutes in a busy session.
@@ -367,7 +372,7 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    once (off by default; captures nothing until armed)
   net clear                       clear the captured (live) network log
 
-  console log [--limit <n>]       captured console.error/warn + uncaught error entries; --limit
+  console log [--limit <n>] [--peek] [--table] [--if-changed] [--delta]   captured console.error/warn + uncaught error entries; --limit
                                    keeps the N most recent (filtered in the page)
   console wait "<substr>" [--timeout <ms>] [--grace <ms>]
                                    attach-and-wait for a console entry whose message contains
@@ -623,7 +628,56 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    actually READ) sit beside it. A dedup ledger's estTokensSaved is a
                                    token-EQUIVALENT (disk bytes / 4), not tokens a caller avoided -
                                    none of them shrink what a call returns. The dashboard's "Token
-                                   savings" panel renders all of this.
+                                   savings" panel renders all of this. Shaped replies (--peek/--table/
+                                   --if-changed/--delta/the guard) are their own delivery ledger,
+                                   deliveryShaping, measured against the full result the same call
+                                   would have returned (a peek later followed by the full read has
+                                   that spend taken back out); readStrategy.shaping and .hints carry
+                                   the per-mode counts and whether hints were followed.
+
+  Reading with fewer tokens. Every call's result is what you pay for, so a cacheable read
+  (dom query/rect/style, react inspect/tree, idb list/dump/get, net log, console log) takes
+  five flags that change only what is handed back - the relay still logs and caches the
+  full result:
+    --peek       the SHAPE instead of the body: counts, columns, one sample row, byte size and
+                 an estimated-token figure with its error band. The full result is cached, so
+                 repeating the same call without --peek is answered with no page round trip.
+    --table      rows as {columns:[...], rows:[[...]]} (each key said once) instead of an object
+                 per row; needs 3+ rows sharing keys and is only used when it is smaller.
+                 `sparse:true` marks a row that lacked a column (its cell is null).
+    --if-changed if the identical read has not changed since you last RECEIVED its body, get
+                 {unchanged:true, sameAs:<action id>, omittedBytes} instead of the body again.
+    --delta      as --if-changed, and when the page did change, only what changed: unchangedKeys,
+                 changed keys, and per array the rows added / changed / removed (by id; rows
+                 with no id - net.log, console.log - are matched by content and removed ones
+                 are counted, not listed). Falls back to the full body when a delta would not
+                 be at least 30% smaller.
+    --no-guard   ignore the token-budget guard below for this call.
+  --if-changed and --delta are only correct while the earlier result is still in YOUR context
+  (after a context compaction, repeat the call without them). The relay tracks what you were
+  actually handed: a pointer or delta is never offered against a result you only saw a --peek
+  of. The session's running total, its --token-budget and the end-of-session receipt count
+  bytes DELIVERED (after shaping), not bytes logged.
+  Token budget guard: with `session start --token-budget N`, once the running total passes
+  60% of N a read over ~3000 estimated tokens returns its shape (--peek form, guarded:true)
+  and rows come back as {columns, rows}; past 85% the limit drops to ~1000. A one-time stderr
+  note announces each level. WEBSCOUT_READ_GUARD_TOKENS=<n> arms the same guard without a
+  budget. Both are off unless you opt in - default replies are unchanged.
+  Hints: the relay watches how you read and says one line on stderr (x-webscout-hint): a full
+  read right after you scoped the same target ("you used --fields id,status --limit 20 on this
+  earlier"), repeated full reads after scoping ("use --delta or --table"), and an identical read
+  re-delivered in full from cache twice ("add --if-changed"). Each is said once per target per
+  session, and "token-report" counts whether you then did what it suggested
+  (savings.readStrategy.hints.adopted).
+  session start also returns a `briefing` (store row counts, DB version, whether the tab and the
+  relay are current) unless you pass --no-briefing - it replaces the idb list / db version-check
+  calls that open most sessions. Output is compact JSON when piped (the indentation is tokens
+  you pay for); a terminal, --pretty, or WEBSCOUT_PRETTY=1 gets the indented form.
+  Token counts everywhere are chars/4. That is one ratio for very different text: token-report's
+  `savings.estimator` gives a low..high band per kind (json / html / prose) and `spend.estTokensBand`
+  brackets the total. The band is a rule of thumb until you run
+  `node tools/web-scout/calibrate-tokens.mjs --write` (needs ANTHROPIC_API_KEY; counts real
+  tokens for samples of your own sessions and stores them in token-calibration.json).
 
   Every command reply also carries a running session token TOTAL (a
   cumulative estimate) in the x-webscout-session-tokens response header,

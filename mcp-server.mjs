@@ -38,7 +38,7 @@ import {
 } from './client.mjs';
 
 const SERVER_NAME = 'web-scout';
-const SERVER_VERSION = '0.19.0'; // bumped alongside docs/web-scout-roadmap.md's V29 entry
+const SERVER_VERSION = '0.20.0'; // bumped alongside docs/web-scout-roadmap.md's V32 entry
 
 // ---------- stdio JSON-RPC framing ----------
 //
@@ -118,7 +118,7 @@ const TOOLS = [
       + '(action "start") before any dom/idb/net/console/eval/page action below will be accepted '
       + 'by the relay - there is exactly one "active" session at a time server-side.\n'
       + 'Actions:\n'
-      + '  start {goal, context?, strictCrv?, strictCrvStores?, tags?, tokenBudget?} - declare a session; becomes the active one. strictCrvStores scopes every strictCrv auto-snapshot to those stores - omitting it against a real-size db WILL time out. tokenBudget is advisory only (flags a session that ends over it)\n'
+      + '  start {goal, context?, strictCrv?, strictCrvStores?, tags?, tokenBudget?, noBriefing?} - declare a session; becomes the active one. strictCrvStores scopes every strictCrv auto-snapshot to those stores - omitting it against a real-size db WILL time out. tokenBudget also arms a read guard: past 60% of it reads over ~3000 estimated tokens return their shape instead of the body (noGuard overrides), past 85% the limit drops to ~1000, and rows come back as {columns, rows}. The reply carries a `briefing` (stores + row counts, DB version, tab freshness) unless noBriefing:true\n'
       + '  end {id?} - end a session (defaults to the active one)\n'
       + '  current {} - the active session, or {active:false}\n'
       + '  list {} - every session, newest first\n'
@@ -135,6 +135,8 @@ const TOOLS = [
           strict_crv_stores: Array.isArray(p.strictCrvStores) ? p.strictCrvStores : undefined,
           tags: p.tags ?? [],
           token_budget: p.tokenBudget !== undefined ? Number(p.tokenBudget) : undefined,
+          briefing: p.noBriefing ? false : undefined,
+          agent: p.agent,
         });
         // Folds the CLI's separate stderr-only warnOnDbVersionDrift() into
         // the returned result instead - an MCP client has no equivalent of
@@ -199,11 +201,11 @@ const TOOLS = [
     name: 'webscout_dom',
     description: 'DOM read/write against the active session\'s connected tab.\n'
       + 'Actions:\n'
-      + '  query {selector, full?, meta?} - outerHTML + basic attrs for the first match; outerHTML/text are truncated by default (full:true lifts that), meta:true returns only tag/id/class/matchCount; a whole-page selector (body/html/#app/#root/main/*) returns a depth-limited outline unless full:true\n'
+      + '  query {selector, full?, meta?, table?, ifChanged?, delta?, peek?, noGuard?} - outerHTML + basic attrs for the first match; outerHTML/text are truncated by default (full:true lifts that), meta:true returns only tag/id/class/matchCount; a whole-page selector (body/html/#app/#root/main/*) returns a depth-limited outline unless full:true\n'
       + '  click {selector, nth?} - dispatch a real click (native .click())\n'
       + '  fill {selector, value, nth?} - set a form field + dispatch input/change\n'
-      + '  rect {selector} - getBoundingClientRect\n'
-      + '  style {selector, properties?} - computed style (curated defaults, or a given array of property names)\n'
+      + '  rect {selector, table?, ifChanged?, delta?, peek?, noGuard?} - getBoundingClientRect\n'
+      + '  style {selector, properties?, table?, ifChanged?, delta?, peek?, noGuard?} - computed style (curated defaults, or a given array of property names)\n'
       + '  wait {selector, text?, timeoutMs?, changed?, stable?, stableCount?} - poll until selector matches (and, if text given, contains it), '
       + 'or - with changed:true - until its textContent differs from what it was at call time (use for a placeholder-swapped-'
       + 'for-a-real-result pattern, e.g. an AI-review button, instead of predicting the eventual text); stable:true waits until the match count holds for stableCount consecutive polls\n'
@@ -211,13 +213,14 @@ const TOOLS = [
       + '  pick {timeoutMs?} - BLOCKS until a HUMAN clicks something in the real tab; returns a selector for it. No programmatic target.\n'
       + '  settle {selector?, quietMs?, timeoutMs?} - wait until the DOM under selector (default document.body) has had no mutations for quietMs (default 300)\n'
       + '  screenshot {selector?, outPath?} - best-effort DOM rasterization; outPath saves a PNG locally, else returns dimensions only\n'
-      + 'Every action takes optional `agent` (multi-tab target name).',
+      + 'Every action takes optional `agent` (multi-tab target name).\n'
+      + 'READ SHAPING (query/rect/style here, and the read actions of react/idb/net/console): table:true returns rows as {columns, rows:[[...]]} (keys stated once); ifChanged:true answers {unchanged:true, sameAs} instead of the body when the identical read has not changed since you last received it; delta:true does that and, when it did change, returns only what changed; peek:true returns shape, size and one sample instead of the body (the full result stays cached, so the follow-up call needs no page round trip); noGuard:true overrides the token-budget guard. Use ifChanged/delta only while the earlier result is still in your context.',
     actions: {
-      query: (p) => sendCmd('dom.query', { selector: requireField(p, 'selector'), full: !!p?.full, meta: !!p?.meta }, p?.agent),
+      query: (p) => sendCmd('dom.query', { selector: requireField(p, 'selector'), full: !!p?.full, meta: !!p?.meta }, p?.agent, readOpts(p)),
       click: (p) => sendCmd('dom.click', { selector: requireField(p, 'selector'), nth: numOrUndef(p?.nth) }, p?.agent),
       fill: (p) => sendCmd('dom.fill', { selector: requireField(p, 'selector'), value: requireField(p, 'value'), nth: numOrUndef(p?.nth) }, p?.agent),
-      rect: (p) => sendCmd('dom.rect', { selector: requireField(p, 'selector') }, p?.agent),
-      style: (p) => sendCmd('dom.computedStyle', { selector: requireField(p, 'selector'), properties: p?.properties }, p?.agent),
+      rect: (p) => sendCmd('dom.rect', { selector: requireField(p, 'selector') }, p?.agent, readOpts(p)),
+      style: (p) => sendCmd('dom.computedStyle', { selector: requireField(p, 'selector'), properties: p?.properties }, p?.agent, readOpts(p)),
       wait: (p) => sendCmd('dom.wait', { selector: requireField(p, 'selector'), text: p?.text, timeoutMs: numOrUndef(p?.timeoutMs), changed: !!p?.changed, stable: !!p?.stable, stableCount: numOrUndef(p?.stableCount) }, p?.agent),
       click_wait: (p) => sendCmd('dom.clickWait', {
         selector: requireField(p, 'selector'), nth: numOrUndef(p?.nth), waitSelector: p?.waitSelector, text: p?.text,
@@ -241,23 +244,23 @@ const TOOLS = [
     description: 'React fiber inspection (props/state/hooks), against the active session\'s connected tab. '
       + 'Works only on a React-managed DOM node (throws otherwise); no dependency on the React DevTools extension.\n'
       + 'Actions:\n'
-      + '  inspect {selector, nth?} - props (+ state for a class component, or positional hooks for a function component) '
+      + '  inspect {selector, nth?, table?, ifChanged?, delta?, peek?, noGuard?} - props (+ state for a class component, or positional hooks for a function component) '
       + 'of the nearest enclosing component walking up from selector\n'
-      + '  tree {selector, nth?, maxDepth?} - ancestor chain of enclosing component names (default maxDepth 20), for orienting '
+      + '  tree {selector, nth?, maxDepth?, table?, ifChanged?, delta?, peek?, noGuard?} - ancestor chain of enclosing component names (default maxDepth 20), for orienting '
       + 'before drilling into one level with inspect\n'
       + 'Both take optional `agent` (multi-tab target name).',
     actions: {
-      inspect: (p) => sendCmd('react.inspect', { selector: requireField(p, 'selector'), nth: numOrUndef(p?.nth) }, p?.agent),
-      tree: (p) => sendCmd('react.tree', { selector: requireField(p, 'selector'), nth: numOrUndef(p?.nth), maxDepth: numOrUndef(p?.maxDepth) }, p?.agent),
+      inspect: (p) => sendCmd('react.inspect', { selector: requireField(p, 'selector'), nth: numOrUndef(p?.nth) }, p?.agent, readOpts(p)),
+      tree: (p) => sendCmd('react.tree', { selector: requireField(p, 'selector'), nth: numOrUndef(p?.nth), maxDepth: numOrUndef(p?.maxDepth) }, p?.agent, readOpts(p)),
     },
   },
   {
     name: 'webscout_idb',
     description: 'IndexedDB read/write plus persisted snapshot/diff/restore, against the active session\'s connected tab.\n'
       + 'Actions:\n'
-      + '  list {} - object store names + a cheap per-store row count (store.count(), not a full dump) - check before an unscoped snapshot on a store you suspect is large\n'
-      + '  dump {store, where?, fields?, limit?} - rows (+ real keyPath) in one store. where (exact-equality field map), fields (array of field names to keep) and limit filter/project IN THE PAGE - use them on any large store instead of paying for every row\n'
-      + '  get {store, key} - single-key lookup (store.get), not a full-store scan - use when the store is large and you already know the key\n'
+      + '  list {table?, ifChanged?, delta?, peek?, noGuard?} - object store names + a cheap per-store row count (store.count(), not a full dump) - check before an unscoped snapshot on a store you suspect is large\n'
+      + '  dump {store, where?, fields?, limit?, table?, ifChanged?, delta?, peek?, noGuard?} - rows (+ real keyPath) in one store. where (exact-equality field map), fields (array of field names to keep) and limit filter/project IN THE PAGE - use them on any large store instead of paying for every row\n'
+      + '  get {store, key, table?, ifChanged?, delta?, peek?, noGuard?} - single-key lookup (store.get), not a full-store scan - use when the store is large and you already know the key\n'
       + '  snapshot {stores?, golden?, where?, since?} - since: a baseline snapshot id - takes a fresh snapshot scoped to that baseline\'s stores and returns ONLY what changed since it (far cheaper than a full snapshot). Otherwise: capture + PERSIST a DB snapshot -> {id, counts}; golden tags it as a named regression baseline. where (exact-equality field map) scopes EVERY included store to just the matching rows - partial by construction, the saved snapshot carries `where` back on every later read (diff/restore included)\n'
       + '  diff {idA, idB} - compute + PERSIST the diff between two persisted snapshots\n'
       + '  diff_golden {name, idB} - diff a named golden snapshot (from ANY session) against snapshot idB\n'
@@ -273,9 +276,9 @@ const TOOLS = [
       + '(No "watch" action - it\'s an indefinite streaming poll with no clean single request/response mapping; use "wait" for a bounded check.)\n'
       + 'Every action takes optional `agent` (multi-tab target name).',
     actions: {
-      list: (p) => sendCmd('idb.list', {}, p?.agent),
-      dump: (p) => sendCmd('idb.dump', { store: requireField(p, 'store'), where: p?.where, fields: p?.fields, limit: numOrUndef(p?.limit) }, p?.agent),
-      get: (p) => sendCmd('idb.get', { store: requireField(p, 'store'), key: requireField(p, 'key') }, p?.agent),
+      list: (p) => sendCmd('idb.list', {}, p?.agent, readOpts(p)),
+      dump: (p) => sendCmd('idb.dump', { store: requireField(p, 'store'), where: p?.where, fields: p?.fields, limit: numOrUndef(p?.limit) }, p?.agent, readOpts(p)),
+      get: (p) => sendCmd('idb.get', { store: requireField(p, 'store'), key: requireField(p, 'key') }, p?.agent, readOpts(p)),
       snapshot: (p) => (p?.since !== undefined
         ? snapshotSince({ baselineId: p.since, stores: p?.stores, golden: p?.golden, agent: p?.agent })
         : request('POST', '/state/snapshot', { agent: p?.agent, stores: p?.stores, golden: p?.golden, where: p?.where })),
@@ -295,14 +298,14 @@ const TOOLS = [
     name: 'webscout_net',
     description: 'Captured network traffic.\n'
       + 'Actions:\n'
-      + '  log {limit?, urlContains?} - LIVE in-page ring buffer since last clear, capped at 500 entries, evicted by background traffic within minutes. urlContains keeps only entries whose URL contains it; limit keeps the N most recent - both filter IN THE PAGE (an unfiltered log is ~55KB)\n'
+      + '  log {limit?, urlContains?, table?, ifChanged?, delta?, peek?, noGuard?} - LIVE in-page ring buffer since last clear, capped at 500 entries, evicted by background traffic within minutes. urlContains keeps only entries whose URL contains it; limit keeps the N most recent - both filter IN THE PAGE (an unfiltered log is ~55KB)\n'
       + '  wait {urlPattern, timeoutMs?, graceMs?} - attach-and-wait for a request whose URL contains urlPattern\n'
       + '  history {sessionId?, filter?, minDuration?, sort?: "duration", limit?} - the DURABLE, already-persisted net_entries table (defaults to the active session)\n'
       + '  clear {} - clear the live ring buffer\n'
       + '  capture {filter?, off?} - ADDS filter to the armed response-BODY capture set (fetch/XHR) for requests whose URL contains it - call again with a different filter to watch a second endpoint too; log/wait/history entries then gain a bodyPreview. off:true clears every armed filter (off by default)\n'
       + 'log/wait/clear/capture take optional `agent` (multi-tab target name); history does not (it queries by sessionId, not by live agent connection).',
     actions: {
-      log: (p) => sendCmd('net.log', { limit: numOrUndef(p?.limit), urlContains: p?.urlContains }, p?.agent),
+      log: (p) => sendCmd('net.log', { limit: numOrUndef(p?.limit), urlContains: p?.urlContains }, p?.agent, readOpts(p)),
       wait: (p) => sendCmd('net.wait', { urlPattern: requireField(p, 'urlPattern'), timeoutMs: numOrUndef(p?.timeoutMs), graceMs: numOrUndef(p?.graceMs) }, p?.agent),
       history: (p) => netHistory({ sessionId: p?.sessionId, filter: p?.filter, minDuration: p?.minDuration, sort: p?.sort, limit: p?.limit }),
       clear: (p) => sendCmd('net.clear', {}, p?.agent),
@@ -313,12 +316,12 @@ const TOOLS = [
     name: 'webscout_console',
     description: 'Captured console.error/warn + uncaught error entries.\n'
       + 'Actions:\n'
-      + '  log {limit?} - the captured entries; limit keeps the N most recent\n'
+      + '  log {limit?, table?, ifChanged?, delta?, peek?, noGuard?} - the captured entries; limit keeps the N most recent\n'
       + '  wait {substr, timeoutMs?, graceMs?} - attach-and-wait for an entry whose message contains substr, instead of a sleep+poll loop\n'
       + '  clear {}\n'
       + 'All take optional `agent` (multi-tab target name).',
     actions: {
-      log: (p) => sendCmd('console.log', { limit: numOrUndef(p?.limit) }, p?.agent),
+      log: (p) => sendCmd('console.log', { limit: numOrUndef(p?.limit) }, p?.agent, readOpts(p)),
       wait: (p) => sendCmd('console.wait', { substr: requireField(p, 'substr'), timeoutMs: numOrUndef(p?.timeoutMs), graceMs: numOrUndef(p?.graceMs) }, p?.agent),
       clear: (p) => sendCmd('console.clear', {}, p?.agent),
     },
@@ -419,8 +422,15 @@ const EVAL_TOOL = {
 
 function numOrUndef(v) { return v === undefined || v === null ? undefined : Number(v); }
 
-function sendCmd(type, params, agent) {
-  return request('POST', '/command', { type, params, agent });
+// The read-shaping params any cacheable read accepts (see read-pipeline.mjs).
+function readOpts(p) {
+  const opts = {};
+  for (const k of ['table', 'ifChanged', 'delta', 'peek', 'noGuard']) if (p?.[k]) opts[k] = true;
+  return Object.keys(opts).length ? opts : undefined;
+}
+
+function sendCmd(type, params, agent, opts) {
+  return request('POST', '/command', { type, params, agent, opts });
 }
 
 function toolInputSchema(tool) {
@@ -478,7 +488,7 @@ async function handleToolsCall(msg) {
     // actually reads. The first content item is always the tool's own JSON
     // result, unchanged.
     const { value: result, notes } = await collectNotes(() => callTool(name, args));
-    sendResult(msg.id, { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }, ...notes.map((n) => ({ type: 'text', text: `[web-scout] ${n}` }))] });
+    sendResult(msg.id, { content: [{ type: 'text', text: JSON.stringify(result) }, ...notes.map((n) => ({ type: 'text', text: `[web-scout] ${n}` }))] });
   } catch (err) {
     // A failed tool call (bad params, relay says no, dom.click found no
     // match) is a normal MCP tool RESULT with isError:true, not a

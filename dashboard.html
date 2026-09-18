@@ -544,6 +544,7 @@
   <div id="savingsTrendWrap" hidden>
     <div class="sv-h3">Is it improving? Last 14 days (UTC)</div>
     <div id="savingsTrend"></div>
+    <div id="readStrategyNote" class="sv-note" hidden></div>
   </div>
   <div class="hud-grid-2" style="margin-top:6px;">
     <div>
@@ -1185,6 +1186,10 @@ async function refreshHealth() {
   if (staleFiles.length) {
     el('relayStatus').innerHTML += ` <span class="badge badge-crv" title="This relay process started before ${esc(staleFiles.join(', '))} last changed, so it is running older code than what is on disk. Restart it: node tools/web-scout/cli.mjs relay restart">stale: ${esc(staleFiles.join(', '))} - relay restart</span>`;
   }
+  const kills = health.relay?.events_24h?.uncleanExits || 0;
+  if (kills) {
+    el('relayStatus').innerHTML += ` <span class="badge badge-crv" title="This relay booted to find the previous one's pidfile left behind, so the previous relay was killed rather than stopped cleanly (${kills} time(s) in 24h; ${health.relay.events_24h.autostarts} client autostart(s)). Another session or script may be killing node processes by command line.">killed ${kills}x in 24h</span>`;
+  }
   el('relayUptime').textContent = `connected ${fmtUptime(Date.now() - relayConnectedSince)}`;
   // loadId (last 8 chars) shown per agent so a human can eyeball, at a
   // glance, whether the connected tab actually survived its last reload -
@@ -1193,7 +1198,7 @@ async function refreshHealth() {
   // a real navigation (see inject.js's RELAY_URL comment) - a same loadId
   // across two polls after a "reload" means it never actually happened.
   el('agentsStatus').textContent = health.agents_connected.length
-    ? `agents: ${health.agents_detail.map((a) => `${a.name} (loadId ${a.loadId ? a.loadId.slice(-8) : 'unknown'})`).join(', ')}`
+    ? `agents: ${health.agents_detail.map((a) => `${a.name} (loadId ${a.loadId ? a.loadId.slice(-8) : 'unknown'})${a.agentStale ? ' [older inject.js - reload tab]' : ''}`).join(', ')}`
     : 'agents: none connected';
   renderDbVersionBanner(health.db_version_drift);
   renderHud();
@@ -1907,7 +1912,7 @@ function renderSavingsPanel(report) {
   const note = el('savingsNote');
   note.hidden = false;
   note.innerHTML = `<strong>How to read this.</strong> Callers read ~${svNum(spend.estTokens)} estimated tokens; dedup kept ~${svBytes(storage.bytesSaved)} off disk (${svNum(storage.estTokensSaved)} tokens-<em>equivalent</em>${ctx.reductionPct !== null && ctx.reductionPct !== undefined ? `, ${ctx.reductionPct}% of the database` : ''}). Those are different currencies: dedup makes the database smaller, it does not shrink what a call returns. The one delivery-side saving is <em>Scoped reads</em> (<code>--where</code>, <code>--fields</code>, <code>--limit</code>, <code>--meta</code>, whole-page outlines): measured in the page against the unscoped call, so it is an upper bound. <code>--since</code> and other server-side scoping are not measured.`;
-  renderSavingsTrend(sv.trend || []);
+  renderSavingsTrend(sv.trend || [], sv.readStrategy, sv.estimator);
 
   const counted = sv.ledgers.filter((l) => l.countedInTotal);
   const maxSaved = Math.max(1, ...counted.map((l) => l.bytesSaved));
@@ -1950,7 +1955,7 @@ function renderSavingsPanel(report) {
 
 // One row per active day: what callers were handed (orange) next to what scoped
 // reads left out (green). The percentage is left-out / (handed + left-out).
-function renderSavingsTrend(trend) {
+function renderSavingsTrend(trend, strategy, estimator) {
   const wrap = el('savingsTrendWrap');
   wrap.hidden = !trend.length;
   if (!trend.length) return;
@@ -1958,7 +1963,24 @@ function renderSavingsTrend(trend) {
   el('savingsTrend').innerHTML = trend.map((t) => `<div class="sv-trend-row" title="${esc(`${t.calls} calls, ${svNum(t.deliveredTokens)} tokens delivered, ${svNum(t.avoidedTokens)} tokens left out by ${t.scopedCalls} scoped reads, ${t.cacheHits} cache hits`)}">
       <span>${esc(t.day.slice(5))}</span>
       <div class="sv-trend-bars"><div class="sv-trend-read" style="width:${(t.deliveredTokens / max) * 100}%"></div><div class="sv-trend-avoided" style="width:${(t.avoidedTokens / max) * 100}%"></div></div>
-      <span class="sv-nowrap">${svNum(t.deliveredTokens)} read &middot; ${t.avoidedPct}% left out</span></div>`).join('');
+      <span class="sv-nowrap">${svNum(t.deliveredTokens)} read &middot; ${t.avoidedPct}% left out${t.shapedBytes > 0 ? ` &middot; shaped ${svBytes(t.shapedBytes)}` : ''}${t.storageDeltaBytes > 0 ? ` &middot; disk +${svBytes(t.storageDeltaBytes)}` : ''}</span></div>`).join('');
+  // Bytes left out only count if the caller did not then ask for them anyway.
+  const note = el('readStrategyNote');
+  const rr = strategy?.reRead;
+  const ol = strategy?.outline;
+  const parts = [];
+  if (rr && rr.scopedCalls) parts.push(`<strong>${rr.ratePct ?? 0}%</strong> of ${svNum(rr.scopedCalls)} scoped reads were followed by the same read unscoped within 90s (${svBytes(rr.reReadBytes)} spent after all)`);
+  if (ol && ol.calls) parts.push(`${svNum(ol.calls)} whole-page outlines: ${ol.drillRatePct ?? 0}% drilled into a child, ${ol.fullRatePct ?? 0}% needed <code>--full</code>; ${ol.netBytesVsOldDefault >= 0 ? `${svBytes(ol.netBytesVsOldDefault)} smaller` : `${svBytes(-ol.netBytesVsOldDefault)} larger`} than the raw-markup reply they replaced`);
+  const sh = strategy?.shaping;
+  if (sh && (sh.pointer.calls + sh.delta.calls + sh.table.calls + sh.peek.calls)) {
+    parts.push(`${svNum(sh.pointer.calls)} pointers, ${svNum(sh.delta.calls)} deltas, ${svNum(sh.table.calls)} tables, ${svNum(sh.peek.calls)} peeks (${svNum(sh.peek.guardedCalls)} by the budget guard): <strong>${svBytes(sh.netBytesSaved)}</strong> kept off the caller's screen${sh.peek.calls ? `; peeks: ${sh.peek.narrowedRatePct ?? 0}% narrowed next, ${sh.peek.fullRatePct ?? 0}% read in full (${svBytes(sh.peek.bytesSpentAfterwards)} spent afterwards)` : ''}`);
+  }
+  const hn = strategy?.hints;
+  if (hn && (hn.scope + hn.reuse)) parts.push(`${svNum(hn.scope + hn.reuse)} read hints given, <strong>${hn.adoptedRatePct ?? 0}%</strong> followed`);
+  const jk = estimator?.kinds?.json;
+  if (parts.length && jk) parts.push(`token figures are chars/4; for JSON a real tokenizer is expected between ${jk.low} and ${jk.high} chars/token (${esc(estimator.source)})`);
+  note.hidden = !parts.length;
+  note.innerHTML = parts.join('<br>');
 }
 
 let lastSavingsReport = null;
@@ -1966,7 +1988,7 @@ async function refreshSavings(strict = false) {
   try {
     lastSavingsReport = await api('GET', '/token-report');
     renderSavingsPanel(lastSavingsReport);
-    return panelTickSig('savingsSection', JSON.stringify([lastSavingsReport?.totalEstTokens, (lastSavingsReport?.savings?.ledgers ?? []).map((l) => l.bytesSaved), (lastSavingsReport?.savings?.trend ?? []).map((t) => [t.day, t.deliveredBytes, t.avoidedBytes])]));
+    return panelTickSig('savingsSection', JSON.stringify([lastSavingsReport?.totalEstTokens, (lastSavingsReport?.savings?.ledgers ?? []).map((l) => l.bytesSaved), (lastSavingsReport?.savings?.trend ?? []).map((t) => [t.day, t.deliveredBytes, t.avoidedBytes, t.storageDeltaBytes, t.reReads, t.shapedBytes]), lastSavingsReport?.savings?.readStrategy]));
   } catch (e) {
     // best-effort on the timers - the rest of the dashboard must not depend on this panel; the panel's own refresh button surfaces the failure
     if (strict) throw e;

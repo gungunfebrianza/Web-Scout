@@ -3,32 +3,24 @@
 // `relay status`, `status`, and WEBSCOUT_NO_AUTOSTART=1.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { freePort } from './test-relay.mjs';
+import { freePort, isUp, spawnClean } from './test-relay.mjs';
 import { stopRelay } from './relay-control.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-autostart-'));
 const port = await freePort();
 const env = {
-  ...process.env,
   WEBSCOUT_PORT: String(port),
   WEBSCOUT_DB_PATH: path.join(tmp, 'test.db'),
   WEBSCOUT_PID_PATH: path.join(tmp, 'relay.pid'),
   WEBSCOUT_NO_AUTOOPEN: '1',
 };
-const cli = (extraEnv, ...args) => spawnSync(process.execPath, [path.join(__dirname, 'cli.mjs'), ...args], { encoding: 'utf8', env: { ...env, ...extraEnv }, timeout: 60000 });
-// a raw socket, not fetch: a fetch left pending when --test-force-exit fires trips a libuv assertion on Windows
-const alive = () => new Promise((resolve) => {
-  const socket = net.connect(port, '127.0.0.1');
-  socket.once('connect', () => { socket.destroy(); resolve(true); });
-  socket.once('error', () => resolve(false));
-});
+const cli = (extraEnv, ...args) => spawnClean([path.join(__dirname, 'cli.mjs'), ...args], { env: { ...env, ...extraEnv } });
+const alive = () => isUp(port);
 
 after(async () => {
   await stopRelay({ port }).catch(() => {});
@@ -44,7 +36,7 @@ test('WEBSCOUT_NO_AUTOSTART=1 keeps the old behaviour: a clear error, nothing st
 
 test('`relay status` and `status` report a dead relay without starting one', async () => {
   const s = cli({}, 'relay', 'status');
-  assert.match(s.stdout, /"running": false/);
+  assert.equal(JSON.parse(s.stdout).running, false);
   assert.equal(await alive(), false);
   const h = cli({}, 'status');
   assert.equal(h.status, 1);
@@ -59,4 +51,7 @@ test('a call against a dead relay starts one, says so, and completes', async () 
   const second = cli({}, 'agents');
   assert.equal(second.status, 0);
   assert.doesNotMatch(second.stderr, /not running/, 'no note once the relay is up');
+  const status = JSON.parse(cli({}, 'relay', 'status').stdout);
+  assert.equal(status.events24h.autostarts, 1, 'the autostart is on record, so a kill loop is visible');
+  assert.equal(status.events24h.uncleanExits, 0);
 });

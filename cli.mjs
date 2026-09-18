@@ -22,9 +22,16 @@ import { resolveRelayPid, stopRelay, startRelay, restartRelay, RELAY_SOURCE_FILE
 // dispatch below includes it as a top-level `agent` field on the request
 // body (never nested inside `params`) - see tools/web-scout/relay.mjs.
 let agentFlag;
+// Reply shaping for cacheable reads (--table / --if-changed / --delta / --peek / --no-guard),
+// set once in main() and sent as the request's `opts` - see relay-side read-pipeline.mjs.
+let shapeOpts;
+// Compact JSON by default: indentation and newlines are tokens the caller pays for on
+// every call. A terminal (or --pretty / WEBSCOUT_PRETTY=1) still gets the indented form.
+let prettyFlag = false;
+const wantPretty = () => prettyFlag || process.env.WEBSCOUT_PRETTY === '1' || (process.stdout.isTTY === true && process.env.WEBSCOUT_COMPACT !== '1');
 
 function send(type, params) {
-  return request('POST', '/command', { type, params, agent: agentFlag });
+  return request('POST', '/command', { type, params, agent: agentFlag, opts: shapeOpts });
 }
 
 // chars/4 - same rough estimate as db.mjs's getActionCostReport, applied
@@ -34,11 +41,11 @@ function send(type, params) {
 // mixed in.
 const PRINT_RESULT_TOKEN_WARN_THRESHOLD = 2000;
 function printResult(result) {
-  const json = JSON.stringify(result, null, 2);
+  const json = JSON.stringify(result, null, wantPretty() ? 2 : 0);
   console.log(json);
   const estTokens = Math.round(json.length / 4);
   if (estTokens > PRINT_RESULT_TOKEN_WARN_THRESHOLD) {
-    console.error(`NOTE: this result is ~${estTokens} estimated tokens (${json.length} chars). If this is idb.dump, try --where/--fields/--limit to scope it; if dom.query, note outerHTML/text are already truncated - "token-report" ranks which command types cost the most across a session.`);
+    console.error(`NOTE: this result is ~${estTokens} estimated tokens (${json.length} chars). If this is idb.dump, try --where/--fields/--limit to scope it (--table states each key once, --peek returns just the shape); if dom.query, note outerHTML/text are already truncated - "token-report" ranks which command types cost the most across a session.`);
   }
 }
 
@@ -99,7 +106,10 @@ async function handleRelay(sub) {
       running: !!health, port: PORT, pid: health?.relay?.pid ?? found?.pid ?? null,
       pidSource: found?.via ?? null, startedAt: health?.relay?.started_at ?? null, uptimeSeconds: health?.relay?.uptime_seconds ?? null,
       staleSourceFiles: health?.relay?.stale_source_files ?? null,
+      staleAgents: health?.stale_agents ?? null,
+      events24h: health?.relay?.events_24h ?? null,
       note: !health ? 'relay is not answering - "relay start" launches one.'
+        : health.relay?.events_24h?.uncleanExits ? `something killed the relay ${health.relay.events_24h.uncleanExits} time(s) in the last 24h (it booted to find the previous one's pidfile left behind); ${health.relay.events_24h.autostarts} client autostart(s). Look for another session or script that kills node processes by command line.`
         : health.relay?.stale_source_files?.length ? `relay is running OLDER code than disk (${health.relay.stale_source_files.join(', ')}) - "relay restart".`
           : health.relay ? `relay is running current code (watching ${RELAY_SOURCE_FILES.join(', ')}).` : 'this relay predates pid/stale reporting - "relay restart" once to pick it up.',
     });
@@ -129,6 +139,8 @@ async function handleSession(sub, rawArgs) {
     let storesValue;
     let autoSnapshot;
     let tokenBudgetValue;
+    let noBriefing;
+    ({ args, value: noBriefing } = extractBooleanFlag(args, '--no-briefing'));
     ({ args, value: tagsValue } = extractFlag(args, '--tags'));
     ({ args, value: strictCrv } = extractBooleanFlag(args, '--strict-crv'));
     ({ args, value: storesValue } = extractFlag(args, '--stores'));
@@ -137,7 +149,7 @@ async function handleSession(sub, rawArgs) {
     ({ args, value: agentFlag } = extractFlag(args, '--agent'));
     const tags = tagsValue ? tagsValue.split(',').map((t) => t.trim()).filter(Boolean) : [];
     const strictCrvStores = storesValue ? storesValue.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
-    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, tags, token_budget: tokenBudgetValue !== undefined ? Number(tokenBudgetValue) : undefined });
+    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, tags, token_budget: tokenBudgetValue !== undefined ? Number(tokenBudgetValue) : undefined, briefing: noBriefing ? false : undefined, agent: agentFlag });
     if (strictCrv && !storesValue) {
       console.error('WARNING: --strict-crv with no --stores auto-snapshots the WHOLE db on every dom.click/fill/eval/idb.put/idb.delete - this WILL time out (60s) against a real-size production IndexedDB. Pass --stores a,b,c to scope it.');
     }
@@ -180,12 +192,13 @@ async function handleSession(sub, rawArgs) {
       const top = tokenReport.byType[0];
       console.error(`session #${ended.id} cost: ${tokenReport.totalCalls} call(s), ~${tokenReport.totalEstTokens} estimated tokens${top ? ` (top: ${top.type} ~${top.estTokens})` : ''}.`);
       const receipt = ended.savingsReceipt;
-      if (receipt && (receipt.scopedCalls || receipt.cacheHits)) {
+      if (receipt && (receipt.scopedCalls || receipt.cacheHits || receipt.shapedCalls)) {
         const tok = (bytes) => Math.round(bytes / 4);
-        console.error(`session #${ended.id} savings: ${receipt.scopedCalls} scoped read(s) left out ~${tok(receipt.avoidedBytes)} tokens vs unscoped; ${receipt.cacheHits} cache hit(s) skipped a page round trip (~${tok(receipt.cacheBytes)} tokens still delivered).`);
+        console.error(`session #${ended.id} savings: ${receipt.scopedCalls} scoped read(s) left out ~${tok(receipt.avoidedBytes)} tokens vs unscoped; ${receipt.cacheHits} cache hit(s) skipped a page round trip (~${tok(receipt.cacheBytes)} tokens still delivered)${receipt.shapedCalls ? `; ${receipt.shapedCalls} shaped repl${receipt.shapedCalls === 1 ? 'y' : 'ies'} (pointer/delta/peek/table) kept ~${tok(receipt.shapedBytes)} tokens off your screen` : ''}.`);
       }
-      if (ended.token_budget && tokenReport.totalEstTokens > ended.token_budget) {
-        console.error(`WARNING: session #${ended.id} used ~${tokenReport.totalEstTokens} estimated tokens, over its declared --token-budget of ${ended.token_budget}.`);
+      const deliveredTokens = receipt?.deliveredEstTokens ?? tokenReport.totalEstTokens;
+      if (ended.token_budget && deliveredTokens > ended.token_budget) {
+        console.error(`WARNING: session #${ended.id} delivered ~${deliveredTokens} estimated tokens, over its declared --token-budget of ${ended.token_budget}.`);
       }
     } catch { /* best-effort - never fail "session end" over the receipt */ }
     printResult(ended);
@@ -585,7 +598,9 @@ function watchIdbStore(store, countGte, timeoutMs) {
 }
 
 async function main() {
-  const [command, ...rest] = process.argv.slice(2);
+  const [command, ...restRaw] = process.argv.slice(2);
+  let rest = restRaw;
+  ({ args: rest, value: prettyFlag } = extractBooleanFlag(rest, '--pretty'));
   if (!command || command === '-h' || command === '--help') {
     usage();
     process.exitCode = command ? 0 : 1;
@@ -710,6 +725,15 @@ async function main() {
 
   let args = rest;
   ({ args, value: agentFlag } = extractFlag(args, '--agent'));
+  {
+    const shape = {};
+    for (const [flag, key] of [['--table', 'table'], ['--if-changed', 'ifChanged'], ['--delta', 'delta'], ['--peek', 'peek'], ['--no-guard', 'noGuard']]) {
+      let on;
+      ({ args, value: on } = extractBooleanFlag(args, flag));
+      if (on) shape[key] = true;
+    }
+    shapeOpts = Object.keys(shape).length ? shape : undefined;
+  }
   let nthValue;
   let textValue;
   let timeoutValue;

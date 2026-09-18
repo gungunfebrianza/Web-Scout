@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stampInject } from './build-id.mjs';
 
 const NAMESPACES = ['dom', 'idb', 'net', 'console', 'react'];
 
@@ -118,6 +119,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       console.log(`would stub ${opts.type} in: ${Object.keys(files).join(', ')}`);
     } else {
       for (const [f, source] of Object.entries(files)) fs.writeFileSync(path.join(opts.dir, f), source.replace(/\n/g, eols[f]));
+      stampInject(path.join(opts.dir, 'inject.js')); // the edit changed inject.js's hash
       console.log(`stubbed ${opts.type} in: ${Object.keys(files).join(', ')}`);
     }
     console.log(`\nfinish it: search for ${mark} and replace each marker with the real thing.\nstill manual:\n${todo.map((t) => `  - ${t}`).join('\n')}\ncommand-coverage.test.mjs fails until every ${mark} is gone.`);

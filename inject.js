@@ -35,9 +35,12 @@
   // (client.mjs) can require it to actually CHANGE, not just infer a fresh
   // connection from timing.
   const loadId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  // Hash of this file, sent on connect so the relay can tell a tab still running
+  // an older inject.js from the one on disk. Restamp with `node build-id.mjs --stamp`.
+  const AGENT_BUILD = 'ba18ce05a813';
   const RELAY_URL = agentName
-    ? `ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(agentName)}&loadId=${loadId}`
-    : `ws://127.0.0.1:${port}/agent?loadId=${loadId}`;
+    ? `ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(agentName)}&loadId=${loadId}&build=${AGENT_BUILD}`
+    : `ws://127.0.0.1:${port}/agent?loadId=${loadId}&build=${AGENT_BUILD}`;
   const DB_NAME = 'AgentCapitalOS';
 
   console.warn('[web-scout] ACTIVE - full DOM/IndexedDB/network access is exposed to a local relay. Never leave this on for a real session.');
@@ -239,11 +242,20 @@
   // ---------- IndexedDB access (read-only dump/snapshot; diffing happens
   // relay-side over persisted snapshots, see tools/web-scout/relay.mjs) ----------
 
+  // A version-less open of a database that does not exist CREATES it (empty, v1) and
+  // the app's own later open(name, 1) then never gets its upgrade callback. Aborting the
+  // upgrade transaction rolls that creation back, so no command here can leave a
+  // database behind that the app did not make.
   function openDb() {
     return new Promise((resolve, reject) => {
       const req = indexedDB.open(DB_NAME);
+      let wouldCreate = false;
+      req.onupgradeneeded = () => {
+        wouldCreate = true;
+        try { req.transaction.abort(); } catch { /* already aborting */ }
+      };
       req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(wouldCreate ? new Error(`IndexedDB '${DB_NAME}' does not exist yet - the app has not created it (nothing was created)`) : req.error);
     });
   }
 
@@ -719,6 +731,7 @@
           renderedMatchCount: all.length > 1 ? [...all].filter(isRendered).length : undefined,
         };
         noteAvoided(ctx, defaultBytes(), JSON.stringify(outlineReply).length);
+        if (ctx) ctx.outlineOldBytes = defaultBytes(); // lets the relay compare the outline with the reply it replaced
         return outlineReply;
       }
       const htmlCap = full ? 20000 : 2000;
@@ -1692,7 +1705,7 @@
       const ctx = { avoidedBytes: 0 };
       try {
         const result = await handler(msg.params || {}, ctx);
-        ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: true, result, epoch: epochBefore, ...(ctx.avoidedBytes > 0 ? { avoided: ctx.avoidedBytes } : {}) }));
+        ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: true, result, epoch: epochBefore, ...(ctx.avoidedBytes > 0 ? { avoided: ctx.avoidedBytes } : {}), ...(ctx.outlineOldBytes !== undefined ? { outlineOld: ctx.outlineOldBytes } : {}) }));
       } catch (err) {
         ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: false, error: err?.message || String(err) }));
       }

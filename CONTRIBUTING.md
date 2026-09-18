@@ -89,6 +89,18 @@ replaced. The steps below say what each stub has to become. A new leaf command
    "why" is not useful to a future reader - see any existing entry for the
    expected depth.
 
+A new `readCacheable` command gets reply shaping (`--peek`, `--table`, `--if-changed`,
+`--delta`, `--no-guard`) for free on the relay side (`read-pipeline.mjs`); the CLI spec
+row spreads `SHAPE_BOOL`/`SHAPE_PARAMS` (see `dom rect`), and the MCP handler passes
+`readOpts(p)` as `sendCmd`'s fourth argument and lists the five params in its
+description (`cli-parity.test.mjs` fails otherwise). Add its scoping params to
+`SCOPING_PARAM_KEYS` in `read-pipeline.mjs` if it has any. Never make a command
+shape a reply by default: shaping is opt-in or budget-driven, and the default reply
+size is pinned by `token-benchmark.test.mjs` - if a change legitimately moves it,
+raise `NAIVE_BUDGET_BYTES` in the same commit and say why. An in-page command must not
+leave state behind that the app did not create: `openDb()` in `inject.js` rolls back
+the database creation a version-less `indexedDB.open` would otherwise cause.
+
 Run the full test suite before opening a PR (see "Testing" in the README):
 
 ```bash
@@ -100,11 +112,22 @@ should report what it left out: take the second `ctx` argument and call
 `noteAvoided(ctx, unscopedBytes, deliveredBytes)` (see `idb.dump` in `inject.js`),
 so the saving reaches the `scopedReads` ledger.
 
+After ANY edit to `inject.js` run `node tools/web-scout/build-id.mjs --stamp`.
+`inject.js` carries a hash of itself (`AGENT_BUILD`) that a tab reports on connect,
+so the relay can warn about a tab still running an older copy; `agent-build.test.mjs`
+fails while the stamp is out of date. `scaffold-command.mjs` restamps for you. In
+the app that loads it, bump the `?v=` on the script tag too - the stamp tells you a
+tab is stale, the query string is what makes the browser fetch the new file.
+
 Nothing needs to be running: each relay-touching test file starts its own
 ephemeral relay on a free port with a throwaway database, so a green run
 always validates the code on disk and files run in parallel. Tests that need
 a real connected browser tab skip themselves; set `WEBSCOUT_TEST_LIVE=1` to
-run them against a relay that has one. `docs-drift.test.mjs` requires your
+run them against a relay that has one. CI sets `WEBSCOUT_REQUIRE_BROWSER=1`, so
+the headless-browser tests fail there instead of skipping. When you need a child
+process or a liveness probe in a test, use `spawnClean` and `isUp` from
+`test-relay.mjs` (they carry the two Windows/runner traps: nested `node --test` inheriting
+`NODE_TEST_CONTEXT`, and a pending `fetch` tripping a libuv assertion at exit). `docs-drift.test.mjs` requires your
 new command and flags to appear in `usage.txt` (and the command in the README).
 
 ## PR expectations

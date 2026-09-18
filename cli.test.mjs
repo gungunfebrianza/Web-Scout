@@ -122,3 +122,40 @@ test('dom/idb/eval against a real connected tab (skipped if none connected in th
 
   run('session', 'end', String(session.id));
 });
+
+test('output is compact JSON when piped (indentation is tokens the caller pays for), indented with --pretty', () => {
+  const compact = run('status');
+  assert.equal(compact.status, 0);
+  assert.equal(compact.stdout.trim().split('\n').length, 1, 'one line when piped');
+  assert.doesNotMatch(compact.stdout, /\n\s+"/);
+  const pretty = run('status', '--pretty');
+  assert.equal(pretty.status, 0);
+  assert.ok(pretty.stdout.trim().split('\n').length > 5, 'indented with --pretty');
+  assert.deepEqual(JSON.parse(pretty.stdout).status, JSON.parse(compact.stdout).status);
+  assert.ok(run('--pretty', 'status').stdout.trim().split('\n').length > 5, '--pretty may come first');
+});
+
+test('the read-shaping flags are accepted by the argument check, and rejected where they do not apply', () => {
+  // no active session: the relay says so - which proves the flags got past validation
+  for (const args of [['idb', 'dump', 'orders', '--peek'], ['idb', 'dump', 'orders', '--table', '--delta'], ['net', 'log', '--if-changed'], ['dom', 'query', 'body', '--peek', '--no-guard']]) {
+    const r = run(...args);
+    assert.equal(r.status, 1);
+    assert.doesNotMatch(r.stderr, /does not take/, `${args.join(' ')} should be a valid invocation: ${r.stderr}`);
+  }
+  const bad = run('idb', 'put', 's', '{}', '--peek');
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /does not take --peek/);
+});
+
+test('session start takes --no-briefing and the reply carries no briefing then', () => {
+  const started = run('session', 'start', 'cli.test.mjs briefing', 'automated', '--no-briefing');
+  assert.equal(started.status, 0, started.stderr);
+  const session = JSON.parse(started.stdout);
+  assert.equal(session.briefing, undefined);
+  run('session', 'end', String(session.id));
+  const withBriefing = run('session', 'start', 'cli.test.mjs briefing', 'automated');
+  const parsed = JSON.parse(withBriefing.stdout);
+  assert.equal(parsed.briefing.available, false, 'no tab is connected to this relay');
+  assert.match(parsed.briefing.reason, /no tab connected/);
+  run('session', 'end', String(parsed.id));
+});

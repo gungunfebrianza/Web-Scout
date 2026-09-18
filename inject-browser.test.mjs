@@ -11,13 +11,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startTestRelay, freePort } from './test-relay.mjs';
-import { findBrowser, launchBrowser, sleep } from './browser-harness.mjs';
+import { currentInjectBuild } from './build-id.mjs';
+import { browserSkip, findBrowser, launchBrowser, sleep } from './browser-harness.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const browserPath = findBrowser();
 const skip = process.env.WEBSCOUT_TEST_LIVE === '1'
   ? 'skipped under WEBSCOUT_TEST_LIVE=1 (this test drives its own tab)'
-  : (browserPath ? false : 'no Chromium/Edge binary found (set WEBSCOUT_BROWSER)');
+  : browserSkip();
 
 const PAGE = `<!doctype html><html><head><title>fixture</title></head><body>
 <div id="app"><header id="hd"><nav><a>a</a><a>b</a></nav></header>
@@ -64,6 +65,14 @@ after(async () => {
   await relay?.stop();
 });
 
+test('the real in-page agent reports the build stamp of the file it loaded, so it is not flagged stale', { skip }, async () => {
+  const health = (await api('GET', '/health')).json.result;
+  const tab = health.agents_detail.find((a) => a.name === 'default');
+  assert.equal(tab.build, currentInjectBuild());
+  assert.equal(tab.agentStale, false);
+  assert.deepEqual(health.stale_agents, []);
+});
+
 test('a DOM change the page made on its own invalidates a cached dom.query', { skip }, async () => {
   const first = await command('dom.query', { selector: '#list' });
   const second = await command('dom.query', { selector: '#list' });
@@ -86,6 +95,19 @@ test('a fetch the page made on its own invalidates a cached net.log', { skip }, 
   const third = await command('net.log', {});
   assert.notEqual(third.json.result.__cacheHit, true);
   assert.equal(third.json.result.count, first.json.result.count + 1);
+});
+
+test('an idb command against a database the app has not created yet fails without creating it', { skip }, async () => {
+  // Before this, a version-less open created an empty v1 database, and the app's own
+  // open(name, 1) then never ran its upgrade - the next test creates the database
+  // exactly the way an app does and would hang if this had left one behind.
+  const list = await command('idb.list', {});
+  assert.equal(list.json.ok, false);
+  assert.match(list.json.error, /does not exist yet/);
+  const version = await command('db.version', {});
+  assert.equal(version.json.ok, false);
+  const existing = await page.evaluate(`indexedDB.databases().then((dbs) => dbs.map((d) => d.name))`);
+  assert.ok(!existing.includes('AgentCapitalOS'), 'no database was created');
 });
 
 test('an IndexedDB write the app made on its own invalidates a cached idb.dump', { skip }, async () => {
@@ -121,6 +143,12 @@ test('a whole-page selector answers with an outline; full keeps the markup', { s
   const full = (await command('dom.query', { selector: 'body', full: true })).json.result;
   assert.equal(full.outline, undefined);
   assert.match(full.outerHTML, /<main id="content">/);
+
+  // the full call right after the same selector's outline says the outline was not enough
+  const strategy = (await api('GET', '/token-report')).json.result.savings.readStrategy.outline;
+  assert.ok(strategy.calls >= 1 && strategy.deliveredBytes > 0);
+  assert.ok(strategy.oldDefaultBytes > 0, 'the page told the relay what the outline replaced');
+  assert.ok(strategy.followedByFull >= 1);
 });
 
 test('scoped reads report what they left out, and the ledger counts it', { skip }, async () => {

@@ -28,6 +28,17 @@ export function findBrowser() {
   return null;
 }
 
+// false = run the browser tests; a string = the skip reason. With
+// WEBSCOUT_REQUIRE_BROWSER=1 (CI) a missing browser is an error, not a skip: a
+// skipped test proves nothing, and a runner that silently lost its browser would
+// keep reporting green.
+export function browserSkip() {
+  if (findBrowser()) return false;
+  const reason = 'no Chromium/Edge binary found (set WEBSCOUT_BROWSER)';
+  if (process.env.WEBSCOUT_REQUIRE_BROWSER === '1') throw new Error(`${reason}, but WEBSCOUT_REQUIRE_BROWSER=1 forbids skipping the browser tests`);
+  return reason;
+}
+
 // Returns { call, evaluate, navigate, errors, close }. `errors` collects page
 // exceptions and console.error calls seen since launch.
 export async function launchBrowser(browserPath = findBrowser()) {
