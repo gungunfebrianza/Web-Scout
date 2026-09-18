@@ -477,7 +477,7 @@ function usage() {
   macro list                      list saved macros (id, name, step count, source session, and
                                    each one's own steps_cost_est/compacted_steps_removed)
   macro show <id>                 full macro detail, including every step
-  macro run <id> [--continue-on-error] [--from-step N] [--confirm]
+  macro run <id> [--continue-on-error] [--from-step N] [--confirm] [--full]
                                    replay a macro's steps against the CURRENTLY active session -
                                    start one first. Stops at the first failing step unless
                                    --continue-on-error. --from-step (0-based) skips earlier steps,
@@ -486,6 +486,13 @@ function usage() {
                                    the macro's own recorded-from session's goal - a cross-context
                                    replay guard, since a macro can mutate real data. --confirm
                                    overrides it once you've checked "macro show <id>" is right.
+                                   An idb.put step whose row (with an explicit "id" field) is
+                                   already byte-identical to what's stored is SKIPPED (no
+                                   dispatch, no logged action) - response marks it
+                                   skipped:true. Response is compact by default (per step:
+                                   type/ok/skipped/durationMs only) - a FAILED step still carries
+                                   its full error/result; pass --full to get every step's full
+                                   result back, same shape as before this existed.
   macro delete <id>               delete a saved macro
   macro export-verity <id> [--out <path>]
                                    best-effort skeleton Verity scenario JSON from a
@@ -574,6 +581,15 @@ function usage() {
    - golden-diff cache: "idb diff-golden"/a suite's diff-golden step recognizes when two DIFFERENT
      snapshot ids hold byte-identical content to an already-computed diff, and omits re-sending the
      full (possibly large) diff body - response carries fromCache:true + cachedFromDiffId instead.
+   - snapshot row dedup: "idb snapshot" stores each ROW's content once, ever, regardless of how
+     many snapshots (across ANY session) contain an unchanged copy of it - most rows in a real
+     store don't change between two consecutive snapshots, so only the rows that actually changed
+     cost anything physically. "token-report" (no --session)'s savings.snapshotRowDedup is the proof.
+   - macro step dedup: "macro record"/"macro update" store each STEP's own {type,params} content
+     once, ever, so two macros sharing an identical prefix (login, navigate) share that storage
+     instead of each paying for their own full copy. savings.stepBlobDedup is the proof.
+   - macro no-op skip: "macro run" skips an idb.put step (with an "id" field on its row) whose row
+     is already byte-identical to what's stored - no dispatch, no logged action.
 
   macro run / suite run           print an estimated token-cost NOTE on stderr before replaying -
                                    "macro run" reads the target macro's OWN stamped steps_cost_est
@@ -921,9 +937,11 @@ async function handleMacro(sub, rawArgs) {
     let continueOnError;
     let fromStep;
     let confirm;
+    let full;
     ({ args, value: continueOnError } = extractBooleanFlag(args, '--continue-on-error'));
     ({ args, value: fromStep } = extractFlag(args, '--from-step'));
     ({ args, value: confirm } = extractBooleanFlag(args, '--confirm'));
+    ({ args, value: full } = extractBooleanFlag(args, '--full'));
     const id = args[0];
     if (!id) throw new Error('macro run requires an id');
     try {
@@ -937,7 +955,7 @@ async function handleMacro(sub, rawArgs) {
       const compactNote = macro.compacted_steps_removed ? ` (${macro.compacted_steps_removed} duplicate step(s) already compacted out at record time)` : '';
       console.error(`NOTE: estimated cost of this replay ~${estTokens} tokens across ${macro.steps.length} step(s)${compactNote} (historical per-type averages - see "token-report").`);
     } catch { /* best-effort estimate only, never block the run */ }
-    const result = await request('POST', `/macros/${id}/run`, { continueOnError, confirm, fromStep: fromStep !== undefined ? Number(fromStep) : undefined });
+    const result = await request('POST', `/macros/${id}/run`, { continueOnError, confirm, full, fromStep: fromStep !== undefined ? Number(fromStep) : undefined });
     printResult(result);
     // Same exit-code gap as session assert: the relay's own route never
     // throws on a failing step (only on the cross-context guard), so a

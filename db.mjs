@@ -264,6 +264,79 @@ export function getResultDedupSavings() {
   };
 }
 
+// ---------- content-addressed snapshot ROW storage ----------
+//
+// result_blobs above dedups a whole action result; a snapshot's stores_json
+// is its own separate large blob and was still stored FULL on every single
+// idb.snapshot, even though most rows in a real store don't change between
+// two consecutive snapshots (idb.snapshot is confirmed the #1 all-time cost
+// offender even with --since scoping it to changed stores only - the
+// UNCHANGED rows inside a "changed" store were still paying full storage
+// every time). This interns at ROW granularity instead: each row's own JSON
+// is hashed and stored once; a snapshot keeps only an ordered list of row
+// hashes per store. Deliberately content-only (no store+key in the hash) -
+// two different stores holding byte-identical rows (e.g. two empty-ish
+// config rows) legitimately share one physical copy.
+db.exec(`
+CREATE TABLE IF NOT EXISTS snapshot_rows (
+  hash          TEXT PRIMARY KEY,
+  json          TEXT NOT NULL,
+  byte_length   INTEGER NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  ref_count     INTEGER NOT NULL DEFAULT 0
+);
+`);
+const stmtGetSnapshotRow = db.prepare('SELECT json FROM snapshot_rows WHERE hash = ?');
+const stmtInsertSnapshotRow = db.prepare('INSERT INTO snapshot_rows (hash, json, byte_length, first_seen_at, ref_count) VALUES (?, ?, ?, ?, 1)');
+const stmtBumpSnapshotRow = db.prepare('UPDATE snapshot_rows SET ref_count = ref_count + 1 WHERE hash = ?');
+const stmtHasSnapshotRow = db.prepare('SELECT 1 FROM snapshot_rows WHERE hash = ?');
+
+function internSnapshotRow(rowJson) {
+  const hash = crypto.createHash('sha256').update(rowJson).digest('hex');
+  if (stmtHasSnapshotRow.get(hash)) {
+    stmtBumpSnapshotRow.run(hash);
+    return hash;
+  }
+  stmtInsertSnapshotRow.run(hash, rowJson, rowJson.length, new Date().toISOString());
+  return hash;
+}
+
+function resolveSnapshotRow(hash) {
+  return stmtGetSnapshotRow.get(hash)?.json ?? 'null';
+}
+
+// A pre-migration snapshot's stores_json is still the FULL legacy shape
+// ({storeName: {rows:[...]}}) - only a new row's stores_json is the compact
+// {storeName: {rowHashes:[...]}} refs shape, distinguished per-store by
+// which key is present, same NULL/legacy-fallback discipline as
+// resolveResultJson above.
+function resolveStores(storesJson) {
+  const parsed = JSON.parse(storesJson);
+  const stores = {};
+  for (const [name, entry] of Object.entries(parsed)) {
+    if (entry && Array.isArray(entry.rowHashes)) {
+      stores[name] = { rows: entry.rowHashes.map((h) => JSON.parse(resolveSnapshotRow(h))) };
+    } else {
+      stores[name] = entry;
+    }
+  }
+  return stores;
+}
+
+export function getSnapshotRowDedupSavings() {
+  const row = db.prepare(
+    'SELECT COUNT(*) AS uniqueRows, SUM(ref_count) AS totalReferences, SUM(byte_length) AS uniqueBytes, SUM((ref_count - 1) * byte_length) AS bytesSaved FROM snapshot_rows',
+  ).get();
+  const bytesSaved = row.bytesSaved || 0;
+  return {
+    uniqueRows: row.uniqueRows || 0,
+    totalReferences: row.totalReferences || 0,
+    uniqueBytes: row.uniqueBytes || 0,
+    bytesSaved,
+    estTokensSaved: Math.round(bytesSaved / CHARS_PER_TOKEN_ESTIMATE),
+  };
+}
+
 // ---------- sessions ----------
 
 const stmtInsertSession = db.prepare('INSERT INTO sessions (goal, context, status, started_at, strict_crv, strict_crv_stores, tags, token_budget) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
@@ -667,21 +740,31 @@ const stmtGetGoldenSnapshot = db.prepare('SELECT * FROM state_snapshots WHERE go
 export function saveSnapshot({ sessionId, actionId, stores, agentName, goldenName }) {
   const takenAt = new Date().toISOString();
   const counts = {};
-  for (const [name, entry] of Object.entries(stores)) counts[name] = entry.rows.length;
-  const storesJson = JSON.stringify(stores);
-  // Content hash (not the row's own id) is what findCachedDiff keys on -
-  // lets a diff be recognized as "nothing new" across DIFFERENT snapshot
-  // ids, since every idb.snapshot takes a fresh id even when the store's
-  // content didn't actually change.
-  const contentHash = crypto.createHash('sha256').update(storesJson).digest('hex');
-  const info = stmtInsertSnapshot.run(sessionId, actionId ?? null, takenAt, JSON.stringify(counts), storesJson, storesJson.length, agentName ?? 'default', goldenName ?? null, contentHash);
-  return { id: Number(info.lastInsertRowid), takenAt, counts, byteSize: storesJson.length, agentName: agentName ?? 'default', goldenName: goldenName ?? null, contentHash };
+  const refs = {};
+  for (const [name, entry] of Object.entries(stores)) {
+    const rows = Array.isArray(entry?.rows) ? entry.rows : [];
+    counts[name] = rows.length;
+    refs[name] = { rowHashes: rows.map((row) => internSnapshotRow(JSON.stringify(row))) };
+  }
+  const refsJson = JSON.stringify(refs);
+  // Content hash is computed off the LOGICAL content (what a caller actually
+  // receives), not the compact refs encoding - two snapshots taken from
+  // identical store content must still hash identically regardless of which
+  // rows happened to already be interned, or findCachedDiff below would
+  // silently stop matching real repeats.
+  const logicalStoresJson = JSON.stringify(stores);
+  const contentHash = crypto.createHash('sha256').update(logicalStoresJson).digest('hex');
+  // byte_size stays the LOGICAL size too (same discipline as the
+  // COALESCE(result_json, blob) reads elsewhere) - a snapshot's reported
+  // size never shrinks just because this run happened to dedup well.
+  const info = stmtInsertSnapshot.run(sessionId, actionId ?? null, takenAt, JSON.stringify(counts), refsJson, logicalStoresJson.length, agentName ?? 'default', goldenName ?? null, contentHash);
+  return { id: Number(info.lastInsertRowid), takenAt, counts, byteSize: logicalStoresJson.length, agentName: agentName ?? 'default', goldenName: goldenName ?? null, contentHash };
 }
 
 export function getSnapshot(id) {
   const row = stmtGetSnapshot.get(Number(id));
   if (!row) throw new Error(`no such snapshot: ${id}`);
-  return { ...row, counts: JSON.parse(row.counts_json), stores: JSON.parse(row.stores_json) };
+  return { ...row, counts: JSON.parse(row.counts_json), stores: resolveStores(row.stores_json) };
 }
 
 export function listSnapshots(sessionId) {
@@ -693,7 +776,7 @@ export function listSnapshots(sessionId) {
 export function getGoldenSnapshot(name) {
   const row = stmtGetGoldenSnapshot.get(name);
   if (!row) throw new Error(`no such golden snapshot: ${name}`);
-  return { ...row, counts: JSON.parse(row.counts_json), stores: JSON.parse(row.stores_json) };
+  return { ...row, counts: JSON.parse(row.counts_json), stores: resolveStores(row.stores_json) };
 }
 
 // ---------- state diffs ----------
@@ -841,9 +924,66 @@ const stmtGetMacro = db.prepare('SELECT * FROM macros WHERE id = ?');
 const stmtListMacros = db.prepare('SELECT * FROM macros ORDER BY id DESC');
 const stmtDeleteMacro = db.prepare('DELETE FROM macros WHERE id = ?');
 
+// ---------- content-addressed macro STEP storage ----------
+//
+// Many macros recorded from different sessions share an identical prefix
+// (navigate-to-page, log-in) - each macro previously stored that step's
+// full {type,params} JSON in its own steps_json, once per macro. Same
+// content-addressing shape as result_blobs/snapshot_rows above, applied one
+// level down: a macro's steps_json becomes an ordered array of step-content
+// hashes; the actual {type,params} JSON is stored once here regardless of
+// how many macros (or how many times within one macro, post-compaction)
+// reference it.
+db.exec(`
+CREATE TABLE IF NOT EXISTS step_blobs (
+  hash          TEXT PRIMARY KEY,
+  json          TEXT NOT NULL,
+  byte_length   INTEGER NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  ref_count     INTEGER NOT NULL DEFAULT 0
+);
+`);
+const stmtGetStepBlob = db.prepare('SELECT json FROM step_blobs WHERE hash = ?');
+const stmtInsertStepBlob = db.prepare('INSERT INTO step_blobs (hash, json, byte_length, first_seen_at, ref_count) VALUES (?, ?, ?, ?, 1)');
+const stmtBumpStepBlob = db.prepare('UPDATE step_blobs SET ref_count = ref_count + 1 WHERE hash = ?');
+const stmtHasStepBlob = db.prepare('SELECT 1 FROM step_blobs WHERE hash = ?');
+
+function internStep(step) {
+  const stepJson = JSON.stringify(step);
+  const hash = crypto.createHash('sha256').update(stepJson).digest('hex');
+  if (stmtHasStepBlob.get(hash)) {
+    stmtBumpStepBlob.run(hash);
+  } else {
+    stmtInsertStepBlob.run(hash, stepJson, stepJson.length, new Date().toISOString());
+  }
+  return hash;
+}
+
+export function getStepBlobDedupSavings() {
+  const row = db.prepare(
+    'SELECT COUNT(*) AS uniqueSteps, SUM(ref_count) AS totalReferences, SUM(byte_length) AS uniqueBytes, SUM((ref_count - 1) * byte_length) AS bytesSaved FROM step_blobs',
+  ).get();
+  const bytesSaved = row.bytesSaved || 0;
+  return {
+    uniqueSteps: row.uniqueSteps || 0,
+    totalReferences: row.totalReferences || 0,
+    uniqueBytes: row.uniqueBytes || 0,
+    bytesSaved,
+    estTokensSaved: Math.round(bytesSaved / CHARS_PER_TOKEN_ESTIMATE),
+  };
+}
+
+// A pre-migration macro's steps_json is still the full legacy array of
+// {type,params} objects; a new row's steps_json is an array of step-content
+// hashes (plain strings) - discriminated by the first element's type, same
+// legacy-fallback discipline as resolveStores above.
 function hydrateMacro(row) {
   if (!row) return row;
-  return { ...row, steps: JSON.parse(row.steps_json) };
+  const parsed = JSON.parse(row.steps_json);
+  const steps = parsed.length && typeof parsed[0] === 'string'
+    ? parsed.map((hash) => JSON.parse(stmtGetStepBlob.get(hash)?.json ?? 'null'))
+    : parsed;
+  return { ...row, steps };
 }
 
 // Consecutive identical type+params steps are recording noise (a retried
@@ -884,9 +1024,10 @@ export function createMacro({ name, sourceSessionId, steps }) {
   const createdAt = new Date().toISOString();
   const { steps: compacted, removed } = compactMacroSteps(steps);
   const costEst = estimateStepsTokenCost(compacted);
+  const stepHashes = compacted.map(internStep);
   let info;
   try {
-    info = stmtInsertMacro.run(name, sourceSessionId ?? null, JSON.stringify(compacted), createdAt, costEst, removed);
+    info = stmtInsertMacro.run(name, sourceSessionId ?? null, JSON.stringify(stepHashes), createdAt, costEst, removed);
   } catch (err) {
     if (String(err.message).includes('UNIQUE')) throw new Error(`a macro named "${name}" already exists`);
     throw err;
@@ -899,7 +1040,8 @@ const stmtUpdateMacroSteps = db.prepare('UPDATE macros SET steps_json = ?, steps
 export function updateMacroSteps(id, steps) {
   const { steps: compacted, removed } = compactMacroSteps(steps);
   const costEst = estimateStepsTokenCost(compacted);
-  const info = stmtUpdateMacroSteps.run(JSON.stringify(compacted), costEst, removed, Number(id));
+  const stepHashes = compacted.map(internStep);
+  const info = stmtUpdateMacroSteps.run(JSON.stringify(stepHashes), costEst, removed, Number(id));
   if (info.changes === 0) throw new Error(`no such macro: ${id}`);
   return hydrateMacro(stmtGetMacro.get(Number(id)));
 }
@@ -940,12 +1082,16 @@ export function getTokenSavingsReport() {
   const resultDedup = getResultDedupSavings();
   const goldenDiffCache = getGoldenDiffCacheSavings();
   const macroCompaction = { stepsRemoved: stmtMacroCompactionTotal.get().totalRemoved };
+  const snapshotRowDedup = getSnapshotRowDedupSavings();
+  const stepBlobDedup = getStepBlobDedupSavings();
   return {
     resultDedup,
     goldenDiffCache,
     macroCompaction,
-    totalBytesSaved: resultDedup.bytesSaved + goldenDiffCache.bytesSaved,
-    totalEstTokensSaved: resultDedup.estTokensSaved + goldenDiffCache.estTokensSaved,
+    snapshotRowDedup,
+    stepBlobDedup,
+    totalBytesSaved: resultDedup.bytesSaved + goldenDiffCache.bytesSaved + snapshotRowDedup.bytesSaved + stepBlobDedup.bytesSaved,
+    totalEstTokensSaved: resultDedup.estTokensSaved + goldenDiffCache.estTokensSaved + snapshotRowDedup.estTokensSaved + stepBlobDedup.estTokensSaved,
   };
 }
 

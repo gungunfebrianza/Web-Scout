@@ -1283,20 +1283,63 @@ const routes = [
         }
       }
 
+      // No-op skip: a replayed idb.put whose row is already byte-identical
+      // to what's already stored is pure waste - it mutates nothing, but
+      // still pays a full dispatch round trip AND a logged action (echoing
+      // the row back) every single replay. Only safe when the row carries
+      // an explicit "id" field the pre-check can idb.get by - a store
+      // relying on IndexedDB autoIncrement to assign a fresh key on insert
+      // has no stable id to check against, so those rows always dispatch
+      // normally (this is a heuristic, not a general keyPath resolver - see
+      // README). The idb.get pre-check itself is NOT logged as an action
+      // (dispatchCommand called directly, bypassing withLoggedAction) -
+      // logging a small read to skip a large write would eat into the very
+      // savings this exists to produce.
+      async function isNoOpPut(step) {
+        if (step.type !== 'idb.put') return false;
+        const row = step.params?.row;
+        if (!row || typeof row !== 'object' || row.id === undefined) return false;
+        try {
+          const existing = await dispatchCommand('idb.get', { store: step.params.store, key: row.id }, COMMAND_TIMEOUT_MS, agentName);
+          return existing.found && JSON.stringify(existing.row) === JSON.stringify(row);
+        } catch {
+          return false;
+        }
+      }
+
       const results = [];
       for (const step of macro.steps.slice(fromStep)) {
+        if (await isNoOpPut(step)) {
+          results.push({ type: step.type, ok: true, skipped: true, reason: 'idb.put: identical row already present' });
+          continue;
+        }
         const stepTimeoutMs = LONG_POLL_TYPES.has(step.type) ? (Number(step.params?.timeoutMs) || 15000) + 5000
           : step.type === 'idb.snapshot' ? SNAPSHOT_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
+        const stepStartedAt = Date.now();
         try {
           const { result } = await withLoggedAction(session.id, step.type, { ...step.params, via: 'macro', macroId: macro.id, macroName: macro.name }, () => dispatchCommand(step.type, step.params ?? {}, stepTimeoutMs, agentName), agentName);
-          results.push({ type: step.type, ok: true, result });
+          results.push({ type: step.type, ok: true, result, durationMs: Date.now() - stepStartedAt });
         } catch (err) {
-          results.push({ type: step.type, ok: false, error: err.message });
+          results.push({ type: step.type, ok: false, error: err.message, durationMs: Date.now() - stepStartedAt });
           if (!continueOnError) break;
         }
       }
       broadcastUpdate('action', session.id);
-      return { macro: { id: macro.id, name: macro.name }, fromStep, ranSteps: results.length, totalSteps: macro.steps.length, results };
+      const skippedCount = results.filter((r) => r.skipped).length;
+      // Compact by default: a step's full result (can be as large as any
+      // other command's - idb.dump/dom.query-shaped) was previously always
+      // echoed back in FULL for every step, on every replay, forever - the
+      // caller almost never needs it (it already has each step's result
+      // from when the macro was first recorded). Default response keeps
+      // only {type,ok,skipped,reason,durationMs} per step; a FAILED step
+      // always keeps its error/result in full (that's the one case a
+      // caller genuinely needs detail to debug), and {"full": true} opts
+      // back into every step's full result.
+      const includeFull = !!body.full;
+      const compactResults = results.map((r) => (includeFull || !r.ok
+        ? r
+        : { type: r.type, ok: r.ok, skipped: r.skipped, reason: r.reason, durationMs: r.durationMs }));
+      return { macro: { id: macro.id, name: macro.name }, fromStep, ranSteps: results.length, totalSteps: macro.steps.length, skippedCount, results: compactResults };
     },
   },
 
