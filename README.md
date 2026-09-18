@@ -48,6 +48,8 @@ The core discipline, nicknamed **"CRV"** in this codebase:
 - Reload the page, including a "hard reload" that clears Service Worker
   caches when a plain reload isn't enough
 - Take a best-effort DOM screenshot
+- Inspect a **React** component's props/state/hooks directly off the DOM
+  fiber - no React DevTools extension required
 
 **Evidence and safety**
 - Every action requires a declared session goal first - no anonymous
@@ -218,6 +220,17 @@ idb diff 1 2                  # or: idb diff-golden my-baseline 2 - both cache-a
 idb restore --golden my-baseline
 ```
 
+**React**
+```bash
+react inspect "#some-component" --nth 0   # props (+ state for a class component, or positional
+                               # hooks for a function component) of the nearest enclosing
+                               # React component walking up from selector. Throws if selector
+                               # isn't inside React's managed tree.
+react tree "#some-component" --nth 0 200  # ancestor chain of enclosing component names only
+                               # (default maxDepth 20) - orient first, then "react inspect" a
+                               # more specific selector.
+```
+
 **Network & console**
 ```bash
 net log
@@ -284,8 +297,9 @@ token-report --session <id>   # one session's own cost, plus repeated-call loops
                                # phase actually cost the tokens - ad-hoc calls bucket separately)
 ```
 Read calls (`idb dump/get/list`, `dom query/rect/style`, `net log`,
-`console log`) are answered from an in-relay cache when called twice IN A
-ROW with identical args and nothing mutating in between
+`console log`, `react inspect/tree`) are answered from an in-relay cache
+when called twice IN A ROW with identical args and nothing mutating in
+between
 (`__cacheHit:true`); any result byte-identical to one already seen -
 even in a different session - is stored once at the DB level either way,
 no flag needed for either. A cache hit still counts toward the running
@@ -354,9 +368,9 @@ codex mcp add web-scout -- node tools/web-scout/mcp-server.mjs
 ```
 
 The relay (`node tools/web-scout/relay.mjs`) must already be running - this
-just talks to it, it doesn't start it for you. 10 tools, grouped by
+just talks to it, it doesn't start it for you. 11 tools, grouped by
 namespace (`webscout_dom`, `webscout_idb`, `webscout_net`, `webscout_eval`,
-etc.) rather than one tool per command - `tools/list` on a connected client
+`webscout_react`, etc.) rather than one tool per command - `tools/list` on a connected client
 shows the full, current, authoritative list. See
 [`docs/web-scout-architecture.md`](./docs/web-scout-architecture.md#mcp-server-internals)
 for the session-model and error-handling details.
