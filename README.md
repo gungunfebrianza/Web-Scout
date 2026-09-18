@@ -35,10 +35,16 @@ The core discipline, nicknamed **"CRV"** in this codebase:
 **Browser control**
 - Query, click, and fill real DOM elements (with ambiguous-selector
   protection - it refuses to guess which element you meant)
-- Read and write IndexedDB directly (`dump`, `put`, `delete`, `clear`)
+- Read and write IndexedDB directly (`dump`, `put`, `put-many`, `patch`,
+  `delete`, `clear`) - `put`/`put-many` support `--dry-run` to validate a
+  row's shape against the store's real keyPath/autoIncrement with zero
+  mutation
 - Run arbitrary JavaScript in the page (`eval`), with a timeout and a safe
   fallback for values that can't be JSON-serialized
-- Read captured console errors/warnings and network requests
+- Read captured console errors/warnings and network requests - optionally
+  arm response-BODY capture for requests matching one or more URL
+  substrings (`net capture <substr>`, repeatable to watch several endpoints
+  at once)
 - Reload the page, including a "hard reload" that clears Service Worker
   caches when a plain reload isn't enough
 - Take a best-effort DOM screenshot
@@ -57,7 +63,8 @@ The core discipline, nicknamed **"CRV"** in this codebase:
 - Declarative `session assert` checks against live state (e.g. "store X
   has at least 1 row where field Y equals Z")
 - Session cleanup tools that find and remove synthetic/test data you wrote
-  during a session
+  during a session - `--summary` collapses a large diff to per-store counts
+  plus an estBytes/estTokens size estimate, instead of a full row dump
 
 **Automation**
 - Record a session's actions as a reusable **macro**, then replay it later
@@ -67,10 +74,16 @@ The core discipline, nicknamed **"CRV"** in this codebase:
 - Named multi-tab support - drive more than one browser tab at once
 
 **Token cost & waste prevention**
-- `token-report` ranks every action TYPE and TARGET (store/selector) by
-  estimated tokens spent reading its result back, cross-session or scoped
-  to one session - plus repeated-call loops, redundant re-checks, and a
-  `savings` block proving what the mechanisms below actually saved
+- `token-report` ranks every action TYPE, TARGET (store/selector), and now
+  MACRO (which replayed macro/CRV phase actually cost the tokens, ad-hoc
+  calls bucket separately) by estimated tokens spent reading its result
+  back, cross-session or scoped to one session - plus repeated-call loops,
+  redundant re-checks, and a `savings` block proving what the mechanisms
+  below actually saved
+- A running per-session token total on every reply
+  (`x-webscout-session-tokens` header, printed past a threshold - override
+  with `WEBSCOUT_TOKEN_THRESHOLD=<n>`) - correctly counts same-session
+  cache hits too, not just freshly-dispatched calls
 - Same-session read-result cache (identical read, nothing mutated since ->
   answered from cache, never re-dispatched), wired into both `/command` and
   `macro run`'s own replay loop
@@ -279,8 +292,9 @@ suite run ./checks/my-suite.json
 ```bash
 token-report                  # all-time byType/byTarget cost ranking + a "savings" block proving
                                # what dedup/cache/compaction/diff-cache actually saved
-token-report --session <id>   # one session's own cost, plus repeated-call loops and redundant
-                               # (same-result) re-checks
+token-report --session <id>   # one session's own cost, plus repeated-call loops, redundant
+                               # (same-result) re-checks, and byMacro (which replayed macro/CRV
+                               # phase actually cost the tokens - ad-hoc calls bucket separately)
 ```
 Read calls (`idb dump/get/list`, `dom query/rect/style`, `net log`,
 `console log`, `react inspect/tree`) are answered from an in-relay cache
@@ -288,7 +302,14 @@ when called twice IN A ROW with identical args and nothing mutating in
 between
 (`__cacheHit:true`); any result byte-identical to one already seen -
 even in a different session - is stored once at the DB level either way,
-no flag needed for either.
+no flag needed for either. A cache hit still counts toward the running
+`x-webscout-session-tokens` total on every reply (see below) - it skips
+the DB action log, but the result bytes still land in your terminal and
+still get read.
+
+Every reply also carries a running per-session token total, printed to
+stderr once it crosses a threshold (default ~5000, override with
+`WEBSCOUT_TOKEN_THRESHOLD=<n>`).
 
 **Other**
 ```bash
