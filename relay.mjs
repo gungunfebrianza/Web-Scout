@@ -106,7 +106,7 @@ const MACRO_CONTEXT_SIMILARITY_THRESHOLD = 0.15;
 // read-only, because this file cannot tell a read eval from a write eval).
 // idb.snapshot is dispatched via POST /state/snapshot, never this route -
 // not applicable here either way.
-const READ_CACHEABLE_TYPES = new Set(['idb.dump', 'idb.get', 'idb.list', 'dom.query', 'dom.rect', 'dom.computedStyle', 'net.log', 'console.log']);
+const READ_CACHEABLE_TYPES = new Set(['idb.dump', 'idb.get', 'idb.list', 'dom.query', 'dom.rect', 'dom.computedStyle', 'net.log', 'console.log', 'react.inspect', 'react.tree']);
 // Anything that can change DOM/IndexedDB/navigation state - a cache entry
 // recorded before one of these ran must never be served again.
 const MUTATING_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'eval', 'idb.put', 'idb.patch', 'idb.delete', 'idb.deleteMany', 'idb.clear', 'page.reload', 'page.hardReload']);

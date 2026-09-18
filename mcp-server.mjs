@@ -225,6 +225,21 @@ const TOOLS = [
     },
   },
   {
+    name: 'webscout_react',
+    description: 'React fiber inspection (props/state/hooks), against the active session\'s connected tab. '
+      + 'Works only on a React-managed DOM node (throws otherwise); no dependency on the React DevTools extension.\n'
+      + 'Actions:\n'
+      + '  inspect {selector, nth?} - props (+ state for a class component, or positional hooks for a function component) '
+      + 'of the nearest enclosing component walking up from selector\n'
+      + '  tree {selector, nth?, maxDepth?} - ancestor chain of enclosing component names (default maxDepth 20), for orienting '
+      + 'before drilling into one level with inspect\n'
+      + 'Both take optional `agent` (multi-tab target name).',
+    actions: {
+      inspect: (p) => sendCmd('react.inspect', { selector: requireField(p, 'selector'), nth: numOrUndef(p?.nth) }, p?.agent),
+      tree: (p) => sendCmd('react.tree', { selector: requireField(p, 'selector'), nth: numOrUndef(p?.nth), maxDepth: numOrUndef(p?.maxDepth) }, p?.agent),
+    },
+  },
+  {
     name: 'webscout_idb',
     description: 'IndexedDB read/write plus persisted snapshot/diff/restore, against the active session\'s connected tab.\n'
       + 'Actions:\n'

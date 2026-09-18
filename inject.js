@@ -261,6 +261,129 @@
     return { el: all[0], autoPickedFromAmbiguous: false };
   }
 
+  // ---------- React fiber inspection (dom-tree walk for props/state/hooks;
+  // no dependency on the React DevTools extension - reads the same internal
+  // fiber pointer DevTools itself reads). React attaches a fiber reference
+  // directly to each DOM node it manages under a key named
+  // __reactFiber$<random> (React 17+) or __reactInternalInstance$<random>
+  // (React <=16) - the random suffix changes per React build/instance, so
+  // this scans the element's own keys rather than guessing the suffix. ----------
+
+  function getReactFiber(el) {
+    const key = Object.keys(el).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+    return key ? el[key] : null;
+  }
+
+  // A fiber's `type` distinguishes what kind of unit of work it is: a plain
+  // string ('div', 'span', ...) is a host (real DOM) node, a function is a
+  // function component, an object with $$typeof is memo/forwardRef/context.
+  // Only function/class fibers carry meaningful props/state for a caller - a
+  // host fiber's "props" are really just DOM attributes (dom.query already
+  // reports those via outerHTML).
+  function isComponentType(type) {
+    if (typeof type === 'function') return true;
+    if (type && typeof type === 'object' && type.$$typeof) return true;
+    return false;
+  }
+
+  function componentDisplayName(fiber) {
+    const t = fiber.type;
+    if (!t) return fiber.stateNode?.constructor?.name || `(fiber tag ${fiber.tag})`;
+    if (typeof t === 'string') return t;
+    if (typeof t === 'function') return t.displayName || t.name || 'Anonymous';
+    if (t.render) return t.render.displayName || t.render.name || 'ForwardRef'; // forwardRef
+    if (t.type) return componentDisplayName({ type: t.type }); // memo
+    return t.displayName || 'Anonymous';
+  }
+
+  // Best-effort JSON-safe copy, same spirit as eval's own __unserializable
+  // fallback but applied per-VALUE so one bad field can't blank out the
+  // whole props/state object (props/state routinely hold event-handler
+  // functions, DOM node refs, and circular structures - none JSON-safe).
+  // depth/array/key/string caps mirror dom.query's own outerHTML/text caps -
+  // component state can be arbitrarily large (a whole store landed in one
+  // hook is a real case) and this must stay a debugging snapshot, not a
+  // full dump.
+  function safeSerialize(value, seen, depth) {
+    const d = depth === undefined ? 0 : depth;
+    const MAX_DEPTH = 6;
+    const MAX_ARRAY = 50;
+    const MAX_KEYS = 50;
+    const MAX_STRING = 500;
+    if (value === null || value === undefined) return value;
+    const t = typeof value;
+    if (t === 'string') return value.length > MAX_STRING ? `${value.slice(0, MAX_STRING)}...(${value.length} chars, truncated)` : value;
+    if (t === 'number' || t === 'boolean') return value;
+    if (t === 'bigint') return `${value.toString()}n`;
+    if (t === 'function') return `[Function ${value.name || 'anonymous'}]`;
+    if (t === 'symbol') return value.toString();
+    if (value instanceof Node) return `[DOMNode <${value.nodeName ? value.nodeName.toLowerCase() : '?'}>]`;
+    if (d >= MAX_DEPTH) return '[max depth reached]';
+    const s = seen || new WeakSet();
+    if (t === 'object') {
+      if (s.has(value)) return '[circular]';
+      s.add(value);
+      if (Array.isArray(value)) {
+        const out = value.slice(0, MAX_ARRAY).map((v) => safeSerialize(v, s, d + 1));
+        if (value.length > MAX_ARRAY) out.push(`...(${value.length - MAX_ARRAY} more)`);
+        return out;
+      }
+      if (value instanceof Map) {
+        return { __type: 'Map', size: value.size, entries: [...value.entries()].slice(0, MAX_ARRAY).map(([k, v]) => [safeSerialize(k, s, d + 1), safeSerialize(v, s, d + 1)]) };
+      }
+      if (value instanceof Set) {
+        return { __type: 'Set', size: value.size, values: [...value.values()].slice(0, MAX_ARRAY).map((v) => safeSerialize(v, s, d + 1)) };
+      }
+      const keys = Object.keys(value);
+      const out = {};
+      for (const k of keys.slice(0, MAX_KEYS)) {
+        try { out[k] = safeSerialize(value[k], s, d + 1); } catch (err) { out[k] = `[unreadable: ${err.message}]`; }
+      }
+      if (keys.length > MAX_KEYS) out.__truncatedKeys = keys.length - MAX_KEYS;
+      return out;
+    }
+    return String(value);
+  }
+
+  // Function components store hook state as a singly-linked list on
+  // fiber.memoizedState (NOT an array - React relies on hook CALL ORDER, not
+  // names, which is also why this list carries no hook names, only
+  // positional index). Each node's own .memoizedState shape depends on which
+  // hook produced it (useState/useReducer: the current value; useRef:
+  // {current}; useEffect: an internal effect record, not a "value" at all) -
+  // reported as-is via safeSerialize rather than guessing the hook type,
+  // since there is no reliable public signal on the fiber for that.
+  function hooksFromMemoizedState(memoizedState) {
+    const hooks = [];
+    let node = memoizedState;
+    let i = 0;
+    const MAX_HOOKS = 50;
+    while (node && i < MAX_HOOKS) {
+      hooks.push({ index: i, value: safeSerialize(node.memoizedState) });
+      node = node.next;
+      i += 1;
+    }
+    return hooks;
+  }
+
+  // Walks fiber.return (parent-of-current-unit-of-work, NOT the DOM parent -
+  // they usually but not always match, e.g. across a Portal) until it finds
+  // a function/class component fiber. A DOM node's own attached fiber is
+  // almost always a HostComponent (a real DOM element) - the component that
+  // actually OWNS that node's props/state is always an ancestor in fiber
+  // terms, never the host fiber itself.
+  function findComponentFiber(hostFiber) {
+    let fiber = hostFiber;
+    while (fiber && !isComponentType(fiber.type)) {
+      fiber = fiber.return;
+    }
+    return fiber;
+  }
+
+  function isClassFiber(fiber) {
+    return typeof fiber.type === 'function' && !!fiber.type.prototype && !!fiber.type.prototype.isReactComponent;
+  }
+
   // ---------- Selector picker helpers (used by dom.pick) ----------
 
   function cssEscape(s) { return String(s).replace(/[^a-zA-Z0-9_-]/g, (c) => `\\${c}`); }
@@ -895,6 +1018,60 @@
       const out = {};
       for (const p of props) out[p] = cs.getPropertyValue(p);
       return out;
+    },
+    // Reads the props/state (class) or hooks (function component) of the
+    // nearest enclosing React component for a DOM element - previously only
+    // answerable by hand-walking __reactFiber$* keys through a live `eval`
+    // call. Walks UP from the selector's own DOM node (see
+    // findComponentFiber) because the node a selector targets is almost
+    // always a plain host element (a div/button/...), not the component
+    // fiber itself - React never attaches a function/class fiber directly to
+    // a DOM node.
+    'react.inspect': ({ selector, nth }) => {
+      const { el } = resolveTarget(selector, nth);
+      const hostFiber = getReactFiber(el);
+      if (!hostFiber) {
+        throw new Error(`no React fiber found on element matching '${selector}' - either this page isn't a React app, this element isn't inside React's managed tree, or React hasn't mounted yet`);
+      }
+      const fiber = findComponentFiber(hostFiber);
+      if (!fiber) {
+        throw new Error(`'${selector}' resolved to a React-managed DOM node, but no function/class component fiber was found walking up its ancestor chain (only host fibers) - this can happen at the very root of the tree`);
+      }
+      const isClass = isClassFiber(fiber);
+      return {
+        componentName: componentDisplayName(fiber),
+        isClassComponent: isClass,
+        key: fiber.key,
+        props: safeSerialize(fiber.memoizedProps),
+        ...(isClass
+          ? { state: safeSerialize(fiber.memoizedState) }
+          : {
+            hooks: hooksFromMemoizedState(fiber.memoizedState),
+            note: 'function component: hooks are positional (call order), not named - index 0 is the first useState/useReducer/useRef/... call in this component',
+          }),
+      };
+    },
+    // Ancestor CHAIN of enclosing component names (not full inspect detail
+    // per level - use react.inspect on a more specific selector for that) -
+    // answers "what components wrap this DOM node, in order" for orienting
+    // inside an unfamiliar tree before drilling into one level with
+    // react.inspect.
+    'react.tree': ({ selector, nth, maxDepth }) => {
+      const { el } = resolveTarget(selector, nth);
+      const hostFiber = getReactFiber(el);
+      if (!hostFiber) {
+        throw new Error(`no React fiber found on element matching '${selector}'`);
+      }
+      const limit = Number(maxDepth) || 20;
+      const chain = [];
+      let fiber = hostFiber.return;
+      while (fiber && chain.length < limit) {
+        if (isComponentType(fiber.type)) {
+          chain.push({ componentName: componentDisplayName(fiber), isClassComponent: isClassFiber(fiber), key: fiber.key });
+        }
+        fiber = fiber.return;
+      }
+      return { chain, truncated: !!fiber && chain.length >= limit };
     },
     // Reports the LIVE IndexedDB connection's own .version - pairs with the
     // CLI's `session start` DB_VERSION drift check (reads js/db.js's

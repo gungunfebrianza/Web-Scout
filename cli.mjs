@@ -247,6 +247,16 @@ function usage() {
                                    Whole page if selector omitted. --out saves a PNG file;
                                    without it, prints dimensions only (the data URL is large).
 
+  react inspect <selector> [--nth N]
+                                   props (+ state for a class component, or positional hooks for
+                                   a function component) of the nearest enclosing React component
+                                   walking up from selector. Throws if selector isn't inside
+                                   React's managed tree.
+  react tree <selector> [--nth N] [maxDepth]
+                                   ancestor chain of enclosing component names only (default
+                                   maxDepth 20) - orient first, then "react inspect" a more
+                                   specific selector.
+
   idb list                        list IndexedDB object store names + a per-store row count
                                    (cheap store.count(), not a full dump) - check this before
                                    an unscoped "idb snapshot" on a store you suspect is large
@@ -536,7 +546,8 @@ function usage() {
 
   agents                          list currently connected agent (tab) names
   dashboard                       print the dashboard URL (open it in a browser)
-  (read-only commands - idb dump/get/list, dom query/rect/style, net log, console log - are
+  (read-only commands - idb dump/get/list, dom query/rect/style, net log, console log,
+   react inspect/tree - are
    answered from an in-relay cache when called twice IN A ROW with identical args and no
    mutating command (click/fill/eval/idb.put/patch/delete/clear/page.reload) ran in between.
    Result carries __cacheHit:true when this happened - never dispatched to the page twice for
@@ -1428,6 +1439,16 @@ async function main() {
       // document.body). Use after a click/rebuild and before the next
       // dom.query/dom.click instead of a guessed sleep.
       settle: () => send('dom.settle', { selector: subArgs[0], quietMs: quietValue !== undefined ? Number(quietValue) : undefined, timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined }),
+    },
+    react: {
+      // props (+ state for a class component, or positional hooks for a
+      // function component) of the nearest enclosing React component,
+      // walking up from domSelector - see inject.js's findComponentFiber.
+      inspect: () => send('react.inspect', { selector: domSelector, nth: nthValue !== undefined ? Number(nthValue) : undefined }),
+      // Ancestor chain of enclosing component names only (not full
+      // props/state per level) - orient first, then `react inspect` a more
+      // specific selector.
+      tree: () => send('react.tree', { selector: domSelector, nth: nthValue !== undefined ? Number(nthValue) : undefined, maxDepth: subArgs[1] !== undefined ? Number(subArgs[1]) : undefined }),
     },
     idb: {
       list: () => send('idb.list', {}),
