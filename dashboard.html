@@ -427,6 +427,27 @@
     tr { break-inside: avoid; }
     .hud-section::before, .hud-section::after { display: none; }
   }
+  /* ---- token savings panel ---- */
+  .sv-note { margin: 8px 0 4px; padding: 6px 10px; border-left: 3px solid var(--accent-predator); background: var(--bg-panel-inset); color: var(--ink-muted); font-size: 12px; line-height: 1.5; }
+  .sv-note strong { color: var(--ink-primary); }
+  .sv-sub { display: block; font-size: 10px; color: var(--ink-muted); font-weight: 400; font-family: var(--font-mono); letter-spacing: 0; margin-top: 1px; }
+  .sv-h3 { font-family: var(--font-display); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent-info); margin: 12px 0 4px; }
+  .sv-kind { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 10px; letter-spacing: .04em; text-transform: uppercase; border: 1px solid var(--border-hud); margin-left: 6px; vertical-align: middle; cursor: help; }
+  .sv-kind-storage { color: var(--accent-info); border-color: var(--accent-info); }
+  .sv-kind-delivery { color: var(--accent-alien); border-color: var(--accent-alien); }
+  .sv-kind-roundtrip { color: var(--accent-predator); border-color: var(--accent-predator); }
+  .sv-kind-workflow { color: var(--ink-muted); }
+  .sv-what { display: block; color: var(--ink-muted); font-size: 11px; margin-top: 2px; max-width: 46ch; }
+  .sv-row-uncounted td { opacity: .6; }
+  .sv-bar-cell { position: relative; display: block; min-height: 16px; min-width: 110px; }
+  .sv-bar-cell span { position: relative; z-index: 1; }
+  .sv-bar-cell .sv-sub, .sv-nowrap { white-space: nowrap; }
+  .sv-target { display: block; font-size: 10px; color: var(--ink-muted); word-break: break-all; }
+  .sv-bar { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; z-index: 0; background: rgba(41,226,255,.16); }
+  .sv-bar-spend { background: rgba(255,157,0,.18); }
+  .sv-tip { color: var(--ink-muted); font-size: 11px; }
+  .sv-tip code { color: var(--accent-alien); }
+  #savingsSection table { font-size: 12px; }
 </style>
 </head>
 <body>
@@ -509,6 +530,26 @@
   <div class="muted">cumulative estimated tokens across every session, chronological - a red dot marks a session that finished over its own declared budget</div>
   <div id="burnChartContainer"></div>
   <div id="burnChartEmpty" class="empty" hidden>No sessions with recorded actions yet.</div>
+</section>
+
+<section class="hud-section" id="savingsSection">
+  <h2>Token savings, all-time</h2>
+  <div class="muted">what each waste-prevention mechanism has saved across every session, split by what it actually measures - and where the spend still is</div>
+  <div id="savingsStatStrip" class="hud-stat-strip" style="margin-top:8px;"></div>
+  <div id="savingsNote" class="sv-note" hidden></div>
+  <div class="hud-grid-2" style="margin-top:6px;">
+    <div>
+      <div class="sv-h3">Savings by mechanism</div>
+      <div style="overflow-x:auto;"><table id="savingsLedgerTable"><thead><tr><th>Mechanism</th><th>Saved</th><th>Reduction</th><th>Evidence</th></tr></thead><tbody></tbody></table></div>
+    </div>
+    <div>
+      <div class="sv-h3">Where the spend still is</div>
+      <div style="overflow-x:auto;"><table id="savingsSpendTable"><thead><tr><th>Command type</th><th>Est. tokens</th><th>Share</th><th>Calls</th><th>Avg</th></tr></thead><tbody></tbody></table></div>
+      <div class="sv-h3">Biggest single targets</div>
+      <div style="overflow-x:auto;"><table id="savingsTargetTable"><thead><tr><th>Type / target</th><th>Est. tokens</th><th>Calls</th><th>How to cut it</th></tr></thead><tbody></tbody></table></div>
+    </div>
+  </div>
+  <div id="savingsEmpty" class="empty" hidden>No token report yet - the relay may be unreachable.</div>
 </section>
 
 <div class="hud-grid-2">
@@ -1130,6 +1171,12 @@ async function refreshHealth() {
   document.body.classList.remove('relay-down');
   if (!relayConnectedSince) relayConnectedSince = Date.now();
   el('relayStatus').innerHTML = '<span class="relay-uptime-dot"></span>relay: ok';
+  // The relay loads relay.mjs/db.mjs/... once at boot - an edit on disk is
+  // invisible to it until it restarts, so results can silently reflect old code.
+  const staleFiles = health.relay?.stale_source_files || [];
+  if (staleFiles.length) {
+    el('relayStatus').innerHTML += ` <span class="badge badge-crv" title="This relay process started before ${esc(staleFiles.join(', '))} last changed, so it is running older code than what is on disk. Restart it: node tools/web-scout/cli.mjs relay restart">stale: ${esc(staleFiles.join(', '))} - relay restart</span>`;
+  }
   el('relayUptime').textContent = `connected ${fmtUptime(Date.now() - relayConnectedSince)}`;
   // loadId (last 8 chars) shown per agent so a human can eyeball, at a
   // glance, whether the connected tab actually survived its last reload -
@@ -1793,6 +1840,119 @@ async function refreshTokenReport() {
     panelTickSig('tokenSection', `${report.totalCalls}:${report.totalEstTokens}`);
   } catch { /* best-effort - a transient fetch failure here shouldn't break the rest of the dashboard */ }
 }
+
+// ---------- Token savings panel (all-time; GET /token-report's `savings`) ----------
+//
+// Deliberately shows two different things side by side and never as a ratio:
+//  - what callers actually READ (spend.estTokens - the real context-window cost)
+//  - what the dedup/cache machinery SAVED. Every DB ledger counts bytes that
+//    were not stored a second time on DISK; /4 makes that a token-EQUIVALENT,
+//    not tokens a caller avoided. Each ledger row carries its kind so nobody
+//    mistakes one for the other.
+const SV_KIND_HELP = {
+  storage: 'Storage: bytes never stored twice in webscout.db. Saves disk, not tokens a caller reads.',
+  delivery: 'Delivery: bytes never sent back to the caller.',
+  roundtrip: 'Round trip: a page round trip and an action-log row skipped - the caller still receives the full result.',
+  workflow: 'Workflow: steps that are never replayed (a count, not bytes).',
+};
+// How to shrink each big spender - the flags already exist in the CLI/MCP.
+const SV_CUT_HINTS = {
+  'dom.query': 'a specific selector instead of body/main; --meta for tag/id/class only; --full only when needed',
+  'idb.snapshot': '--since <baselineId> returns only the delta; --stores / --where scope it',
+  'idb.dump': '--where / --fields / --limit filter in the page',
+  'idb.list': 'returns every store name + count - call once, keep the answer',
+  'net.log': '--limit N --url <substr> filter in the page',
+  'console.log': '--limit N',
+  eval: 'return only the fields you need, not whole rows',
+  'idb.put': 'params dominate - idb patch for 2-3 field changes, put-many for batches',
+  'timeout.verify': 'a re-check after a 504 - keep timeouts realistic to avoid these',
+};
+
+function svBytes(n) {
+  if (n === null || n === undefined) return '-';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+const svNum = (n) => (n === null || n === undefined ? '-' : Number(n).toLocaleString());
+
+function renderSavingsPanel(report) {
+  const sv = report?.savings;
+  if (!sv?.ledgers) { el('savingsEmpty').hidden = false; return; }
+  el('savingsEmpty').hidden = true;
+  const spend = sv.spend || { calls: report.totalCalls, estTokens: report.totalEstTokens };
+  const storage = sv.byKind?.storage || { bytesSaved: 0, estTokensSaved: 0 };
+  const cache = sv.runtimeReadCache || { hits: 0, bytesSaved: 0 };
+  const golden = sv.goldenDiffCache || { cacheHits: 0 };
+  const ctx = sv.storageContext || {};
+  const tile = (label, value, hint, band) => `<div class="hud-tile${band ? ` hud-tile-${band}` : ''}" data-hint="${esc(hint)}"><div class="hud-tile-label">${esc(label)}</div><div class="hud-tile-value">${value}</div></div>`;
+  el('savingsStatStrip').innerHTML = [
+    tile('Read by callers', `~${svNum(spend.estTokens)}`, `Estimated tokens (chars/4) callers actually read off stdout across ${svNum(spend.calls)} calls - the real context-window spend. No ledger below reduces this number.`, 'warn'),
+    tile('Disk avoided', svBytes(storage.bytesSaved), `Bytes dedup kept out of webscout.db. About ${svNum(storage.estTokensSaved)} tokens-EQUIVALENT (bytes / 4) - a storage saving, not tokens a caller avoided.`, 'ok'),
+    tile('DB size cut', ctx.reductionPct === null || ctx.reductionPct === undefined ? '-' : `${ctx.reductionPct}%`, ctx.dbFileBytes ? `webscout.db is ${svBytes(ctx.dbFileBytes)} on disk; without dedup it would be about ${svBytes(ctx.bytesWithoutDedup)} (approximate - SQLite keeps freed pages).` : 'database size unavailable', 'ok'),
+    tile('Read-cache hits', svNum(cache.hits), `Repeat reads answered from memory (${svBytes(cache.bytesSaved)} not re-fetched from the page). The caller still received the full result - a round-trip saving, not a token one.`),
+    tile('Golden-diff hits', svNum(golden.cacheHits), 'Repeat diff-golden checks answered with a pointer instead of the whole diff body again - a genuine delivery saving (excluded from the totals: it overlaps Action results).'),
+  ].join('');
+
+  const note = el('savingsNote');
+  note.hidden = false;
+  note.innerHTML = `<strong>How to read this.</strong> Callers read ~${svNum(spend.estTokens)} estimated tokens; dedup kept ~${svBytes(storage.bytesSaved)} off disk (${svNum(storage.estTokensSaved)} tokens-<em>equivalent</em>${ctx.reductionPct !== null && ctx.reductionPct !== undefined ? `, ${ctx.reductionPct}% of the database` : ''}). Those are different currencies: dedup makes the database smaller, it does not shrink what a call returns. Not measured anywhere: bytes a caller avoided by scoping a call (<code>--where</code>, <code>--fields</code>, <code>--limit</code>, <code>--since</code>, <code>--meta</code>) - that spend is never incurred, so no ledger sees it.`;
+
+  const counted = sv.ledgers.filter((l) => l.countedInTotal);
+  const maxSaved = Math.max(1, ...counted.map((l) => l.bytesSaved));
+  const order = { storage: 0, roundtrip: 1, delivery: 2, workflow: 3 };
+  const rows = [...sv.ledgers].sort((a, b) => (b.countedInTotal - a.countedInTotal) || (order[a.kind] - order[b.kind]) || (b.bytesSaved - a.bytesSaved));
+  const evidence = (l) => {
+    if (!l.refs) return '<span class="muted">-</span>';
+    const unit = esc(l.refs.unit || '');
+    if (l.refs.unique !== null && l.refs.unique !== undefined) return `${svNum(l.refs.total)} ${unit} &rarr; ${svNum(l.refs.unique)} stored`;
+    return `${svNum(l.refs.total)} ${unit}`;
+  };
+  document.querySelector('#savingsLedgerTable tbody').innerHTML = rows.map((l) => {
+    const bytesCell = l.kind === 'workflow'
+      ? '<span class="muted">count only</span>'
+      : `<div class="sv-bar-cell"><span>${svBytes(l.bytesSaved)}<span class="sv-sub">&asymp; ${svNum(l.estTokensSaved)} tok-equiv.</span></span><div class="sv-bar" style="width:${l.countedInTotal ? Math.max(2, (l.bytesSaved / maxSaved) * 100) : 0}%"></div></div>`;
+    const reduction = l.reductionPct === null || l.reductionPct === undefined
+      ? '<span class="muted">-</span>'
+      : `${l.reductionPct}%<span class="sv-sub">${svBytes(l.logicalBytes)} &rarr; ${svBytes(l.uniqueBytes)}</span>`;
+    return `<tr class="${l.countedInTotal ? '' : 'sv-row-uncounted'}">
+      <td>${esc(l.label)}<span class="sv-kind sv-kind-${esc(l.kind)}" title="${esc(SV_KIND_HELP[l.kind] || '')}">${esc(l.kind)}</span><span class="sv-what">${esc(l.what)}${l.excludedBecause ? ` <em>(not in the totals: ${esc(l.excludedBecause)})</em>` : ''}</span></td>
+      <td>${bytesCell}</td><td>${reduction}</td><td>${evidence(l)}</td></tr>`;
+  }).join('');
+
+  const types = [...(report.byType || [])].sort((a, b) => b.estTokens - a.estTokens).slice(0, 7);
+  const maxTok = Math.max(1, ...types.map((t) => t.estTokens));
+  document.querySelector('#savingsSpendTable tbody').innerHTML = types.map((t) => {
+    const share = spend.estTokens ? (t.estTokens / spend.estTokens) * 100 : 0;
+    return `<tr><td>${esc(t.type)}</td>
+      <td><div class="sv-bar-cell"><span>${svNum(t.estTokens)}</span><div class="sv-bar sv-bar-spend" style="width:${Math.max(2, (t.estTokens / maxTok) * 100)}%"></div></div></td>
+      <td>${share.toFixed(1)}%</td><td>${svNum(t.calls)}</td><td>${svBytes(t.avgResultBytes)}</td></tr>`;
+  }).join('') || '<tr><td colspan="5" class="muted">no actions recorded yet</td></tr>';
+
+  const targets = [...(report.byTarget || [])].sort((a, b) => b.estTokens - a.estTokens).slice(0, 6);
+  document.querySelector('#savingsTargetTable tbody').innerHTML = targets.map((t) => `<tr>
+      <td>${esc(t.type)}<span class="sv-target">${esc(t.target || '(none)')}</span></td>
+      <td>${svNum(t.estTokens)}<span class="sv-sub sv-nowrap">avg ${svNum(t.avgEstTokens)}/call</span></td>
+      <td>${svNum(t.calls)}</td>
+      <td class="sv-tip">${SV_CUT_HINTS[t.type] ? esc(SV_CUT_HINTS[t.type]) : '<span class="muted">-</span>'}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">no targets recorded yet</td></tr>';
+}
+
+let lastSavingsReport = null;
+async function refreshSavings(strict = false) {
+  try {
+    lastSavingsReport = await api('GET', '/token-report');
+    renderSavingsPanel(lastSavingsReport);
+    return panelTickSig('savingsSection', JSON.stringify([lastSavingsReport?.totalEstTokens, (lastSavingsReport?.savings?.ledgers ?? []).map((l) => l.bytesSaved)]));
+  } catch (e) {
+    // best-effort on the timers - the rest of the dashboard must not depend on this panel; the panel's own refresh button surfaces the failure
+    if (strict) throw e;
+    return false;
+  }
+}
+// The all-time report scans every action row - far too heavy for refreshAll's
+// 3s poll, so it refreshes on load, on a slow timer, and (debounced) after
+// the actions/macros/sessions that actually move it.
+const debouncedSavingsRefresh = debounce(refreshSavings, 8000);
 
 let timelineKindFilter = 'all';
 
@@ -2644,7 +2804,7 @@ async function refreshAll() {
 // arrives), just uncoalesced rebuild churn. Collapsing a burst into one
 // trailing refresh per 250ms fixes it.
 const debouncedPendingRerender = debounce(() => { if (!actionsPaused) renderActions(lastActions); }, 100);
-const debouncedActionRefresh = debounce(async () => { await refreshActions(); await refreshTokenReport(); renderTimeline(); }, 250);
+const debouncedActionRefresh = debounce(async () => { await refreshActions(); await refreshTokenReport(); renderTimeline(); debouncedSavingsRefresh(); }, 250);
 const debouncedConsoleRefresh = debounce(async () => { await refreshConsole(); renderTimeline(); }, 250);
 const debouncedNetRefresh = debounce(async () => { await refreshNet(); renderTimeline(); }, 250);
 const KIND_REFRESH = {
@@ -3021,6 +3181,7 @@ const PANELS = {
   heatmapSection: { group: 'global', label: 'Heatmap', autoEmpty: true, count: () => (lastAnalyticsData ? { n: lastAnalyticsData.heatmap?.types?.length ?? 0, title: 'action types tracked' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.heatmap?.cells ?? []) },
   selectorsSection: { group: 'global', label: 'Selectors', autoEmpty: true, failLabel: 'recurring', count: () => { const n = lastAnalyticsData?.topFailedSelectors?.length; return n === undefined ? null : { n, fail: n, title: 'selectors that failed more than once' }; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.topFailedSelectors ?? []) },
   burnSection: { group: 'global', wide: true, label: 'Burn', autoEmpty: true, failLabel: 'over budget', count: () => { const t = lastAnalyticsData?.sessionTokenTotals; return t ? { n: t.filter((s) => s.totalEstTokens > 0).length, fail: t.filter((s) => s.tokenBudget && s.totalEstTokens > s.tokenBudget).length, title: 'sessions with recorded token use' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.sessionTokenTotals ?? []) },
+  savingsSection: { group: 'global', wide: true, label: 'Savings', autoEmpty: true, count: () => { const s = lastSavingsReport?.savings; return s?.ledgers ? { n: s.ledgers.filter((l) => l.countedInTotal).length, text: `~${fmtK(s.byKind?.storage?.estTokensSaved ?? 0)} tok-eq.`, title: 'savings mechanisms counted in the totals (disk bytes avoided, not tokens a caller avoided)' } : null; }, refresh: () => refreshSavings(true), exportRows: () => (lastSavingsReport?.savings?.ledgers ?? []).map((l) => ({ mechanism: l.label, kind: l.kind, counted: l.countedInTotal, bytesSaved: l.bytesSaved, estTokensEquivalent: l.estTokensSaved, reductionPct: l.reductionPct, refsTotal: l.refs?.total ?? null, refsStored: l.refs?.unique ?? null })) },
   durationSection: { group: 'global', label: 'Duration', autoEmpty: true, count: () => (lastAnalyticsData ? { n: lastAnalyticsData.durationByType?.length ?? 0, title: 'action types with timing data' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.durationByType ?? []) },
   punchcardSection: { group: 'global', label: 'Punchcard', autoEmpty: true, count: () => (lastAnalyticsData ? { n: (lastAnalyticsData.activityPunchcard ?? []).flat().reduce((s, v) => s + v, 0), title: 'sessions started' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => (a.activityPunchcard ?? []).flatMap((hours, day) => hours.map((count, hour) => ({ day: PUNCHCARD_DAY_LABELS[day], hour, count })).filter((r) => r.count))) },
   timelineSection: { group: 'session', label: 'Timeline', autoEmpty: true, pausable: true, count: () => ({ n: timelineTotal(), title: 'events merged from every panel' }), refresh: async () => { renderTimeline(); } },
@@ -3640,6 +3801,8 @@ function initPanelShell() {
 initPanelShell();
 
 refreshAll();
+refreshSavings();
+setInterval(refreshSavings, 30000);
 connectEvents();
 restartPolling();
 setInterval(renderRadar, 2000);
