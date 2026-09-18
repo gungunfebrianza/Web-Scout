@@ -133,9 +133,19 @@ function usage() {
                                    imports that Verity scenario-result file into the
                                    session first, so it appears in the report's own
                                    "Verity UI checks" section (see "verity import" below)
+  session cleanup <id> [--confirm] [--summary]
+                                   --summary collapses pendingDeletes/deleted/failed/changedNotDeleted
+                                   down to a per-store row COUNT instead of full row bodies - a dry-run
+                                   against a store with a large diff used to mean an 11K+-token wall of
+                                   full rows just to see "6 rows in store X" before ever asking for detail.
+                                   Each store also carries estBytes/estTokens (chars/4 over the same
+                                   rows already in memory - no extra fetch) - a bare count didn't say
+                                   whether "6 rows" was 200 bytes or 20KB. actionLog mode (no
+                                   --since-snapshot) has no row content to size, so those entries show
+                                   0 bytes - use --since-snapshot for a real size estimate.
   session cleanup <id> [--confirm]
                                    list (or, with --confirm, delete) every row this session's
-                                   own idb.put/idb.delete/idb.deleteMany/idb.clear actions left
+                                   own idb.put/idb.putMany/idb.delete/idb.deleteMany/idb.clear actions left
                                    live - dry-run by default. BLIND to writes made via eval or
                                    via a real UI button click (most CRV writes are this shape) -
                                    the response flags how many eval actions looked like writes,
@@ -279,6 +289,15 @@ function usage() {
                                    getAll()+filter) - use this instead of "idb dump" when you
                                    already know the key and the store is large (a full dump of
                                    a large real store can be slow/time out)
+  idb snapshot [--stores a,b,c] [--where '<json-field-map>'] [--golden <name>]
+                                   --where scopes EVERY included store to just the matching rows (same
+                                   exact-equality semantics as "idb dump --where") - filtered IN-PAGE
+                                   before capture, so a snapshot of just your own tagged/synthetic rows
+                                   in an otherwise-large store doesn't pay full-store transfer+storage+
+                                   diff cost. Partial by construction: the saved snapshot carries its own
+                                   "where" back on every later read (diff/diff-golden/restore included) -
+                                   a diff against a where-scoped snapshot only ever proves something about
+                                   that subset, never the whole store.
   idb snapshot [--stores a,b,c] [--golden <name>]
                                    capture + PERSIST a DB snapshot -> { id, counts } -
                                    scope to specific stores to avoid the full-DB timeout.
@@ -311,10 +330,26 @@ function usage() {
                                    need an exact replace, not a merge. Every put is individually
                                    logged (via: "restore"), so a partial failure still shows
                                    exactly which rows did/didn't make it back.
-  idb put <store> <json-row>      write one row (validated against the store's real keyPath) -
+  idb put <store> <json-row> [--dry-run]
+                                   write one row (validated against the store's real keyPath) -
                                    response includes the full stored row (key merged in), not
                                    just the key, so a caller never has to assume/re-dump to
-                                   learn what autoIncrement actually assigned
+                                   learn what autoIncrement actually assigned.
+                                   --dry-run validates the row's shape against the store's real
+                                   keyPath/autoIncrement WITHOUT writing (readonly, no mutation at
+                                   all) - {valid, problems:[...]} - catches a wrong-shaped seed row
+                                   before it lands instead of only after, via a separate verify query.
+  idb put-many <store> <json-array-of-rows> [--dry-run]
+                                   batch write, ONE transaction - real value over a loop of separate
+                                   "idb put" calls (each its own shell-quoted JSON arg, confirmed real
+                                   friction seeding a handful of fixture rows by hand). A single bad
+                                   row (e.g. a unique-index conflict) is reported per-row in "failed"
+                                   (mirrors "idb delete-many"'s deletedKeys/failedKeys shape) instead
+                                   of aborting the whole batch.
+                                   --dry-run mirrors "idb put --dry-run" - same per-row keyPath/
+                                   autoIncrement validation, zero mutation - {results:[{index, valid,
+                                   problems}], validCount, invalidCount}. Bulk-seeding used to be the
+                                   one write path with no way to catch a bad row before it landed.
   idb patch <store> <json-key> <json-patch>
                                    read the existing row, shallow-merge <json-patch> onto it,
                                    write the merged row back - replaces re-typing a whole row
@@ -353,6 +388,17 @@ function usage() {
                                    live ring buffer above - defaults to the active session.
                                    Every entry already carries started_at/ended_at, so
                                    --min-duration/--sort duration work with no schema change.
+  net capture <substr>             ADDS <substr> to the armed response-BODY capture set (fetch/XHR) -
+                                   call it again with a different substring to watch a second
+                                   endpoint too without losing the first arm. "net log"/"net wait"/
+                                   "net history" entries gain a bodyPreview (capped 4000 chars,
+                                   bodyTruncated says whether anything was cut) going forward,
+                                   persisted durably too. Replaces hand-patching window.fetch via
+                                   "eval" to see a raw response body a fail-closed validator discards
+                                   with no trace on failure (e.g. this app's cfi_cognitive_runs.result:
+                                   null on AI_RESPONSE_INVALID).
+  net capture --off                disarms body capture entirely - clears EVERY armed substring at
+                                   once (off by default; captures nothing until armed)
   net clear                       clear the captured (live) network log
 
   console log                     captured console.error/warn + uncaught error entries
@@ -386,6 +432,15 @@ function usage() {
                                    anyway. Warns if importers disagreed on the version BEFORE this
                                    ran (each still bumped +1 from its own prior value, never
                                    silently normalized to one number).
+
+  NOTE on page-level JS state (not IndexedDB itself): a page module's own
+  in-memory cache populated only at init (e.g. an array filled once by a
+  render function called from initPageX(), not re-run by a revisit hook)
+  can read STALE after an idb.put/idb.snapshot restore even though the
+  underlying IndexedDB row is genuinely current - confirmed real: a
+  cross-case memory array only refreshed on a true fresh "page reload", not
+  a same-tab navigation revisit. If a value looks unexpectedly stale right
+  after a write, try a plain "page reload" before assuming a real bug.
 
   page reload                     true location.reload() - re-activates + reconnects
                                    automatically (activation flag survives via localStorage/URL).
@@ -567,7 +622,10 @@ function usage() {
                                    actually changed - "did I already know this" re-checking), and
                                    byTarget - same estTokens ranking but grouped by store (idb.dump)
                                    or selector (dom.query) instead of just type, to pinpoint WHICH
-                                   store/selector is the real hotspot. The all-time form (no
+                                   store/selector is the real hotspot - and byMacro, grouped by
+                                   params.macroId (non-macro calls bucket under macroId: null), to
+                                   pinpoint WHICH replayed macro/CRV phase actually cost the tokens
+                                   instead of only the command type. The all-time form (no
                                    --session) ALSO carries a "savings" block - real, measured
                                    proof of what the mechanisms below actually saved: resultDedup
                                    (bytesSaved/estTokensSaved never physically duplicated on disk),
@@ -578,6 +636,19 @@ function usage() {
                                    and survive one). Check this after a long CRV session to see
                                    whether the waste-prevention machinery below is actually earning
                                    its keep, not just running.
+
+  Every command reply also carries a running session token TOTAL (a
+  cumulative estimate, not per-call) in the x-webscout-session-tokens
+  response header - printed to stderr once it crosses ~5000 estimated
+  tokens (override with WEBSCOUT_TOKEN_THRESHOLD=<n> env var - lower it for
+  a token-sensitive CRV, raise it to cut noise on a deliberately heavy
+  bulk-seed session). Answers "how much has this session cost so far"
+  call-by-call, instead of only after the fact via "token-report" - a
+  278K-token idb.snapshot used to surface only in a post-hoc audit, well
+  after the session that paid for it was already over. Correctly INCLUDES
+  same-session read-result cache hits (__cacheHit:true replies) in the
+  running total - a cache hit skips the DB action log but the result bytes
+  still land in this reply and still get read, so they still count.
 
   Waste-prevention machinery running AUTOMATICALLY, with no flag needed (mentioned here so you
   know it exists - "token-report"'s savings block above is the proof it's working):
@@ -800,11 +871,13 @@ async function handleSession(sub, rawArgs) {
     let args = rawArgs;
     let confirm;
     let sinceSnapshotId;
+    let summary;
     ({ args, value: confirm } = extractBooleanFlag(args, '--confirm'));
     ({ args, value: sinceSnapshotId } = extractFlag(args, '--since-snapshot'));
+    ({ args, value: summary } = extractBooleanFlag(args, '--summary'));
     const id = args[0];
     if (!id) throw new Error('session cleanup requires an id');
-    printResult(await request('POST', `/sessions/${id}/cleanup`, { confirm, sinceSnapshotId: sinceSnapshotId !== undefined ? Number(sinceSnapshotId) : undefined }));
+    printResult(await request('POST', `/sessions/${id}/cleanup`, { confirm, sinceSnapshotId: sinceSnapshotId !== undefined ? Number(sinceSnapshotId) : undefined, summary }));
     return;
   }
   if (sub === 'assert') {
@@ -1227,8 +1300,11 @@ async function main() {
   // shape, a waste class byType alone can't distinguish from one-off heavy
   // calls.
   if (command === 'token-report') {
-    const a = rest.slice(1);
-    const { value: sessionIdArg } = extractFlag(a, '--session');
+    // NOT rest.slice(1) - rest here IS the flag list itself (no leading
+    // subcommand token to skip), so slicing dropped "--session" outright
+    // and silently sent every "--session <id>" call to the all-time (no
+    // session scope) endpoint instead - found live while verifying byMacro.
+    const { value: sessionIdArg } = extractFlag(rest, '--session');
     const report = sessionIdArg
       ? await request('GET', `/sessions/${sessionIdArg}/token-report`)
       : await request('GET', '/token-report');
@@ -1263,6 +1339,10 @@ async function main() {
   let waitSelectorValue;
   let fullValue;
   ({ args, value: fullValue } = extractBooleanFlag(args, '--full'));
+  let dryRunValue;
+  ({ args, value: dryRunValue } = extractBooleanFlag(args, '--dry-run'));
+  let offValue;
+  ({ args, value: offValue } = extractBooleanFlag(args, '--off'));
   let metaValue;
   ({ args, value: metaValue } = extractBooleanFlag(args, '--meta'));
   ({ args, value: stableValue } = extractBooleanFlag(args, '--stable'));
@@ -1518,12 +1598,20 @@ async function main() {
             }
           } catch { /* best-effort - don't block the real snapshot on this */ }
         }
-        return request('POST', '/state/snapshot', { agent: agentFlag, stores, golden: goldenValue });
+        return request('POST', '/state/snapshot', { agent: agentFlag, stores, golden: goldenValue, where: whereValue ? JSON.parse(whereValue) : undefined });
       },
       diff: () => request('POST', '/state/diff', { idA: Number(subArgs[0]), idB: Number(subArgs[1]) }),
       'diff-golden': () => request('POST', '/state/diff', { golden: subArgs[0], idB: Number(subArgs[1]) }),
       restore: () => request('POST', '/state/restore', { agent: agentFlag, snapshotId: subArgs[0] ? Number(subArgs[0]) : undefined, golden: goldenValue }),
-      put: () => send('idb.put', { store: subArgs[0], row: JSON.parse(subArgs[1]) }),
+      put: () => send('idb.put', { store: subArgs[0], row: JSON.parse(subArgs[1]), dryRun: dryRunValue || undefined }),
+      // Batch write, one transaction - a single failed row (e.g. a unique-
+      // index conflict) is reported per-row (see idb.putMany's own
+      // failed:[{index,row,error}]), not an all-or-nothing abort. Replaces
+      // a shell loop of separate "idb put" calls, each its own shell-quoted
+      // JSON arg - confirmed real friction seeding a handful of fixture rows
+      // by hand, including a `for` loop whose overall exit code came back 1
+      // from an unrelated `grep` pipeline despite every write succeeding.
+      'put-many': () => send('idb.putMany', { store: subArgs[0], rows: JSON.parse(subArgs[1]), dryRun: dryRunValue || undefined }),
       // Merge-then-write: reads the existing row, shallow-merges the given
       // JSON patch onto it, writes the merged row back - replaces re-typing
       // a whole row (idb.put's real REPLACE semantics) for a 2-3 field
@@ -1556,6 +1644,15 @@ async function main() {
       // started_at/ended_at, so --min-duration/--sort work without any
       // schema change. Defaults to the current active session.
       history: () => netHistory({ sessionId: sessionValue, filter: filterValue, minDuration: minDurationValue, sort: sortValue, limit: limitValue }),
+      // Arms response-BODY capture (fetch/XHR) for entries whose URL
+      // contains <substr> - net.log/net.wait/net.history entries gain a
+      // bodyPreview (capped 4000 chars, bodyTruncated says whether anything
+      // was cut) going forward. Off by default; `--off` disarms it.
+      // Replaces hand-patching window.fetch via `eval` to see a raw AI-
+      // provider response body that fail-closed validation would otherwise
+      // discard with no trace (e.g. cfi_cognitive_runs.result: null on
+      // AI_RESPONSE_INVALID).
+      capture: () => send('net.setBodyCapture', offValue ? { off: true } : { filter: subArgs[0] }),
     },
     console: {
       log: () => send('console.log', {}),

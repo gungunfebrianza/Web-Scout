@@ -82,6 +82,31 @@
 
   const netLog = [];
   const MAX_NET_LOG = 500;
+  // Response-body capture - OFF by default (captureBodyFilters empty), so
+  // normal net capture stays metadata-only (method/url/status/timing) as it
+  // always has been. Armed via 'net.setBodyCapture' (see the handler table
+  // below / "net capture <substr>" in the CLI) with a URL substring - only
+  // entries whose URL contains one of the armed substrings get a body read
+  // at all, so an operator doesn't pay to buffer/store every unrelated
+  // response on a busy page. Confirmed real gap this replaces: an AI-
+  // provider validation failure (cfi_cognitive_runs.result: null on
+  // AI_RESPONSE_INVALID) discards the raw response text with no persisted
+  // trace of it anywhere - diagnosing one required hand-patching
+  // window.fetch via `eval` mid-session, capturing to a throwaway global,
+  // then restoring the original fetch afterward.
+  //
+  // A Set, not a single string - "net capture" ADDS a filter instead of
+  // replacing it, so watching two endpoints at once (e.g. both /manifest.json
+  // and /api/data during the same CRV pass) doesn't mean losing the first
+  // arm the moment the second one is set. "net capture --off" clears every
+  // armed filter at once.
+  const captureBodyFilters = new Set();
+  const NET_BODY_CAPTURE_LIMIT = 4000;
+  function urlMatchesCaptureFilter(url) {
+    if (!captureBodyFilters.size || typeof url !== 'string') return false;
+    for (const f of captureBodyFilters) if (url.includes(f)) return true;
+    return false;
+  }
   function recordNet(entry) {
     netLog.push(entry);
     if (netLog.length > MAX_NET_LOG) netLog.shift();
@@ -96,7 +121,17 @@
     const startedAt = new Date().toISOString();
     try {
       const res = await realFetch(input, init);
-      recordNet({ via: 'fetch', method, url, status: res.status, startedAt, endedAt: new Date().toISOString() });
+      const entry = { via: 'fetch', method, url, status: res.status, startedAt, endedAt: new Date().toISOString() };
+      if (urlMatchesCaptureFilter(url)) {
+        try {
+          const text = await res.clone().text();
+          entry.bodyPreview = text.slice(0, NET_BODY_CAPTURE_LIMIT);
+          entry.bodyTruncated = text.length > NET_BODY_CAPTURE_LIMIT;
+        } catch (bodyErr) {
+          entry.bodyPreview = `[body capture failed: ${bodyErr.message}]`;
+        }
+      }
+      recordNet(entry);
       return res;
     } catch (err) {
       recordNet({ via: 'fetch', method, url, error: String(err), startedAt, endedAt: new Date().toISOString() });
@@ -120,7 +155,17 @@
     xhr.send = function (...args) {
       startedAt = new Date().toISOString();
       xhr.addEventListener('loadend', () => {
-        recordNet({ via: 'xhr', method, url, status: xhr.status, startedAt, endedAt: new Date().toISOString() });
+        const entry = { via: 'xhr', method, url, status: xhr.status, startedAt, endedAt: new Date().toISOString() };
+        if (urlMatchesCaptureFilter(url)) {
+          try {
+            const text = xhr.responseText;
+            entry.bodyPreview = text.slice(0, NET_BODY_CAPTURE_LIMIT);
+            entry.bodyTruncated = text.length > NET_BODY_CAPTURE_LIMIT;
+          } catch (bodyErr) {
+            entry.bodyPreview = `[body capture failed: ${bodyErr.message}]`;
+          }
+        }
+        recordNet(entry);
       });
       return realSend(...args);
     };
@@ -181,13 +226,25 @@
   // 'sha256', network_health_snapshots: compound ['contact_id','date'] - a
   // diff engine that assumed 'id' would silently produce wrong/empty diffs
   // on those stores, so the real keyPath travels with the dump).
-  function readStore(db, storeName) {
+  function readStore(db, storeName, where) {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(storeName, 'readonly');
       const store = tx.objectStore(storeName);
       const keyPath = store.keyPath;
       const req = store.getAll();
-      req.onsuccess = () => resolve({ keyPath, rows: req.result });
+      req.onsuccess = () => {
+        let rows = req.result;
+        // Same exact-equality `where` semantics as idb.dump - filtered
+        // IN-PAGE, before the rows ever reach the WebSocket. Used by
+        // idb.snapshot below to take a scoped-by-content (not just
+        // scoped-by-store) capture, for a store where only a known subset
+        // is actually relevant to a CRV pass.
+        if (where && typeof where === 'object') {
+          const entries = Object.entries(where);
+          rows = rows.filter((r) => entries.every(([k, v]) => JSON.stringify(r?.[k]) === JSON.stringify(v)));
+        }
+        resolve({ keyPath, rows });
+      };
       req.onerror = () => reject(req.error);
     });
   }
@@ -197,14 +254,24 @@
   // `storeFilter` (array of names) scopes the dump to just those stores -
   // a full 138-store snapshot timed out in practice against the real app;
   // callers who only care about a handful of stores should pass this.
-  async function dumpAllStores(storeFilter) {
+  // `where` (exact-equality field map, same semantics as idb.dump's own
+  // --where) scopes every included store to just the matching rows - for a
+  // CRV pass that only cares about its own tagged/synthetic rows in an
+  // otherwise-large store, a full-store snapshot pays transfer+storage+
+  // diff cost for every unrelated row for no reason. Partial BY DESIGN:
+  // returned rows are real subset content (content_hash still reflects
+  // exactly what's captured), but a diff/restore against a where-scoped
+  // snapshot only ever proves things about that subset, never the whole
+  // store - relay.mjs threads `where` back onto the saved snapshot's own
+  // metadata specifically so that's never silently forgotten later.
+  async function dumpAllStores(storeFilter, where) {
     const db = await openDb();
     let names = [...db.objectStoreNames];
     if (Array.isArray(storeFilter) && storeFilter.length) {
       const wanted = new Set(storeFilter);
       names = names.filter((n) => wanted.has(n));
     }
-    const entries = await Promise.all(names.map(async (name) => [name, await readStore(db, name)]));
+    const entries = await Promise.all(names.map(async (name) => [name, await readStore(db, name, where)]));
     db.close();
     return Object.fromEntries(entries);
   }
@@ -875,7 +942,7 @@
     // memory. Never dispatch this raw via /command - relay.mjs rejects it
     // (400) so there's exactly one sanctioned, persisted path to this data.
     // `stores` (array of names) scopes the dump - see dumpAllStores above.
-    'idb.snapshot': async ({ stores } = {}) => ({ stores: await dumpAllStores(stores) }),
+    'idb.snapshot': async ({ stores, where } = {}) => ({ stores: await dumpAllStores(stores, where), ...(where ? { where } : {}) }),
     // Scoped write path (previously only `eval` could mutate IndexedDB).
     // Still gated by the same session requirement as every other command -
     // no special-case gate beyond that.
@@ -887,12 +954,34 @@
     // 2, not 1, after an earlier cleanup pass). `row` merged with the real
     // generated key under the store's own keyPath removes the need to
     // guess or re-dump the store just to learn what was actually written.
-    'idb.put': ({ store, row }) => new Promise((resolve, reject) => {
+    // `dryRun` validates the row's shape against the store's real keyPath
+    // (and whether autoIncrement can cover a missing one) WITHOUT writing -
+    // confirmed real gap: a wrong-shaped seed row was previously only ever
+    // caught after the write landed, via a separate verify query. No DB
+    // mutation happens on this path at all (readonly transaction, no
+    // .put() call) - just introspection of the store's own os.keyPath/
+    // os.autoIncrement, which is real metadata, not a guess.
+    'idb.put': ({ store, row, dryRun } = {}) => new Promise((resolve, reject) => {
       openDb().then((db) => {
         if (!db.objectStoreNames.contains(store)) { db.close(); reject(new Error(`no such store: ${store}`)); return; }
-        const tx = db.transaction(store, 'readwrite');
+        const tx = db.transaction(store, dryRun ? 'readonly' : 'readwrite');
         const os = tx.objectStore(store);
         const keyPath = os.keyPath;
+        if (dryRun) {
+          const autoIncrement = os.autoIncrement;
+          const problems = [];
+          if (!row || typeof row !== 'object' || Array.isArray(row)) problems.push('row must be a plain JSON object');
+          if (typeof keyPath === 'string' && row && typeof row === 'object' && !(keyPath in row) && !autoIncrement) {
+            problems.push(`row is missing required keyPath field "${keyPath}" and the store is not autoIncrement`);
+          }
+          if (Array.isArray(keyPath)) {
+            const missing = keyPath.filter((k) => !row || !(k in row));
+            if (missing.length) problems.push(`row is missing compound keyPath field(s): ${missing.join(', ')}`);
+          }
+          db.close();
+          resolve({ dryRun: true, store, keyPath, autoIncrement, valid: problems.length === 0, problems });
+          return;
+        }
         const req = os.put(row);
         req.onsuccess = () => {
           db.close();
@@ -904,6 +993,66 @@
           resolve({ stored: true, key, row: storedRow });
         };
         req.onerror = () => { db.close(); reject(req.error); };
+      }, reject);
+    }),
+    // Batch write, ONE transaction - real value over a loop of separate
+    // idb.put dispatches (each its own shell-quoted JSON arg, confirmed a
+    // real time-sink seeding a handful of fixture rows by hand). A single
+    // bad row's onerror calls preventDefault() so it does NOT abort the
+    // whole transaction (IndexedDB's default) - failed rows are reported
+    // individually (mirrors idb.deleteMany's deletedKeys/failedKeys shape)
+    // instead of an all-or-nothing batch.
+    'idb.putMany': ({ store, rows, dryRun } = {}) => new Promise((resolve, reject) => {
+      if (!Array.isArray(rows) || !rows.length) { reject(new Error('idb.putMany requires a non-empty "rows" array')); return; }
+      openDb().then((db) => {
+        if (!db.objectStoreNames.contains(store)) { db.close(); reject(new Error(`no such store: ${store}`)); return; }
+        // dryRun mirrors idb.put's own dryRun shape (same per-row keyPath/
+        // autoIncrement checks, one readonly transaction, zero .put() calls)
+        // - bulk-seeding was the one command that had NO way to validate
+        // rows before writing them, even after idb.put got --dry-run.
+        if (dryRun) {
+          const tx = db.transaction(store, 'readonly');
+          const os = tx.objectStore(store);
+          const keyPath = os.keyPath;
+          const autoIncrement = os.autoIncrement;
+          const results = rows.map((row, index) => {
+            const problems = [];
+            if (!row || typeof row !== 'object' || Array.isArray(row)) problems.push('row must be a plain JSON object');
+            if (typeof keyPath === 'string' && row && typeof row === 'object' && !(keyPath in row) && !autoIncrement) {
+              problems.push(`row is missing required keyPath field "${keyPath}" and the store is not autoIncrement`);
+            }
+            if (Array.isArray(keyPath)) {
+              const missing = keyPath.filter((k) => !row || !(k in row));
+              if (missing.length) problems.push(`row is missing compound keyPath field(s): ${missing.join(', ')}`);
+            }
+            return { index, valid: problems.length === 0, problems };
+          });
+          db.close();
+          resolve({ dryRun: true, store, keyPath, autoIncrement, validCount: results.filter((r) => r.valid).length, invalidCount: results.filter((r) => !r.valid).length, results });
+          return;
+        }
+        const tx = db.transaction(store, 'readwrite');
+        const os = tx.objectStore(store);
+        const keyPath = os.keyPath;
+        const stored = [];
+        const failed = [];
+        tx.oncomplete = () => { db.close(); resolve({ store, keyPath, putCount: stored.length, failedCount: failed.length, rows: stored, failed }); };
+        tx.onerror = () => { db.close(); reject(tx.error); };
+        rows.forEach((row, index) => {
+          const req = os.put(row);
+          req.onsuccess = () => {
+            const key = req.result;
+            let storedRow = row;
+            if (typeof keyPath === 'string' && row && typeof row === 'object' && !(keyPath in row)) {
+              storedRow = { ...row, [keyPath]: key };
+            }
+            stored.push(storedRow);
+          };
+          req.onerror = (event) => {
+            failed.push({ index, row, error: req.error?.message || String(req.error) });
+            event.preventDefault();
+          };
+        });
       }, reject);
     }),
     // Merge-then-put: reads the existing row by key, shallow-merges `patch`
@@ -1179,6 +1328,18 @@
       const cleared = netLog.length;
       netLog.length = 0;
       return { cleared };
+    },
+    // Arms response-body capture for fetch/XHR entries whose URL contains
+    // `filter` - see captureBodyFilters above. Each call with a `filter`
+    // ADDS to the armed set (watch several endpoints at once without losing
+    // an earlier arm); `{off:true}` clears every armed filter. Captured
+    // previews land in net.log/net.wait entries going forward AND persist
+    // to the durable net_entries table (see db.mjs), so "net history" also
+    // carries them after a reload.
+    'net.setBodyCapture': ({ filter, off } = {}) => {
+      if (off) captureBodyFilters.clear();
+      else if (typeof filter === 'string' && filter.trim()) captureBodyFilters.add(filter.trim());
+      return { active: captureBodyFilters.size > 0, filters: [...captureBodyFilters], limit: NET_BODY_CAPTURE_LIMIT };
     },
     'console.log': () => ({ count: consoleLog.length, entries: consoleLog.slice() }),
     'console.clear': () => {

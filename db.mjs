@@ -212,6 +212,25 @@ ensureColumn('macros', 'templated_steps_removed', 'templated_steps_removed INTEG
 ensureColumn('console_entries', 'message_hash', 'message_hash TEXT');
 ensureColumn('console_entries', 'stack_hash', 'stack_hash TEXT');
 ensureColumn('net_entries', 'url_hash', 'url_hash TEXT');
+// Optional response-body preview (see "net capture" / net.setBodyCapture in
+// inject.js) - off by default (both columns NULL on every pre-existing and
+// most real rows), captured only for entries whose URL matched an
+// operator-armed substring filter. Interned via the same text_blobs
+// mechanism as url/console message/stack - a repeatedly-polled endpoint's
+// body is real, confirmed-live-repeated content (an AI-review round trip
+// polled several times while awaiting a result). body_truncated says
+// whether NET_BODY_CAPTURE_LIMIT (inject.js) actually cut anything.
+ensureColumn('net_entries', 'body_preview_hash', 'body_preview_hash TEXT');
+ensureColumn('net_entries', 'body_truncated', 'body_truncated INTEGER');
+// Scopes a snapshot to a subset of rows per store (same exact-equality
+// semantics as idb.dump's own --where) - metadata only, never affects
+// content_hash/dedup (computed off the actual captured stores either way).
+// A partial (where-scoped) snapshot proves less than a full one: diff/
+// restore against it only ever reflect the filtered subset, never the whole
+// store - callers should treat `where` on a snapshot's own result as a flag
+// to read the rest of that result more carefully, not silently assume a
+// full-store baseline.
+ensureColumn('state_snapshots', 'where_json', 'where_json TEXT');
 // verity_runs.result_json is NOT NULL, same '' sentinel as console_entries.
 // message below - reuses result_blobs (already generic hash->JSON content
 // storage, no reason for a THIRD table when the mechanism is identical).
@@ -763,7 +782,7 @@ const stmtActionCostByTypeAll = db.prepare(`
 // chars/4 - the commonly-cited rough proxy for English/JSON-ish text tokens,
 // not a real tokenizer. Good enough to RANK command types against each
 // other and spot the outliers; never treat as an exact bill.
-const CHARS_PER_TOKEN_ESTIMATE = 4;
+export const CHARS_PER_TOKEN_ESTIMATE = 4;
 
 function toActionCostRow(r) {
   const resultBytes = r.resultBytes || 0;
@@ -776,6 +795,25 @@ function toActionCostRow(r) {
     avgResultBytes: r.calls ? Math.round(resultBytes / r.calls) : 0,
     estTokens: Math.round((resultBytes + paramsBytes) / CHARS_PER_TOKEN_ESTIMATE),
   };
+}
+
+// Cheap single-row running total for the ACTIVE session, read after every
+// command completes (see relay.mjs's generic response wrapper) so an
+// operator sees cumulative cost build up call-by-call instead of only
+// discovering the total after the fact via "token-report" - confirmed real
+// gap: a 278K-token idb.snapshot surfaced only in a post-hoc audit, well
+// after the CRV session that paid for it was already over. Same
+// COALESCE(result_json, blob)/chars-per-4 estimate as getActionCostReport,
+// just SUMmed with no GROUP BY - one aggregate row, not one per type.
+const stmtSessionTokensSoFar = db.prepare(`
+  SELECT SUM(LENGTH(COALESCE(a.result_json, rb.json, '')) + LENGTH(COALESCE(a.params_json, pb.json, ''))) AS totalBytes
+  FROM actions a LEFT JOIN result_blobs rb ON a.result_hash = rb.hash
+    LEFT JOIN params_blobs pb ON a.params_hash = pb.hash
+  WHERE a.session_id = ?
+`);
+export function getSessionTokensSoFar(sessionId) {
+  const row = stmtSessionTokensSoFar.get(Number(sessionId));
+  return Math.round((row?.totalBytes || 0) / CHARS_PER_TOKEN_ESTIMATE);
 }
 
 export function getActionCostReport(sessionId) {
@@ -935,6 +973,46 @@ export function getActionCostByTarget(sessionId) {
     .sort((a, b) => b.estTokens - a.estTokens);
 }
 
+// ---------- token cost by macro (which CRV phase actually cost what) ----------
+//
+// getActionCostReport groups by command TYPE across the whole session -
+// "idb.snapshot cost 90K tokens total" doesn't say which macro/CRV phase
+// those calls belonged to. Every macro-replayed action is logged with
+// params.macroId (see the macro replay route) - group on that instead, and
+// bucket everything else (ad-hoc, non-macro calls) under macroId: null so
+// the totals still foot to getActionCostReport's own totalEstTokens for the
+// same session.
+const stmtActionsForMacroCost = db.prepare(
+  "SELECT COALESCE(a.params_json, pb.json) AS params_json, LENGTH(COALESCE(a.result_json, rb.json, '')) AS resultBytes, LENGTH(COALESCE(a.params_json, pb.json, '')) AS paramsBytes FROM actions a LEFT JOIN result_blobs rb ON a.result_hash = rb.hash LEFT JOIN params_blobs pb ON a.params_hash = pb.hash WHERE a.session_id = ? ORDER BY a.id ASC",
+);
+
+export function getActionCostByMacro(sessionId) {
+  const rows = stmtActionsForMacroCost.all(Number(sessionId));
+  const byMacro = new Map(); // macroId (or null) -> accumulator
+  for (const r of rows) {
+    let macroId = null;
+    if (r.params_json) {
+      try { macroId = JSON.parse(r.params_json)?.macroId ?? null; } catch { /* leave as null */ }
+    }
+    const cur = byMacro.get(macroId) || { macroId, calls: 0, resultBytes: 0, paramsBytes: 0 };
+    cur.calls += 1;
+    cur.resultBytes += r.resultBytes;
+    cur.paramsBytes += r.paramsBytes;
+    byMacro.set(macroId, cur);
+  }
+  return [...byMacro.values()]
+    .map((r) => {
+      const macro = r.macroId !== null ? stmtGetMacro.get(Number(r.macroId)) : null;
+      return {
+        macroId: r.macroId,
+        macroName: macro ? macro.name : r.macroId === null ? '(ad-hoc, not part of a macro replay)' : `(deleted macro #${r.macroId})`,
+        calls: r.calls,
+        estTokens: Math.round((r.resultBytes + r.paramsBytes) / CHARS_PER_TOKEN_ESTIMATE),
+      };
+    })
+    .sort((a, b) => b.estTokens - a.estTokens);
+}
+
 // ---------- token cost trend across sessions sharing a tag ----------
 //
 // A single session's own token-report (getActionCostReport above) can only
@@ -1012,8 +1090,8 @@ export function listAllActions() {
 // ---------- state snapshots ----------
 
 const stmtInsertSnapshot = db.prepare(`
-  INSERT INTO state_snapshots (session_id, action_id, taken_at, counts_json, stores_json, byte_size, agent_name, golden_name, content_hash, served_from_snapshot_id)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO state_snapshots (session_id, action_id, taken_at, counts_json, stores_json, byte_size, agent_name, golden_name, content_hash, served_from_snapshot_id, where_json)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtGetSnapshot = db.prepare('SELECT * FROM state_snapshots WHERE id = ?');
 const stmtListSnapshots = db.prepare('SELECT id, session_id, action_id, taken_at, counts_json, byte_size, agent_name, golden_name FROM state_snapshots WHERE session_id = ? ORDER BY id DESC');
@@ -1027,8 +1105,9 @@ const stmtFindSnapshotByContentHash = db.prepare(
   'SELECT id, stores_json FROM state_snapshots WHERE content_hash = ? AND served_from_snapshot_id IS NULL ORDER BY id DESC LIMIT 1',
 );
 
-export function saveSnapshot({ sessionId, actionId, stores, agentName, goldenName }) {
+export function saveSnapshot({ sessionId, actionId, stores, agentName, goldenName, where }) {
   const takenAt = new Date().toISOString();
+  const whereJson = where && typeof where === 'object' ? JSON.stringify(where) : null;
   // Content hash is computed off the LOGICAL content (what a caller actually
   // receives) BEFORE any interning work happens - two snapshots taken from
   // identical store content must hash identically regardless of which rows
@@ -1047,8 +1126,8 @@ export function saveSnapshot({ sessionId, actionId, stores, agentName, goldenNam
   // work either - nothing new to intern when nothing changed).
   const existing = stmtFindSnapshotByContentHash.get(contentHash);
   if (existing) {
-    const info = stmtInsertSnapshot.run(sessionId, actionId ?? null, takenAt, JSON.stringify(counts), '', logicalStoresJson.length, agentName ?? 'default', goldenName ?? null, contentHash, existing.id);
-    return { id: Number(info.lastInsertRowid), takenAt, counts, byteSize: logicalStoresJson.length, agentName: agentName ?? 'default', goldenName: goldenName ?? null, contentHash };
+    const info = stmtInsertSnapshot.run(sessionId, actionId ?? null, takenAt, JSON.stringify(counts), '', logicalStoresJson.length, agentName ?? 'default', goldenName ?? null, contentHash, existing.id, whereJson);
+    return { id: Number(info.lastInsertRowid), takenAt, counts, byteSize: logicalStoresJson.length, agentName: agentName ?? 'default', goldenName: goldenName ?? null, contentHash, ...(where ? { where } : {}) };
   }
 
   const refs = {};
@@ -1066,8 +1145,8 @@ export function saveSnapshot({ sessionId, actionId, stores, agentName, goldenNam
   // byte_size stays the LOGICAL size too (same discipline as the
   // COALESCE(result_json, blob) reads elsewhere) - a snapshot's reported
   // size never shrinks just because this run happened to dedup well.
-  const info = stmtInsertSnapshot.run(sessionId, actionId ?? null, takenAt, JSON.stringify(counts), refsJson, logicalStoresJson.length, agentName ?? 'default', goldenName ?? null, contentHash, null);
-  return { id: Number(info.lastInsertRowid), takenAt, counts, byteSize: logicalStoresJson.length, agentName: agentName ?? 'default', goldenName: goldenName ?? null, contentHash };
+  const info = stmtInsertSnapshot.run(sessionId, actionId ?? null, takenAt, JSON.stringify(counts), refsJson, logicalStoresJson.length, agentName ?? 'default', goldenName ?? null, contentHash, null, whereJson);
+  return { id: Number(info.lastInsertRowid), takenAt, counts, byteSize: logicalStoresJson.length, agentName: agentName ?? 'default', goldenName: goldenName ?? null, contentHash, ...(where ? { where } : {}) };
 }
 
 // Read-side counterpart to the snapshot-level dedup above - a row whose own
@@ -1084,7 +1163,7 @@ function resolveSnapshotStoresJson(row) {
 export function getSnapshot(id) {
   const row = stmtGetSnapshot.get(Number(id));
   if (!row) throw new Error(`no such snapshot: ${id}`);
-  return { ...row, counts: JSON.parse(row.counts_json), stores: resolveStores(resolveSnapshotStoresJson(row)) };
+  return { ...row, counts: JSON.parse(row.counts_json), stores: resolveStores(resolveSnapshotStoresJson(row)), where: row.where_json ? JSON.parse(row.where_json) : undefined };
 }
 
 export function listSnapshots(sessionId) {
@@ -1096,7 +1175,7 @@ export function listSnapshots(sessionId) {
 export function getGoldenSnapshot(name) {
   const row = stmtGetGoldenSnapshot.get(name);
   if (!row) throw new Error(`no such golden snapshot: ${name}`);
-  return { ...row, counts: JSON.parse(row.counts_json), stores: resolveStores(resolveSnapshotStoresJson(row)) };
+  return { ...row, counts: JSON.parse(row.counts_json), stores: resolveStores(resolveSnapshotStoresJson(row)), where: row.where_json ? JSON.parse(row.where_json) : undefined };
 }
 
 export function getSnapshotDedupSavings() {
@@ -1265,14 +1344,19 @@ export function listConsoleEntries(sessionId, { limit } = {}) {
 }
 
 const stmtInsertNet = db.prepare(`
-  INSERT INTO net_entries (session_id, agent_name, via, method, url, url_hash, status, error, started_at, ended_at, occurred_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO net_entries (session_id, agent_name, via, method, url, url_hash, status, error, started_at, ended_at, occurred_at, body_preview_hash, body_truncated)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtListNet = db.prepare('SELECT * FROM net_entries WHERE session_id = ? ORDER BY id DESC');
 const stmtListNetLimit = db.prepare('SELECT * FROM net_entries WHERE session_id = ? ORDER BY id DESC LIMIT ?');
 
 function hydrateNetEntry(r) {
-  return { ...r, url: resolveTextNullSentinel(r.url, r.url_hash) };
+  return {
+    ...r,
+    url: resolveTextNullSentinel(r.url, r.url_hash),
+    bodyPreview: r.body_preview_hash ? (stmtGetTextBlob.get(r.body_preview_hash)?.text ?? null) : null,
+    bodyTruncated: !!r.body_truncated,
+  };
 }
 
 export function insertNetEntries(sessionId, agentName, entries) {
@@ -1289,7 +1373,15 @@ export function insertNetEntries(sessionId, agentName, entries) {
         urlHash = urlInterned.hash;
         if (urlInterned.dedup) storedUrl = null;
       }
-      stmtInsertNet.run(sessionId, agentName ?? 'default', e.via, e.method, storedUrl, urlHash, e.status ?? null, e.error ?? null, e.startedAt, e.endedAt, e.endedAt);
+      // bodyPreview only ever present when net.setBodyCapture was armed for
+      // a matching URL substring (see inject.js) - interned the same way,
+      // since a polled endpoint's body during a wait loop is real repeated
+      // content, not a one-off.
+      let bodyPreviewHash = null;
+      if (typeof e.bodyPreview === 'string') {
+        bodyPreviewHash = internText(e.bodyPreview).hash;
+      }
+      stmtInsertNet.run(sessionId, agentName ?? 'default', e.via, e.method, storedUrl, urlHash, e.status ?? null, e.error ?? null, e.startedAt, e.endedAt, e.endedAt, bodyPreviewHash, e.bodyTruncated ? 1 : 0);
     }
     db.exec('COMMIT');
   } catch (err) {

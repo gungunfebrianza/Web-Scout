@@ -118,7 +118,7 @@ const TOOLS = [
       + '  list {} - every session, newest first\n'
       + '  show {id} - full session detail: actions, snapshots, diffs, qa, console, net\n'
       + '  report {id, format?: "md"|"json", out?, verityPath?} - export a session report; out writes to a local file instead of returning content inline\n'
-      + '  cleanup {id, confirm?, sinceSnapshotId?} - list (or, with confirm:true, delete) rows this session\'s own writes left live; dry-run by default\n'
+      + '  cleanup {id, confirm?, sinceSnapshotId?, summary?} - list (or, with confirm:true, delete) rows this session\'s own writes left live; dry-run by default. summary:true collapses row lists down to a per-store count instead of full row bodies\n'
       + '  assert {id, checks, agent?} - declarative regression checks against LIVE state (checks: one check object or an array)\n'
       + '  ask {question, sessionId?} - ask the configured AI backend to explain a session\'s recorded evidence (optional feature - see README "Ask AI")\n'
       + '  verity_import {sessionId, label?, path?, result?} - fold a Verity UI Relay scenario-result into this session\'s evidence trail (path: local file; result: inline JSON, one of the two required)',
@@ -171,7 +171,7 @@ const TOOLS = [
         return { content };
       },
       cleanup: (p) => request('POST', `/sessions/${requireField(p, 'id')}/cleanup`, {
-        confirm: !!p.confirm, sinceSnapshotId: p.sinceSnapshotId !== undefined ? Number(p.sinceSnapshotId) : undefined,
+        confirm: !!p.confirm, sinceSnapshotId: p.sinceSnapshotId !== undefined ? Number(p.sinceSnapshotId) : undefined, summary: !!p.summary,
       }),
       assert: (p) => {
         const id = requireField(p, 'id');
@@ -246,11 +246,12 @@ const TOOLS = [
       + '  list {} - object store names + a cheap per-store row count (store.count(), not a full dump) - check before an unscoped snapshot on a store you suspect is large\n'
       + '  dump {store} - every row (+ real keyPath) in one store\n'
       + '  get {store, key} - single-key lookup (store.get), not a full-store scan - use when the store is large and you already know the key\n'
-      + '  snapshot {stores?, golden?} - capture + PERSIST a DB snapshot -> {id, counts}; golden tags it as a named regression baseline\n'
+      + '  snapshot {stores?, golden?, where?} - capture + PERSIST a DB snapshot -> {id, counts}; golden tags it as a named regression baseline. where (exact-equality field map) scopes EVERY included store to just the matching rows - partial by construction, the saved snapshot carries `where` back on every later read (diff/restore included)\n'
       + '  diff {idA, idB} - compute + PERSIST the diff between two persisted snapshots\n'
       + '  diff_golden {name, idB} - diff a named golden snapshot (from ANY session) against snapshot idB\n'
       + '  restore {snapshotId?, golden?} - replay a persisted snapshot\'s rows back into IndexedDB (PUTs only, never deletes)\n'
-      + '  put {store, row} - write one row, keyed by the store\'s real keyPath; response includes the full stored row\n'
+      + '  put {store, row, dryRun?} - write one row, keyed by the store\'s real keyPath; response includes the full stored row. dryRun:true validates the row\'s shape (keyPath/autoIncrement) WITHOUT writing -> {valid, problems}\n'
+      + '  put_many {store, rows, dryRun?} - batch write, ONE transaction; a single failed row (e.g. a unique-index conflict) is reported per-row in `failed`, not an all-or-nothing abort. dryRun validates every row\'s shape (readonly, no mutation) -> {results:[{index, valid, problems}], validCount, invalidCount}\n'
       + '  delete {store, key} - delete one row by key\n'
       + '  delete_many {store, keys} - delete many rows by key, one transaction; response includes deletedKeys/failedKeys '
       + '(not just counts), so a caller never has to re-dump/snapshot just to confirm which rows actually went away\n'
@@ -262,11 +263,12 @@ const TOOLS = [
       list: (p) => sendCmd('idb.list', {}, p?.agent),
       dump: (p) => sendCmd('idb.dump', { store: requireField(p, 'store') }, p?.agent),
       get: (p) => sendCmd('idb.get', { store: requireField(p, 'store'), key: requireField(p, 'key') }, p?.agent),
-      snapshot: (p) => request('POST', '/state/snapshot', { agent: p?.agent, stores: p?.stores, golden: p?.golden }),
+      snapshot: (p) => request('POST', '/state/snapshot', { agent: p?.agent, stores: p?.stores, golden: p?.golden, where: p?.where }),
       diff: (p) => request('POST', '/state/diff', { idA: Number(requireField(p, 'idA')), idB: Number(requireField(p, 'idB')) }),
       diff_golden: (p) => request('POST', '/state/diff', { golden: requireField(p, 'name'), idB: Number(requireField(p, 'idB')) }),
       restore: (p) => request('POST', '/state/restore', { agent: p?.agent, snapshotId: p?.snapshotId !== undefined ? Number(p.snapshotId) : undefined, golden: p?.golden }),
-      put: (p) => sendCmd('idb.put', { store: requireField(p, 'store'), row: requireField(p, 'row') }, p?.agent),
+      put: (p) => sendCmd('idb.put', { store: requireField(p, 'store'), row: requireField(p, 'row'), dryRun: !!p?.dryRun }, p?.agent),
+      put_many: (p) => sendCmd('idb.putMany', { store: requireField(p, 'store'), rows: requireField(p, 'rows'), dryRun: !!p?.dryRun }, p?.agent),
       delete: (p) => sendCmd('idb.delete', { store: requireField(p, 'store'), key: requireField(p, 'key') }, p?.agent),
       delete_many: (p) => sendCmd('idb.deleteMany', { store: requireField(p, 'store'), keys: requireField(p, 'keys') }, p?.agent),
       clear: (p) => sendCmd('idb.clear', { store: requireField(p, 'store') }, p?.agent),
@@ -281,12 +283,14 @@ const TOOLS = [
       + '  wait {urlPattern, timeoutMs?, graceMs?} - attach-and-wait for a request whose URL contains urlPattern\n'
       + '  history {sessionId?, filter?, minDuration?, sort?: "duration", limit?} - the DURABLE, already-persisted net_entries table (defaults to the active session)\n'
       + '  clear {} - clear the live ring buffer\n'
-      + 'log/wait/clear take optional `agent` (multi-tab target name); history does not (it queries by sessionId, not by live agent connection).',
+      + '  capture {filter?, off?} - ADDS filter to the armed response-BODY capture set (fetch/XHR) for requests whose URL contains it - call again with a different filter to watch a second endpoint too; log/wait/history entries then gain a bodyPreview. off:true clears every armed filter (off by default)\n'
+      + 'log/wait/clear/capture take optional `agent` (multi-tab target name); history does not (it queries by sessionId, not by live agent connection).',
     actions: {
       log: (p) => sendCmd('net.log', {}, p?.agent),
       wait: (p) => sendCmd('net.wait', { urlPattern: requireField(p, 'urlPattern'), timeoutMs: numOrUndef(p?.timeoutMs), graceMs: numOrUndef(p?.graceMs) }, p?.agent),
       history: (p) => netHistory({ sessionId: p?.sessionId, filter: p?.filter, minDuration: p?.minDuration, sort: p?.sort, limit: p?.limit }),
       clear: (p) => sendCmd('net.clear', {}, p?.agent),
+      capture: (p) => sendCmd('net.setBodyCapture', p?.off ? { off: true } : { filter: p?.filter }, p?.agent),
     },
   },
   {

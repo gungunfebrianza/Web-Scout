@@ -59,7 +59,7 @@ const DEFAULT_AGENT = 'default';
 // deliberately includes idb.put/idb.delete/idb.clear/idb.deleteMany (the
 // tool's real write paths besides eval), since excluding them would leave
 // strict-CRV not covering the exact thing it exists to audit.
-const STRICT_CRV_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'eval', 'idb.put', 'idb.patch', 'idb.delete', 'idb.clear', 'idb.deleteMany']);
+const STRICT_CRV_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'eval', 'idb.put', 'idb.putMany', 'idb.patch', 'idb.delete', 'idb.clear', 'idb.deleteMany']);
 // dom.wait/idb.wait poll, dom.pick blocks on a real human click, and eval
 // now races its own page-side timeout (see inject.js's eval handler,
 // EVAL_TIMEOUT_MS) so an async hang gets a diagnostic reply instead of
@@ -71,7 +71,7 @@ const LONG_POLL_TYPES = new Set(['dom.wait', 'dom.clickWait', 'dom.settle', 'idb
 // query/dump/list/snapshot/net/console commands, which are noise in a
 // replay (nothing to "redo"). Pass {"all": true} to POST /macros to
 // include everything the session logged instead.
-const DEFAULT_MACRO_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'dom.wait', 'dom.settle', 'idb.wait', 'net.wait', 'console.wait', 'idb.put', 'idb.patch', 'idb.delete', 'idb.deleteMany', 'idb.clear', 'page.reload', 'eval']);
+const DEFAULT_MACRO_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'dom.wait', 'dom.settle', 'idb.wait', 'net.wait', 'console.wait', 'idb.put', 'idb.putMany', 'idb.patch', 'idb.delete', 'idb.deleteMany', 'idb.clear', 'page.reload', 'eval']);
 // Types whose reply the CLI should best-effort re-verify against live state
 // after a genuine TIMEOUT (not a real failure reply from the page) - a
 // timed-out reply does not prove the command never ran; the page may have
@@ -109,7 +109,7 @@ const MACRO_CONTEXT_SIMILARITY_THRESHOLD = 0.15;
 const READ_CACHEABLE_TYPES = new Set(['idb.dump', 'idb.get', 'idb.list', 'dom.query', 'dom.rect', 'dom.computedStyle', 'net.log', 'console.log', 'react.inspect', 'react.tree']);
 // Anything that can change DOM/IndexedDB/navigation state - a cache entry
 // recorded before one of these ran must never be served again.
-const MUTATING_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'eval', 'idb.put', 'idb.patch', 'idb.delete', 'idb.deleteMany', 'idb.clear', 'page.reload', 'page.hardReload']);
+const MUTATING_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'eval', 'idb.put', 'idb.putMany', 'idb.patch', 'idb.delete', 'idb.deleteMany', 'idb.clear', 'page.reload', 'page.hardReload']);
 const sessionMutationCounters = new Map(); // sessionId -> counter, bumped on every MUTATING_TYPES dispatch
 const readResultCache = new Map(); // sessionId -> Map(`${type}::${JSON.stringify(params)}` -> { result, mutationCounter, cachedAt })
 // In-memory only (resets on relay restart, unlike db.mjs's getTokenSavingsReport
@@ -118,6 +118,15 @@ const readResultCache = new Map(); // sessionId -> Map(`${type}::${JSON.stringif
 // own savings are visible, not just its existence.
 let runtimeCacheHitCount = 0;
 let runtimeCacheBytesSaved = 0;
+// A cache hit skips withLoggedAction entirely (see both cache-hit sites
+// below) - no actions row, so dbApi.getSessionTokensSoFar (which sums the
+// actions table) never sees those bytes. But the cached result is still
+// returned in THIS reply's body and the calling agent still reads it off
+// stdout - so the running x-webscout-session-tokens total was silently
+// UNDERcounting a session with any cache hits. Tracked per-session (not
+// just the global runtimeCacheBytesSaved counter above) so the generic
+// response wrapper can add exactly the right session's share back in.
+const sessionCacheHitBytes = new Map(); // sessionId -> bytes
 
 function getMutationCounter(sessionId) {
   return sessionMutationCounters.get(sessionId) || 0;
@@ -368,6 +377,35 @@ function summarizeDiff(diff) {
     summary[name] = { added: d.added.length, removed: d.removed.length, changed: d.changed.length };
   }
   return summary;
+}
+
+// Collapses a cleanup dry-run/confirm row list (pendingDeletes/deleted/
+// failed/changedNotDeleted - each an array of {store, ...}) down to a
+// per-store count - "session cleanup --summary" against a store with a
+// large diff used to mean an 11K+-token wall of full rows just to see "6
+// rows in store X" before ever asking for the detail. Also totals an
+// estBytes/estTokens per store (Buffer.byteLength on the `row`/`before`+
+// `after` already sitting in memory - never a fresh fetch, so this costs
+// nothing extra) - a raw count alone didn't say whether "6 rows" was 200
+// bytes or 20KB, and that's exactly the number an operator needs to decide
+// whether --summary is even worth reaching for over the full listing.
+// actionLog-mode items carry no row content (only store/key) - those count
+// toward `count` with 0 bytes, since the tracker never read the row back.
+function summarizeByStore(list) {
+  const byStore = {};
+  let totalBytes = 0;
+  for (const item of list) {
+    const s = byStore[item.store] || (byStore[item.store] = { count: 0, estBytes: 0 });
+    s.count += 1;
+    const content = item.row !== undefined ? item.row : (item.before !== undefined || item.after !== undefined) ? { before: item.before, after: item.after } : undefined;
+    if (content !== undefined) {
+      const bytes = Buffer.byteLength(JSON.stringify(content), 'utf8');
+      s.estBytes += bytes;
+      totalBytes += bytes;
+    }
+  }
+  for (const store of Object.keys(byStore)) byStore[store].estTokens = Math.round(byStore[store].estBytes / dbApi.CHARS_PER_TOKEN_ESTIMATE);
+  return { total: list.length, totalEstTokens: Math.round(totalBytes / dbApi.CHARS_PER_TOKEN_ESTIMATE), byStore };
 }
 
 // ---------- Action logging wrapper (requirement 1: every action recorded) ----------
@@ -1044,6 +1082,7 @@ const routes = [
       readResultCache.delete(sessionId);
       sessionMutationCounters.delete(sessionId);
       sessionCacheAwarenessNudged.delete(sessionId);
+      sessionCacheHitBytes.delete(sessionId);
       broadcastUpdate('session', null);
       return { ...session, replayableActionCount };
     },
@@ -1099,6 +1138,10 @@ const routes = [
       // byType (above) can't say WHICH store/selector inside "idb.dump"/
       // "dom.query" is the actual hotspot - byTarget can.
       byTarget: dbApi.getActionCostByTarget(Number(m[1])),
+      // Neither byType nor byTarget says which CRV phase/macro the cost
+      // belongs to - byMacro answers "which replayed macro was actually
+      // expensive" (ad-hoc, non-macro calls bucket under macroId: null).
+      byMacro: dbApi.getActionCostByMacro(Number(m[1])),
     }),
   },
   {
@@ -1200,6 +1243,7 @@ const routes = [
       const sessionId = Number(m[1]);
       const body = await readJsonBody(req);
       const agentName = body.agent || DEFAULT_AGENT;
+      const summaryOnly = !!body.summary;
 
       if (body.sinceSnapshotId) {
         const baseline = dbApi.getSnapshot(Number(body.sinceSnapshotId));
@@ -1222,8 +1266,9 @@ const routes = [
         if (!body.confirm) {
           return {
             dryRun: true, mode: 'sinceSnapshotId', baselineSnapshotId: baseline.id, freshSnapshotId: freshSnap.id,
-            pendingDeletes: pending, changedNotDeleted,
-            note: `Compared against snapshot #${baseline.id} across store(s) ${stores.join(', ')}. Pass {"confirm":true,"sinceSnapshotId":${baseline.id}} to delete the ${pending.length} added row(s) listed above. ${changedNotDeleted.length} row(s) were changed (not added) since the baseline and are listed but NOT deleted - review by hand if they need reverting.`,
+            pendingDeletes: summaryOnly ? summarizeByStore(pending) : pending,
+            changedNotDeleted: summaryOnly ? summarizeByStore(changedNotDeleted) : changedNotDeleted,
+            note: `Compared against snapshot #${baseline.id} across store(s) ${stores.join(', ')}. Pass {"confirm":true,"sinceSnapshotId":${baseline.id}} to delete the ${pending.length} added row(s) listed above. ${changedNotDeleted.length} row(s) were changed (not added) since the baseline and are listed but NOT deleted - review by hand if they need reverting.${summaryOnly ? ' (--summary: per-store counts only, not full rows - re-run without it for detail.)' : ''}`,
           };
         }
         const deleted = [];
@@ -1238,7 +1283,12 @@ const routes = [
           }
         }
         broadcastUpdate('action', sessionId);
-        return { dryRun: false, mode: 'sinceSnapshotId', baselineSnapshotId: baseline.id, freshSnapshotId: freshSnap.id, deleted, failed, changedNotDeleted };
+        return {
+          dryRun: false, mode: 'sinceSnapshotId', baselineSnapshotId: baseline.id, freshSnapshotId: freshSnap.id,
+          deleted: summaryOnly ? summarizeByStore(deleted) : deleted,
+          failed: summaryOnly ? summarizeByStore(failed) : failed,
+          changedNotDeleted: summaryOnly ? summarizeByStore(changedNotDeleted) : changedNotDeleted,
+        };
       }
 
       const actions = dbApi.listActions(sessionId, { ascending: true });
@@ -1249,6 +1299,13 @@ const routes = [
         if (a.type === 'eval' && /\.(add|put|update|set|create)\s*\(/.test(String(a.params?.expr ?? ''))) evalWriteCount += 1;
         if (a.type === 'idb.put' && a.params?.store !== undefined && a.result?.key !== undefined) {
           state.set(`${a.params.store}::${JSON.stringify(a.result.key)}`, { store: a.params.store, key: a.result.key, live: true });
+        } else if (a.type === 'idb.putMany' && a.params?.store !== undefined && a.result?.keyPath !== undefined) {
+          const kp = a.result.keyPath;
+          for (const row of a.result.rows ?? []) {
+            const key = typeof kp === 'string' ? row?.[kp] : kp.map((k) => row?.[k]);
+            if (key === undefined || (Array.isArray(key) && key.some((v) => v === undefined))) continue;
+            state.set(`${a.params.store}::${JSON.stringify(key)}`, { store: a.params.store, key, live: true });
+          }
         } else if (a.type === 'idb.delete' && a.params?.store !== undefined && a.params?.key !== undefined) {
           state.set(`${a.params.store}::${JSON.stringify(a.params.key)}`, { store: a.params.store, key: a.params.key, live: false });
         } else if (a.type === 'idb.deleteMany' && a.params?.store !== undefined) {
@@ -1260,10 +1317,12 @@ const routes = [
       const pending = [...state.values()].filter((v) => v.live);
       if (!body.confirm) {
         return {
-          dryRun: true, mode: 'actionLog', pendingDeletes: pending, evalWriteActionsNotTracked: evalWriteCount,
+          dryRun: true, mode: 'actionLog',
+          pendingDeletes: summaryOnly ? summarizeByStore(pending) : pending,
+          evalWriteActionsNotTracked: evalWriteCount,
           note: (evalWriteCount
             ? `${evalWriteCount} eval action(s) in this session look like writes and are NOT tracked here - review manually. `
-            : '') + `This mode only tracks idb.put/idb.delete/idb.deleteMany/idb.clear - it does NOT see writes made by clicking a real UI button. Pass {"sinceSnapshotId": <id>} instead to catch those too. Pass {"confirm":true} to delete the ${pending.length} row(s) listed above.`,
+            : '') + `This mode only tracks idb.put/idb.putMany/idb.delete/idb.deleteMany/idb.clear - it does NOT see writes made by clicking a real UI button. Pass {"sinceSnapshotId": <id>} instead to catch those too. Pass {"confirm":true} to delete the ${pending.length} row(s) listed above.${summaryOnly ? ' (--summary: per-store counts only, not full rows.)' : ''}`,
         };
       }
       const deleted = [];
@@ -1277,7 +1336,12 @@ const routes = [
         }
       }
       broadcastUpdate('action', sessionId);
-      return { dryRun: false, mode: 'actionLog', deleted, failed, evalWriteActionsNotTracked: evalWriteCount };
+      return {
+        dryRun: false, mode: 'actionLog',
+        deleted: summaryOnly ? summarizeByStore(deleted) : deleted,
+        failed: summaryOnly ? summarizeByStore(failed) : failed,
+        evalWriteActionsNotTracked: evalWriteCount,
+      };
     },
   },
 
@@ -1420,7 +1484,9 @@ const routes = [
           const cached = readResultCache.get(session.id)?.get(cacheKey);
           if (cached && cached.mutationCounter === getMutationCounter(session.id)) {
             runtimeCacheHitCount += 1;
-            runtimeCacheBytesSaved += JSON.stringify(cached.result).length;
+            const bytes = JSON.stringify(cached.result).length;
+            runtimeCacheBytesSaved += bytes;
+            sessionCacheHitBytes.set(session.id, (sessionCacheHitBytes.get(session.id) || 0) + bytes);
             results.push({ type: step.type, ok: true, skipped: true, reason: 'read result served from same-session cache', result: cached.result, durationMs: 0 });
             continue;
           }
@@ -1538,14 +1604,21 @@ const routes = [
         const cached = readResultCache.get(session.id)?.get(cacheKey);
         if (cached && cached.mutationCounter === getMutationCounter(session.id)) {
           runtimeCacheHitCount += 1;
-          runtimeCacheBytesSaved += JSON.stringify(cached.result).length;
+          const bytes = JSON.stringify(cached.result).length;
+          runtimeCacheBytesSaved += bytes;
+          sessionCacheHitBytes.set(session.id, (sessionCacheHitBytes.get(session.id) || 0) + bytes);
           maybeCacheAwarenessNudge(session.id, res);
           return { ...cached.result, __cacheHit: true, __cachedAt: cached.cachedAt };
         }
       }
 
       let resultOut;
-      if (session.strict_crv && STRICT_CRV_TYPES.has(type)) {
+      // idb.put/idb.putMany --dry-run write nothing (readonly transaction,
+      // no .put() call in inject.js) - wrapping either in a before/after
+      // auto-snapshot+diff pair would pay real snapshot cost to prove a
+      // diff that can never be anything but empty.
+      const isDryRunPut = (type === 'idb.put' || type === 'idb.putMany') && params?.dryRun === true;
+      if (session.strict_crv && STRICT_CRV_TYPES.has(type) && !isDryRunPut) {
         // Scoped to session.strict_crv_stores when the session was started
         // with `--stores a,b,c` - unscoped (stores: undefined) still means
         // "whole db", same as before, so an old caller that never scoped
@@ -1598,12 +1671,13 @@ const routes = [
       const agentName = body.agent || DEFAULT_AGENT;
       const stores = Array.isArray(body.stores) ? body.stores : undefined;
       const goldenName = typeof body.golden === 'string' && body.golden.trim() ? body.golden.trim() : undefined;
+      const where = body.where && typeof body.where === 'object' ? body.where : undefined;
       const session = requireActiveSession();
-      const { result, actionId } = await withLoggedAction(session.id, 'idb.snapshot', { stores, golden: goldenName }, () => dispatchCommand('idb.snapshot', { stores }, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
-      const saved = dbApi.saveSnapshot({ sessionId: session.id, actionId, stores: result.stores, agentName, goldenName });
+      const { result, actionId } = await withLoggedAction(session.id, 'idb.snapshot', { stores, golden: goldenName, where }, () => dispatchCommand('idb.snapshot', { stores, where }, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
+      const saved = dbApi.saveSnapshot({ sessionId: session.id, actionId, stores: result.stores, agentName, goldenName, where });
       broadcastUpdate('action', session.id);
       broadcastUpdate('snapshot', session.id);
-      return { id: saved.id, takenAt: saved.takenAt, counts: saved.counts, byteSize: saved.byteSize, agentName: saved.agentName, goldenName: saved.goldenName };
+      return { id: saved.id, takenAt: saved.takenAt, counts: saved.counts, byteSize: saved.byteSize, agentName: saved.agentName, goldenName: saved.goldenName, where: saved.where };
     },
   },
   { method: 'GET', pattern: /^\/state\/snapshots\/(\d+)$/, handler: async (_req, m) => dbApi.getSnapshot(Number(m[1])) },
@@ -1837,6 +1911,25 @@ const server = http.createServer(async (req, res) => {
       res.end(result);
       return;
     }
+    // Running session token total, delivered via response HEADER (same
+    // established convention as x-webscout-nudge above - never folded into
+    // the JSON body, so it can't change the shape of any command's own real
+    // result). Lets an operator see cumulative cost build up call-by-call
+    // instead of only discovering it after the fact via "token-report" -
+    // confirmed real gap: a 278K-token idb.snapshot surfaced only in a
+    // post-hoc audit, well after the session that paid for it was over.
+    // Best-effort - never blocks or fails a reply over this.
+    try {
+      const activeSession = dbApi.getCurrentSession();
+      if (activeSession) {
+        // + cache-hit bytes: see sessionCacheHitBytes above - a cache hit
+        // never writes an actions row, so the DB-side sum alone would
+        // silently undercount the bytes this reply (and every earlier
+        // cache-hit reply this session) actually put in front of the agent.
+        const cacheHitTokens = Math.round((sessionCacheHitBytes.get(activeSession.id) || 0) / dbApi.CHARS_PER_TOKEN_ESTIMATE);
+        res.setHeader('x-webscout-session-tokens', String(dbApi.getSessionTokensSoFar(activeSession.id) + cacheHitTokens));
+      }
+    } catch { /* best-effort only */ }
     sendJson(res, 200, { ok: true, result });
   } catch (err) {
     // db.mjs's lookup functions (getSession/getSnapshot/getDiff) throw a

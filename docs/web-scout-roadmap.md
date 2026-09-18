@@ -1946,6 +1946,67 @@ feature.
   count the same physical bytes (caught and fixed in this same round,
   before shipping).
 
+## V28 - CRV tooling lessons from a real P4.8 session, plus a fresh-scan follow-up (implemented)
+
+Two passes. The first turned 12 proposed lessons from a real P4.8 CRV into
+work; a fresh scan afterward found 6 more. Six of the first 12 (durable
+sessions across hard reload, DB-version-drift reload guidance, ambiguous
+`dom.click` candidate list, `session assert`, golden-diff cache keying, and
+the page-level-cache staleness gotcha) were checked against source and were
+either already implemented or documentation-only - no code change, and the
+golden-diff cache in particular was confirmed correct (keyed on content
+hash, not snapshot id).
+
+Pass 1 - new:
+- **`net capture <substr>` / `--off`:** opt-in response-BODY capture for
+  fetch/XHR entries whose URL matches, capped at 4000 chars, persisted to
+  `net_entries` (new `body_preview_hash`/`body_truncated` columns, body
+  deduped through `text_blobs`). Replaces hand-patching `window.fetch` via
+  `eval` to see a raw response a validator discards on failure.
+- **`session cleanup --summary`:** per-store counts instead of full row
+  bodies.
+- **`idb put-many`:** one transaction, per-row failure reporting (a bad row
+  calls `preventDefault()` on its own request so it does not abort the
+  batch). Also recognized by cleanup's action-log tracker - caught live, a
+  put-many-seeded write was initially invisible to cleanup.
+- **Running session token total:** `x-webscout-session-tokens` response
+  header (same header-not-body convention as the macro nudge, so it can
+  never change a command's own result shape), printed to stderr past a
+  threshold.
+- **`idb snapshot --where`:** exact-equality row filter applied in-page
+  before the WebSocket; the saved snapshot carries `where_json`.
+- **`idb put --dry-run`:** validates shape against the store's real
+  keyPath/autoIncrement in a readonly transaction; skips strict-CRV's
+  auto-snapshot wrapping since nothing can change.
+
+Pass 2 - fresh scan:
+- **Multi-filter `net capture`:** filters are a set; each call adds one,
+  `--off` clears all. The single-string version lost the first arm the
+  moment a second endpoint was armed.
+- **`idb put-many --dry-run`:** the one bulk-write path with no validation
+  mode after `idb put` got one.
+- **`session cleanup --summary` size estimate:** `estBytes`/`estTokens` per
+  store, from row content already in memory. `--since-snapshot` mode only -
+  action-log mode never reads rows back, so it reports 0 bytes.
+- **`WEBSCOUT_TOKEN_THRESHOLD`:** env override for the hardcoded 5000-token
+  print threshold.
+- **Ticker undercount fix:** a same-session read-cache hit skips
+  `withLoggedAction`, so no `actions` row is written and the DB-side running
+  total never counted those bytes - even though the cached result is still
+  returned in the reply and read by the agent. A per-session
+  `sessionCacheHitBytes` counter is now added into the header. (The
+  originally proposed framing - "ticker overstates on cache hits" - was
+  backwards; checking the code before implementing showed it undercounts.)
+- **`token-report` `byMacro`:** groups a session's cost by `params.macroId`
+  (ad-hoc calls bucket under `macroId: null`), answering "which CRV phase
+  cost what" instead of only "which command type." Session-scoped only.
+- **Pre-existing bug found while verifying:** `token-report --session <id>`
+  sliced off its own `--session` flag (`rest.slice(1)` on an already-
+  stripped arg list) and silently queried the all-time endpoint every time,
+  so per-session scoping never actually worked from the CLI. Fixed.
+
+`inject.js` cache-bust bumped to `?v=3` in the host app's `index.html`.
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a
