@@ -56,7 +56,7 @@
   button:hover { border-color: var(--accent-predator); box-shadow: 0 0 6px rgba(255,157,0,.4); }
   .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
   .badge-ok { background: var(--ok-bg); color: var(--ok-fg); }
-  .badge-fail { background: var(--fail-bg); color: var(--fail-fg); }
+  .badge-fail { background: var(--fail-bg); color: var(--fail-fg); box-shadow: var(--glow-danger); }
   .badge-active { background: var(--active-bg); color: var(--active-fg); }
   .badge-ended { background: #15181c; color: var(--ink-muted); }
   .badge-crv { background: var(--warn-bg); color: var(--warn-fg); }
@@ -80,8 +80,11 @@
   }
   .panel::before, .hud-section::before { top: -1px; left: -1px; border-right: none; border-bottom: none; }
   .panel::after, .hud-section::after { bottom: -1px; right: -1px; border-left: none; border-top: none; }
+  .panel:has(#sessionStatusBadge.badge-active) { border-left: 3px solid var(--accent-info); }
   .goal { font-size: 14px; font-weight: 600; color: var(--accent-predator); }
   .context { color: var(--ink-muted); margin-top: 2px; }
+  #sessionTags:not(:empty) { padding-top: 4px; border-top: 1px solid var(--border-hud); }
+  .chip:hover { border-color: var(--accent-info); }
   .qa-item { border-bottom: 1px solid var(--border-hud); padding: 8px 0; }
   .qa-item:last-child { border-bottom: none; }
   .qa-q { font-weight: 600; color: var(--accent-info); }
@@ -94,16 +97,79 @@
   #sessionPicker { min-width: 260px; }
   .level-error, .level-uncaught, .level-unhandledrejection { color: var(--accent-danger); }
   .level-warn { color: var(--accent-predator); }
-  #netTable .sortable { cursor: pointer; user-select: none; }
-  #netTable .sortable:hover { color: var(--accent-info); }
-  .net-slow { color: var(--accent-danger); font-weight: 600; }
+  .sortable { cursor: pointer; user-select: none; }
+  .sortable:hover { color: var(--accent-info); }
+  .net-slow { color: var(--accent-danger); font-weight: 600; text-shadow: 0 0 6px rgba(255,42,61,.5); }
+  .chevron { display: inline-block; color: var(--ink-muted); margin-right: 3px; transition: transform .15s; }
+  tr.expandable[aria-expanded="true"] .chevron { transform: rotate(90deg); color: var(--accent-info); }
+  .fail-burst-strip { display: flex; flex-wrap: wrap; gap: 2px; margin: 2px 0 6px; min-height: 6px; }
+  .fail-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-alien); flex-shrink: 0; }
+  .fail-dot.fail { background: var(--accent-danger); box-shadow: 0 0 3px var(--accent-danger); }
+  .type-accent-dom { border-left: 3px solid var(--accent-info); }
+  .type-accent-idb { border-left: 3px solid var(--accent-alien); }
+  .type-accent-page { border-left: 3px solid var(--accent-predator); }
+  .type-accent-session { border-left: 3px solid #c084ff; }
+  .level-accent-error, .level-accent-uncaught, .level-accent-unhandledrejection { border-left: 3px solid var(--accent-danger); }
+  .level-accent-warn { border-left: 3px solid var(--accent-predator); }
+  .method-accent-get { border-left: 3px solid var(--accent-info); }
+  .method-accent-post { border-left: 3px solid var(--accent-alien); }
+  .method-accent-put, .method-accent-patch { border-left: 3px solid var(--accent-predator); }
+  .method-accent-delete { border-left: 3px solid var(--accent-danger); }
   tr.pending-row td { color: var(--accent-predator); font-style: italic; }
   .spinner { display: inline-block; width: 9px; height: 9px; border: 2px solid var(--border-hud); border-top-color: var(--accent-predator); border-radius: 50%; animation: spin .7s linear infinite; margin-right: 6px; vertical-align: middle; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  .hud-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; align-items: start; }
+  .hud-scroll-col { display: flex; flex-direction: column; min-height: 0; }
+  .hud-scroll-body { max-height: 420px; overflow-y: auto; }
+  @media (max-width: 900px) { .hud-grid-2 { grid-template-columns: 1fr; } }
+
+  /* ---- cross-session viz block ---- */
+  .heatmap-table { border-collapse: collapse; font-size: 11px; }
+  .heatmap-table th, .heatmap-table td { border: 1px solid var(--border-hud); padding: 3px 6px; white-space: nowrap; }
+  .heatmap-table th { position: sticky; top: 0; background: var(--bg-panel); }
+  .heat-cell { text-align: center; color: var(--ink-primary); cursor: help; }
+  .heat-cell.heat-empty { color: var(--ink-muted); background: var(--bg-panel-inset) !important; }
+  .selector-graph-svg text { font-size: 10px; fill: var(--ink-muted); font-family: var(--font-mono); }
+  .selector-graph-svg .sg-node-type { fill: var(--accent-info); }
+  .selector-graph-svg .sg-node-selector { fill: var(--accent-danger); }
+  .selector-graph-svg line { stroke: var(--accent-danger); }
+  .burn-chart-svg .burn-area { fill: var(--accent-info); opacity: .18; }
+  .burn-chart-svg .burn-line { fill: none; stroke: var(--accent-info); stroke-width: 1.5; }
+  .burn-chart-svg .burn-over { fill: var(--accent-danger); }
+  .burn-chart-svg .burn-axis { stroke: var(--border-hud); }
+  .burn-chart-legend { font-size: 10px; color: var(--ink-muted); margin-top: 4px; }
+  .duration-bar-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border-hud); font-size: 12px; }
+  .duration-bar-label { min-width: 90px; flex-shrink: 0; color: var(--ink-muted); font-size: 11px; }
+  .duration-bar-track { position: relative; flex: 1; height: 14px; background: var(--bg-panel-inset); border-radius: 2px; }
+  .duration-bar-max { position: absolute; top: 0; bottom: 0; left: 0; background: var(--bg-panel-raised); border-radius: 2px; }
+  .duration-bar-p95 { position: absolute; top: 0; bottom: 0; left: 0; background: var(--accent-predator); opacity: .55; border-radius: 2px; }
+  .duration-bar-p50 { position: absolute; top: 0; bottom: 0; left: 0; background: var(--accent-info); border-radius: 2px; }
+  .duration-bar-value { min-width: 130px; flex-shrink: 0; font-size: 10px; color: var(--ink-muted); text-align: right; }
+  .punchcard-table { border-collapse: collapse; font-size: 10px; }
+  .punchcard-table td, .punchcard-table th { padding: 0; }
+  .punchcard-table th { color: var(--ink-muted); font-weight: 400; font-size: 9px; text-align: center; }
+  .punchcard-day-label { color: var(--ink-muted); font-size: 10px; padding-right: 6px !important; text-align: right; }
+  .punchcard-cell { width: 14px; height: 14px; border: 1px solid var(--bg-void); cursor: help; }
+  .macro-health-row { display: flex; align-items: center; gap: 8px; font-size: 11px; padding: 3px 0; }
+  .macro-health-name { min-width: 140px; color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .macro-health-dot { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
+  .macro-health-dot.ok { background: var(--accent-alien); }
+  .macro-health-dot.fail { background: var(--accent-danger); box-shadow: 0 0 3px var(--accent-danger); }
+  .net-waterfall-row { display: flex; align-items: center; gap: 6px; font-size: 10px; padding: 1px 0; }
+  .net-waterfall-label { min-width: 46px; flex-shrink: 0; color: var(--ink-muted); text-align: right; }
+  .net-waterfall-track { position: relative; flex: 1; height: 8px; background: var(--bg-panel-inset); border-radius: 1px; }
+  .net-waterfall-bar { position: absolute; top: 0; height: 100%; border-radius: 1px; min-width: 2px; }
+  .gauge-ring-wrap { position: relative; width: 46px; height: 46px; flex-shrink: 0; }
+  .gauge-ring-wrap svg { transform: rotate(-90deg); }
+  .gauge-ring-bg { fill: none; stroke: var(--bg-panel-inset); }
+  .gauge-ring-fg { fill: none; stroke-linecap: round; transition: stroke-dashoffset .3s; }
+  .gauge-ring-label { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; }
   .filter-row { margin-bottom: 6px; }
   .filter-row select, .filter-row input { font-size: 12px; padding: 4px 6px; }
   #actionSearch { width: 220px; }
-  .timeline-item { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border-hud); font-size: 12px; }
+  #timeline { position: relative; }
+  #timeline::before { content: ''; position: absolute; left: 82px; top: 0; bottom: 0; width: 1px; background: var(--border-hud); }
+  .timeline-item { display: flex; gap: 8px; padding: 4px 0 4px 4px; border-bottom: 1px solid var(--border-hud); border-left: 2px solid transparent; font-size: 12px; }
   .timeline-time { color: var(--ink-muted); min-width: 70px; }
   .timeline-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; box-shadow: 0 0 4px currentColor; }
   .tl-action { background: var(--kind-action); }
@@ -112,7 +178,16 @@
   .tl-console { background: var(--kind-console); }
   .tl-net { background: var(--kind-net); }
   .tl-verity { background: var(--kind-verity); }
+  .timeline-item:has(.tl-action):hover { border-left-color: var(--kind-action); }
+  .timeline-item:has(.tl-snapshot):hover { border-left-color: var(--kind-snapshot); }
+  .timeline-item:has(.tl-diff):hover { border-left-color: var(--kind-diff); }
+  .timeline-item:has(.tl-console):hover { border-left-color: var(--kind-console); }
+  .timeline-item:has(.tl-net):hover { border-left-color: var(--kind-net); }
+  .timeline-item:has(.tl-verity):hover { border-left-color: var(--kind-verity); }
+  .timeline-item:hover { background: var(--bg-panel-raised); }
   .timeline-label { color: var(--ink-muted); font-size: 11px; text-transform: uppercase; min-width: 64px; }
+  .tl-filter-chip { background: var(--bg-panel-raised); color: var(--ink-muted); border: 1px solid var(--border-hud); border-radius: 10px; padding: 2px 9px; font-size: 11px; text-transform: none; letter-spacing: 0; }
+  .tl-filter-chip.active { border-color: var(--accent-predator); color: var(--accent-predator); }
   #globalSearch { min-width: 220px; }
   #searchResults .empty { padding: 4px 0; border: none; text-align: left; }
   #searchResults .empty::before { display: inline; margin: 0 6px 0 0; }
@@ -126,14 +201,49 @@
   .diff-added { color: var(--accent-alien); }
   .diff-removed { color: var(--accent-danger); }
   .diff-changed { color: var(--accent-predator); }
-  #frictionBanner, #dbVersionBanner, #wasteBanner { background: var(--warn-bg); border: 1px solid var(--accent-predator); border-radius: 2px; padding: 10px 12px; margin-bottom: 12px; }
+  #frictionBanner, #dbVersionBanner, #wasteBanner { background: var(--warn-bg); border: 1px solid var(--accent-predator); border-left: 4px solid var(--accent-predator); border-radius: 2px; padding: 10px 12px; margin-bottom: 12px; position: relative; }
+  #dbVersionBanner { border-left-color: var(--accent-danger); }
+  #frictionBanner { border-left-color: var(--accent-info); }
   #frictionBanner h3, #dbVersionBanner h3, #wasteBanner h3 { margin: 0 0 6px; font-family: var(--font-display); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--accent-predator); }
+  #dbVersionBanner h3 { color: var(--accent-danger); }
+  #dbVersionBanner h3::before { content: '\25B2  '; }
+  #frictionBanner h3 { color: var(--accent-info); }
+  #frictionBanner h3::before { content: '\25CF  '; }
+  #wasteBanner h3::before { content: '\25C6  '; }
   #frictionBanner ul { margin: 0; padding-left: 18px; }
   #frictionBanner li { margin: 2px 0; }
   #frictionToggle, #dbVersionToggle, #wasteToggle { float: right; background: none; border: none; color: var(--ink-muted); cursor: pointer; padding: 0 4px; }
+  .banner-stack-badge { position: absolute; top: 10px; right: 34px; font-size: 10px; color: var(--ink-muted); }
   .token-trend-bar { display: inline-block; width: 16px; margin-right: 2px; text-align: center; vertical-align: bottom; }
   .token-trend-bar-track { height: 30px; display: flex; align-items: flex-end; }
-  .assert-run { border-bottom: 1px solid var(--border-hud); padding: 8px 0; }
+  .token-trend-plot { position: relative; height: 30px; margin-top: 4px; }
+  .token-trend-median-line { position: absolute; left: 0; right: 0; height: 1px; background: var(--accent-info); opacity: .55; }
+  .token-cost-bar-cell { position: relative; display: block; min-height: 16px; }
+  .token-cost-bar-cell span { position: relative; z-index: 1; }
+  .token-cost-bar { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(255,157,0,.18); border-radius: 2px; z-index: 0; }
+  .token-budget-track { position: relative; background: var(--bg-panel-raised); border: 1px solid var(--border-hud); border-radius: 2px; height: 8px; margin-top: 2px; }
+  .token-budget-fill { height: 100%; border-radius: 1px; }
+  .token-budget-tick { position: absolute; top: -2px; bottom: -2px; width: 1px; background: var(--ink-muted); }
+  .diff-stack-bar { display: flex; height: 5px; width: 80px; border-radius: 2px; overflow: hidden; background: var(--bg-panel-inset); margin-top: 3px; }
+  .verity-step-bar { display: flex; height: 5px; width: 90px; border-radius: 2px; overflow: hidden; margin-top: 3px; background: var(--bg-panel-inset); }
+  .net-latency-track { position: relative; height: 14px; background: var(--bg-panel-inset); border: 1px solid var(--border-hud); border-radius: 2px; margin-bottom: 2px; }
+  .net-latency-dot { position: absolute; top: 2px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent-info); transform: translateX(-50%); }
+  .net-latency-dot.slow { background: var(--accent-danger); box-shadow: 0 0 4px var(--accent-danger); }
+  .hud-section table tbody tr.snapshot-golden td { background: rgba(255,157,0,.08); }
+  .verity-dropzone { border: 1px dashed var(--border-hud); border-radius: 3px; padding: 8px; transition: border-color .15s, background .15s; }
+  .verity-dropzone.dragover { border-color: var(--accent-predator); background: rgba(255,157,0,.05); }
+  .step-index { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: var(--bg-panel-raised); border: 1px solid var(--border-hud); font-size: 10px; color: var(--accent-info); margin-right: 4px; flex-shrink: 0; }
+  .macro-steps-list { position: relative; }
+  .macro-steps-list::before { content: ''; position: absolute; left: 13px; top: 10px; bottom: 10px; width: 1px; background: var(--border-hud); }
+  .qa-a { border-left: 2px solid var(--border-hud); background: var(--bg-panel-inset); border-radius: 0 2px 2px 0; padding: 5px 8px; }
+  #askCharCount { display: block; margin-top: 3px; font-size: 11px; }
+  .assert-run.assert-run-pass { border-left: 3px solid var(--accent-alien); background: rgba(124,255,60,.03); }
+  .assert-run.assert-run-fail { border-left: 3px solid var(--accent-danger); background: rgba(255,42,61,.03); }
+  .assert-pass-strip { display: inline-flex; gap: 3px; margin-left: 8px; vertical-align: middle; }
+  .assert-pass-dot { width: 7px; height: 7px; border-radius: 50%; }
+  .assert-pass-dot.pass { background: var(--accent-alien); }
+  .assert-pass-dot.fail { background: var(--accent-danger); }
+  .assert-run { border-bottom: 1px solid var(--border-hud); padding: 8px 0 8px 8px; border-left: 3px solid transparent; }
   .assert-run:last-child { border-bottom: none; }
   .assert-checks-list { list-style: none; margin: 4px 0 0; padding: 0; }
   .assert-checks-list li { padding: 2px 0; font-size: 12px; }
@@ -182,14 +292,19 @@
     body::before, .hud-pulse, .radar-sweep, .spinner, .skeleton-row .skeleton-bar { animation: none !important; }
     #hudSweepBar.sweep-run { animation: none !important; opacity: 0 !important; }
   }
-  dialog#settingsDialog { background: var(--bg-panel); color: var(--ink-primary); border: 1px solid var(--border-hud); border-radius: 4px; padding: 16px; max-width: 640px; width: 90vw; }
+  dialog#settingsDialog { background: var(--bg-panel); color: var(--ink-primary); border: 1px solid var(--border-hud); border-radius: 4px; padding: 16px; max-width: 640px; width: 90vw; position: relative; }
+  dialog#settingsDialog::before, dialog#settingsDialog::after { content: ''; position: absolute; width: 14px; height: 14px; border: 2px solid var(--accent-predator); opacity: .75; pointer-events: none; }
+  dialog#settingsDialog::before { top: -1px; left: -1px; border-right: none; border-bottom: none; }
+  dialog#settingsDialog::after { bottom: -1px; right: -1px; border-left: none; border-top: none; }
   dialog#settingsDialog::backdrop { background: rgba(0,0,0,.6); }
-  .settings-tabs { margin: 10px 0; }
+  .settings-tabs { margin: 10px 0; position: relative; padding-bottom: 8px; border-bottom: 1px solid var(--border-hud); }
   .settings-tab-btn.active { border-color: var(--accent-predator); color: var(--accent-predator); }
+  .settings-tab-indicator { position: absolute; left: 0; bottom: -1px; height: 2px; width: 0; background: var(--accent-predator); box-shadow: var(--glow-predator); transition: left .2s, width .2s; }
+  @media (prefers-reduced-motion: reduce) { .settings-tab-indicator { transition: none; } }
   .settings-tab { margin-top: 10px; }
   .settings-tab label { display: block; margin: 10px 0 4px; font-size: 12px; color: var(--ink-muted); }
   .settings-tab input { width: 200px; }
-  #serverConfigView div { margin: 3px 0; }
+  #serverConfigView td { padding: 4px 10px 4px 0; border: none; vertical-align: top; }
   #aboutContent p { margin: 6px 0; }
 </style>
 </head>
@@ -237,6 +352,50 @@
   </div>
 </div>
 
+<section class="hud-section" id="allSessionsHero">
+  <h2>All sessions</h2>
+  <div id="allSessionsStatStrip" class="hud-stat-strip"></div>
+</section>
+
+<div class="hud-grid-2">
+  <section class="hud-section hud-scroll-col">
+  <h2>Failure heatmap</h2>
+  <div class="muted">action type &times; last 15 sessions - color = fail rate, brightness = call volume</div>
+  <div class="hud-scroll-body" id="heatmapContainer"></div>
+  <div id="heatmapEmpty" class="empty" hidden>No actions recorded yet.</div>
+  </section>
+
+  <section class="hud-section hud-scroll-col">
+  <h2>Recurring selector failures</h2>
+  <div class="muted">selectors that failed more than once, linked to the action type they failed on - line thickness = fail count</div>
+  <div class="hud-scroll-body" id="selectorGraphContainer"></div>
+  <div id="selectorGraphEmpty" class="empty" hidden>No repeated selector failures yet.</div>
+  </section>
+</div>
+
+<section class="hud-section">
+  <h2>Token burn, all sessions</h2>
+  <div class="muted">cumulative estimated tokens across every session, chronological - a red dot marks a session that finished over its own declared budget</div>
+  <div id="burnChartContainer"></div>
+  <div id="burnChartEmpty" class="empty" hidden>No sessions with recorded actions yet.</div>
+</section>
+
+<div class="hud-grid-2">
+  <section class="hud-section hud-scroll-col">
+  <h2>Duration by action type</h2>
+  <div class="muted">p50 / p95 / max across every session - spots a type with a long tail, not just a slow single call</div>
+  <div class="hud-scroll-body" id="durationChartContainer"></div>
+  <div id="durationChartEmpty" class="empty" hidden>No actions recorded yet.</div>
+  </section>
+
+  <section class="hud-section hud-scroll-col">
+  <h2>Activity punchcard</h2>
+  <div class="muted">sessions started, by hour of day &times; day of week</div>
+  <div class="hud-scroll-body" id="punchcardContainer"></div>
+  <div id="punchcardEmpty" class="empty" hidden>No sessions yet.</div>
+  </section>
+</div>
+
 <dialog id="settingsDialog">
   <form method="dialog">
     <div class="row" style="justify-content: space-between; align-items:center;">
@@ -247,6 +406,7 @@
       <button type="button" class="settings-tab-btn" data-tab="Display">Display</button>
       <button type="button" class="settings-tab-btn" data-tab="Server">Server config</button>
       <button type="button" class="settings-tab-btn" data-tab="About">About / Project</button>
+      <div id="settingsTabIndicator" class="settings-tab-indicator"></div>
     </div>
 
     <section id="settingsTabDisplay" class="settings-tab">
@@ -314,99 +474,129 @@
       <div class="row">
         <span id="sessionCrvBadge" class="badge badge-crv" hidden>strict-CRV</span>
         <span id="sessionStatusBadge" class="badge"></span>
+        <span id="sessionDuration" class="muted"></span>
         <button id="exportReportBtn">Export report</button>
         <button id="endSessionBtn">End session</button>
       </div>
     </div>
   </div>
 
-  <section class="hud-section">
+  <div class="hud-grid-2">
+  <section class="hud-section hud-scroll-col">
   <h2>Timeline</h2>
-  <div id="timeline"></div>
+  <div class="row" id="timelineKindFilter" style="gap: 4px; margin-bottom: 6px;">
+    <button type="button" class="tl-filter-chip active" data-kind="all">All</button>
+    <button type="button" class="tl-filter-chip" data-kind="action">Action</button>
+    <button type="button" class="tl-filter-chip" data-kind="snapshot">Snapshot</button>
+    <button type="button" class="tl-filter-chip" data-kind="diff">Diff</button>
+    <button type="button" class="tl-filter-chip" data-kind="console">Console</button>
+    <button type="button" class="tl-filter-chip" data-kind="net">Net</button>
+    <button type="button" class="tl-filter-chip" data-kind="verity">Verity</button>
+  </div>
+  <div id="timeline" class="hud-scroll-body"></div>
   <div id="timelineEmpty" class="empty" hidden>Nothing recorded yet.</div>
   </section>
 
-  <section class="hud-section" id="actionsSection">
+  <section class="hud-section hud-scroll-col" id="actionsSection">
   <h2>Action log</h2>
   <div class="row filter-row">
     <select id="actionTypeFilter"><option value="">all types</option></select>
     <select id="actionOkFilter"><option value="">ok + fail</option><option value="ok">ok only</option><option value="fail">fail only</option></select>
     <input id="actionSearch" placeholder="search params/result...">
   </div>
-  <table id="actionsTable"><thead><tr><th>Time</th><th>Agent</th><th>Type</th><th>Result</th><th>ms</th></tr></thead><tbody></tbody></table>
+  <div id="actionsFailStrip" class="fail-burst-strip"></div>
+  <div class="hud-scroll-body"><table id="actionsTable"><thead><tr><th>Time</th><th>Agent</th><th>Type</th><th>Result</th><th id="actionDurationHeader" class="sortable" title="Click to sort by duration">ms</th></tr></thead><tbody></tbody></table></div>
   <div id="actionsEmpty" class="empty" hidden>No actions recorded yet.</div>
   </section>
+  </div>
 
-  <section class="hud-section">
+  <div class="hud-grid-2">
+  <section class="hud-section hud-scroll-col">
   <h2>Token cost (estimated)</h2>
   <div class="muted">chars/4 estimate over each action's own result_json - the same bytes a coding agent reads off stdout. Read-only calls (idb dump/get/list, dom query/rect/style, net log, console log) are served from cache when nothing could have changed since the last identical call - see "token-report" in the CLI help.</div>
   <div id="tokenBudgetBar" hidden style="margin-top:8px;"></div>
+  <div class="hud-scroll-body">
   <table id="tokenCostTable"><thead><tr><th>Type</th><th>Calls</th><th>Avg bytes</th><th>Est. tokens</th></tr></thead><tbody></tbody></table>
   <div id="tokenCostTotal" class="muted" style="margin-top:4px;"></div>
+  <span id="tokenBurnRate" class="muted"></span>
   <div id="tokenLoopsList" style="margin-top:6px; font-size:12px;"></div>
   <div id="tokenRedundantList" style="margin-top:6px; font-size:12px;"></div>
   <div id="tokenTrendSection" style="margin-top:10px;"></div>
+  </div>
   <div id="tokenCostEmpty" class="empty" hidden>No actions recorded yet.</div>
   </section>
 
-  <section class="hud-section">
+  <section class="hud-section hud-scroll-col">
   <h2>Regression checks</h2>
   <div class="muted">results of <code>session assert</code> - declarative checks against LIVE state (see the CLI's own "session assert" doc)</div>
-  <div id="assertRunsList" style="margin-top: 4px;"></div>
+  <div id="assertRunsList" class="hud-scroll-body" style="margin-top: 4px;"></div>
   <div id="assertRunsEmpty" class="empty" hidden>No "session assert" runs recorded yet for this session.</div>
   </section>
+  </div>
 
-  <section class="hud-section" id="snapshotsSection">
+  <div class="hud-grid-2">
+  <section class="hud-section hud-scroll-col" id="snapshotsSection">
   <h2>State snapshots</h2>
-  <table id="snapshotsTable"><thead><tr><th>ID</th><th>Time</th><th>Agent</th><th>Counts</th><th>Size</th><th></th></tr></thead><tbody></tbody></table>
+  <div class="hud-scroll-body"><table id="snapshotsTable"><thead><tr><th>ID</th><th>Time</th><th>Agent</th><th>Counts</th><th>Size</th><th></th></tr></thead><tbody></tbody></table></div>
   <div id="snapshotsEmpty" class="empty" hidden>No snapshots yet - <code>idb snapshot</code> from the CLI.</div>
   </section>
 
-  <section class="hud-section" id="diffsSection">
+  <section class="hud-section hud-scroll-col" id="diffsSection">
   <h2>State diffs</h2>
-  <table id="diffsTable"><thead><tr><th>ID</th><th>From &rarr; To</th><th>Summary</th></tr></thead><tbody></tbody></table>
+  <div class="hud-scroll-body"><table id="diffsTable"><thead><tr><th>ID</th><th>From &rarr; To</th><th>Summary</th></tr></thead><tbody></tbody></table></div>
   <div id="diffsEmpty" class="empty" hidden>No diffs yet - <code>idb diff &lt;a&gt; &lt;b&gt;</code> from the CLI.</div>
   </section>
+  </div>
 
-  <section class="hud-section" id="consoleSection">
+  <div class="hud-grid-2">
+  <section class="hud-section hud-scroll-col" id="consoleSection">
   <h2>Console</h2>
-  <table id="consoleTable"><thead><tr><th>Time</th><th>Agent</th><th>Level</th><th>Message</th></tr></thead><tbody></tbody></table>
+  <div id="consoleErrorTrend"></div>
+  <div class="hud-scroll-body"><table id="consoleTable"><thead><tr><th>Time</th><th>Agent</th><th>Level</th><th>Message</th></tr></thead><tbody></tbody></table></div>
   <div id="consoleEmpty" class="empty" hidden>No console entries captured yet.</div>
   </section>
 
-  <section class="hud-section" id="netSection">
+  <section class="hud-section hud-scroll-col" id="netSection">
   <h2>Network</h2>
-  <table id="netTable"><thead><tr><th>Time</th><th>Agent</th><th>Via</th><th>Method</th><th>URL</th><th>Status</th><th id="netDurationHeader" class="sortable" title="Click to sort by duration">Duration</th></tr></thead><tbody></tbody></table>
+  <div id="netLatencyStrip"></div>
+  <div id="netWaterfallContainer"></div>
+  <div class="hud-scroll-body"><table id="netTable"><thead><tr><th>Time</th><th>Agent</th><th>Via</th><th>Method</th><th>URL</th><th>Status</th><th id="netDurationHeader" class="sortable" title="Click to sort by duration">Duration</th></tr></thead><tbody></tbody></table></div>
   <div id="netEmpty" class="empty" hidden>No network entries captured yet.</div>
   </section>
+  </div>
 
-  <section class="hud-section" id="veritySection">
+  <div class="hud-grid-2">
+  <section class="hud-section hud-scroll-col" id="veritySection">
   <h2>Verity UI checks</h2>
   <div class="muted">accessibility-tree evidence imported from <code>tools/ui-verifier</code> (a Verity <code>scenario</code> result JSON) - Verity itself persists nothing on its own</div>
-  <div class="row" style="margin-top: 4px;">
+  <div class="row verity-dropzone" id="verityDropzone" style="margin-top: 4px;">
     <input type="file" id="verityFileInput" accept="application/json">
     <input id="verityLabel" placeholder="label (optional)">
     <button id="verityImportBtn">Import</button>
+    <span class="muted">or drag a scenario-result JSON file here</span>
   </div>
-  <table id="verityTable"><thead><tr><th>ID</th><th>Label</th><th>Result</th><th>Steps</th><th>Imported</th></tr></thead><tbody></tbody></table>
+  <div class="hud-scroll-body"><table id="verityTable"><thead><tr><th>ID</th><th>Label</th><th>Result</th><th>Steps</th><th>Imported</th></tr></thead><tbody></tbody></table></div>
   <div id="verityEmpty" class="empty" hidden>No Verity results imported for this session yet.</div>
   </section>
 
-  <section class="hud-section">
+  <section class="hud-section hud-scroll-col">
   <h2>Macros</h2>
   <div class="row">
     <button id="recordMacroBtn">Record macro from this session</button>
     <span class="muted">saves this session's own replayable actions (dom/idb/page.reload/eval) as a named, replayable sequence</span>
   </div>
-  <table id="macrosTable"><thead><tr><th>ID</th><th>Name</th><th>Steps</th><th>Source session</th><th>Created</th><th></th></tr></thead><tbody></tbody></table>
+  <div class="hud-scroll-body"><table id="macrosTable"><thead><tr><th>ID</th><th>Name</th><th>Steps</th><th>Source session</th><th>Created</th><th>Last run</th><th></th></tr></thead><tbody></tbody></table></div>
   <div id="macrosEmpty" class="empty" hidden>No macros recorded yet.</div>
+  <div id="macroHealthStrip" style="margin-top:8px;"></div>
   </section>
+  </div>
 
   <section class="hud-section" id="qaSection">
   <h2>Ask AI</h2>
   <div id="qaList"></div>
   <form id="askForm">
     <textarea id="askQuestion" placeholder="What changed in the last diff, and why does that answer the session's goal?"></textarea>
+    <span id="askCharCount" class="muted"></span>
     <div class="row" style="margin-top: 6px;">
       <button type="submit" id="askSubmit">Ask</button>
       <span id="askStatus" class="muted"></span>
@@ -503,6 +693,32 @@ let lastHealth = null;
 // motion-tracker radar blips, so the same event kind is always the same
 // color in both places.
 const KIND_COLOR_VAR = { action: '--kind-action', snapshot: '--kind-snapshot', diff: '--kind-diff', console: '--kind-console', net: '--kind-net', verity: '--kind-verity' };
+
+// Coarse type-family accent, reused by the Action log's row border AND the
+// Macro step inspector's step-type label (a macro step's type is drawn from
+// the same action-type vocabulary) - one mapping instead of two.
+function actionTypeAccentClass(type) {
+  if (type.startsWith('dom.')) return 'type-accent-dom';
+  if (type.startsWith('idb.')) return 'type-accent-idb';
+  if (type.startsWith('page.')) return 'type-accent-page';
+  if (type.startsWith('session.')) return 'type-accent-session';
+  return '';
+}
+function actionTypeAccentColor(type) {
+  if (type.startsWith('dom.')) return 'var(--accent-info)';
+  if (type.startsWith('idb.')) return 'var(--accent-alien)';
+  if (type.startsWith('page.')) return 'var(--accent-predator)';
+  if (type.startsWith('session.')) return '#c084ff';
+  return 'var(--ink-muted)';
+}
+function levelAccentClass(level) {
+  if (/error|uncaught|unhandledrejection/.test(level)) return 'level-accent-error';
+  if (level === 'warn') return 'level-accent-warn';
+  return '';
+}
+function methodAccentClass(method) {
+  return 'method-accent-' + String(method || '').toLowerCase();
+}
 
 async function api(method, path, body) {
   const opts = { method };
@@ -632,6 +848,21 @@ function computeStats() {
   return { totalActions, failRate, consoleErrors, netCalls, agentsConnected, totalEstTokens, budget };
 }
 
+// Ring gauge for the Est. tokens tile - a circular progress ring reads
+// "how full is the budget" faster than the linear tokenBudgetBar in the
+// Token cost panel below, at a glance from the always-visible header
+// instead of requiring that panel to be scrolled to.
+function gaugeRingHtml(pct, band) {
+  const r = 18, c = 2 * Math.PI * r;
+  const offset = c * (1 - Math.min(1, pct));
+  const colorVar = band === 'fail' ? '--accent-danger' : band === 'warn' ? '--accent-predator' : '--accent-alien';
+  return `<div class="gauge-ring-wrap">
+    <svg viewBox="0 0 44 44"><circle class="gauge-ring-bg" cx="22" cy="22" r="${r}" stroke-width="4"/>
+    <circle class="gauge-ring-fg" cx="22" cy="22" r="${r}" stroke-width="4" stroke="var(${colorVar})" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${offset.toFixed(1)}"/></svg>
+    <div class="gauge-ring-label">${Math.round(pct * 100)}%</div>
+  </div>`;
+}
+
 function renderStatStrip() {
   const s = computeStats();
   const band = s.failRate < 10 ? 'ok' : s.failRate < 30 ? 'warn' : 'fail';
@@ -639,13 +870,17 @@ function renderStatStrip() {
   // action (see refreshTokenReport, wired into the SSE 'action' handler),
   // not only when someone opens the Token cost panel below.
   const tokenBand = s.budget ? (s.totalEstTokens < s.budget * 0.7 ? 'ok' : s.totalEstTokens < s.budget ? 'warn' : 'fail') : '';
+  const tokenHint = s.budget ? `Estimated tokens spent vs. declared budget of ${s.budget}.` : 'Estimated tokens spent (chars/4). No --token-budget declared.';
+  const tokenTileBody = s.budget
+    ? `<div class="row" style="gap:8px; flex-wrap:nowrap;">${gaugeRingHtml(s.totalEstTokens / s.budget, tokenBand)}<div><div class="hud-tile-label">Est. tokens</div><div class="hud-tile-value">${s.totalEstTokens}</div><div class="muted" style="font-size:10px;">of ${s.budget}</div></div></div>`
+    : `<div class="hud-tile-label">Est. tokens</div><div class="hud-tile-value">${s.totalEstTokens}</div>`;
   el('hudStatStrip').innerHTML = `
     <div class="hud-tile" data-hint="Total actions run in this session so far."><div class="hud-tile-label">Actions</div><div class="hud-tile-value">${s.totalActions}</div></div>
     <div class="hud-tile hud-tile-${band}" data-hint="Failed actions / total actions this session."><div class="hud-tile-label">Fail rate</div><div class="hud-tile-value">${s.failRate.toFixed(1)}%</div></div>
     <div class="hud-tile" data-hint="Console messages logged at error/uncaught/unhandledrejection level."><div class="hud-tile-label">Console errors</div><div class="hud-tile-value">${s.consoleErrors}</div></div>
     <div class="hud-tile" data-hint="Network requests captured this session."><div class="hud-tile-label">Net calls</div><div class="hud-tile-value">${s.netCalls}</div></div>
     <div class="hud-tile" data-hint="Browser agents currently connected to the relay."><div class="hud-tile-label">Agents</div><div class="hud-tile-value">${s.agentsConnected}</div></div>
-    <div class="hud-tile ${tokenBand ? `hud-tile-${tokenBand}` : ''}" data-hint="${s.budget ? `Estimated tokens spent vs. declared budget of ${s.budget}.` : 'Estimated tokens spent (chars/4). No --token-budget declared.'}"><div class="hud-tile-label">Est. tokens</div><div class="hud-tile-value">${s.totalEstTokens}</div></div>`;
+    <div class="hud-tile ${tokenBand ? `hud-tile-${tokenBand}` : ''}" data-hint="${tokenHint}">${tokenTileBody}</div>`;
 }
 
 function renderSparkline() {
@@ -858,11 +1093,13 @@ function appendActionRow(a, body, scrollTops) {
   const tr = document.createElement('tr');
   tr.className = 'expandable';
   tr.dataset.actionId = a.id;
-  tr.innerHTML = `<td>${fmtTime(a.started_at)}</td><td>${esc(a.agent_name ?? 'default')}</td><td>${esc(a.type)}</td><td><span class="badge ${a.ok ? 'badge-ok' : 'badge-fail'}">${a.ok ? 'ok' : 'fail'}</span></td><td>${a.duration_ms ?? ''}</td>`;
+  tr.setAttribute('aria-expanded', expandedActionIds.has(a.id) ? 'true' : 'false');
+  tr.innerHTML = `<td class="${actionTypeAccentClass(a.type)}"><span class="chevron">&#9656;</span>${fmtTime(a.started_at)}</td><td>${esc(a.agent_name ?? 'default')}</td><td>${esc(a.type)}</td><td><span class="badge ${a.ok ? 'badge-ok' : 'badge-fail'}">${a.ok ? 'ok' : 'fail'}</span></td><td>${a.duration_ms ?? ''}</td>`;
   tr.addEventListener('click', async () => {
     const existing = tr.nextElementSibling;
-    if (existing && existing.classList.contains('detail-row')) { existing.remove(); expandedActionIds.delete(a.id); return; }
+    if (existing && existing.classList.contains('detail-row')) { existing.remove(); expandedActionIds.delete(a.id); tr.setAttribute('aria-expanded', 'false'); return; }
     expandedActionIds.add(a.id);
+    tr.setAttribute('aria-expanded', 'true');
     toggleRow(tr, await actionDetailHtml(a));
   });
   body.appendChild(tr);
@@ -882,19 +1119,35 @@ function appendActionRow(a, body, scrollTops) {
   }
 }
 
+let actionsSortByDuration = false;
+
+// One dot per visible row, oldest-to-newest left-to-right - a burst of
+// failures clustered in time shows up as a run of red dots, which the
+// grouped/paginated table below (newest-first, collapsible runs) doesn't
+// make easy to spot at a glance.
+function renderFailBurstStrip(rows) {
+  const container = el('actionsFailStrip');
+  if (!container) return;
+  container.innerHTML = rows.length < 2 ? '' : rows.slice().reverse().map((a) =>
+    `<span class="fail-dot ${a.ok ? '' : 'fail'}" title="${esc(a.type)} - ${a.ok ? 'ok' : 'fail'}"></span>`
+  ).join('');
+}
+
 function renderActions(actions) {
   lastActions = actions;
   populateActionTypeFilter(actions);
   const filtered = actions.filter(actionMatchesFilters);
   el('actionsEmpty').hidden = filtered.length > 0 || pendingActions.size > 0;
   const visible = filtered.slice(0, settings.actionsRenderCap);
+  renderFailBurstStrip(visible);
   const visibleIds = new Set(visible.map((a) => a.id));
   for (const id of expandedActionIds) { if (!visibleIds.has(id)) expandedActionIds.delete(id); }
   for (const id of expandedGroupIds) { if (!visibleIds.has(id)) expandedGroupIds.delete(id); }
   const body = document.querySelector('#actionsTable tbody');
   const scrollTops = captureDetailScrollTops(body);
   body.innerHTML = '';
-  for (const group of groupConsecutiveActions(visible)) {
+  const groupSource = actionsSortByDuration ? [...visible].sort((a, b) => (b.duration_ms ?? -1) - (a.duration_ms ?? -1)) : visible;
+  for (const group of groupConsecutiveActions(groupSource)) {
     if (group.length >= 3 && !expandedGroupIds.has(group[0].id)) {
       const first = group[0], last = group[group.length - 1]; // visible is newest-first, so first = newest, last = oldest
       const tr = document.createElement('tr');
@@ -933,15 +1186,25 @@ function renderActions(actions) {
 function renderAssertRuns(actions) {
   const runs = actions.filter((a) => a.type === 'session.assert' && Array.isArray(a.result));
   el('assertRunsEmpty').hidden = runs.length > 0;
-  el('assertRunsList').innerHTML = runs.map((a) => {
+  if (!runs.length) { el('assertRunsList').innerHTML = ''; return; }
+  const passedCount = runs.filter((a) => a.result.every((c) => c.pass)).length;
+  const summaryHtml = `<div style="margin-bottom:6px;">
+    <span class="muted">${passedCount}/${runs.length} run(s) passed</span>
+    <span class="assert-pass-strip">${runs.slice().reverse().map((a) => {
+      const p = a.result.every((c) => c.pass);
+      return `<span class="assert-pass-dot ${p ? 'pass' : 'fail'}" title="${fmtTime(a.started_at)}: ${p ? 'PASS' : 'FAIL'}"></span>`;
+    }).join('')}</span>
+  </div>`;
+  el('assertRunsList').innerHTML = summaryHtml + runs.map((a) => {
     const checks = a.result;
     const passed = checks.every((c) => c.pass);
     const checksHtml = checks.map((c) => {
-      const label = [c.store, c.where ? JSON.stringify(c.where) : null].filter(Boolean).join(' ');
-      return `<li><span class="badge ${c.pass ? 'badge-ok' : 'badge-fail'}">${c.pass ? 'ok' : 'fail'}</span> ${esc(label)} - ${esc(c.detail)}</li>`;
+      const storeChip = c.store ? `<span class="chip">${esc(c.store)}</span>` : '';
+      const whereText = c.where ? esc(JSON.stringify(c.where)) : '';
+      return `<li><span class="badge ${c.pass ? 'badge-ok' : 'badge-fail'}">${c.pass ? 'ok' : 'fail'}</span> ${storeChip} ${whereText} - ${esc(c.detail)}</li>`;
     }).join('');
     return `
-      <div class="assert-run">
+      <div class="assert-run ${passed ? 'assert-run-pass' : 'assert-run-fail'}">
         <span class="badge ${passed ? 'badge-ok' : 'badge-fail'}">${passed ? 'PASS' : 'FAIL'}</span>
         <span class="muted">${fmtTime(a.started_at)} - ${checks.length} check(s)</span>
         <ul class="assert-checks-list">${checksHtml}</ul>
@@ -963,8 +1226,10 @@ function renderTokenBudgetBar(report) {
   const color = band === 'ok' ? 'var(--accent-alien)' : band === 'warn' ? 'var(--accent-predator)' : 'var(--accent-danger)';
   barEl.hidden = false;
   barEl.innerHTML = `<div class="muted">Token budget: ${report.totalEstTokens} / ${budget} (${pct.toFixed(0)}%)</div>
-    <div style="background:var(--bg-panel-raised);border:1px solid var(--border-hud);border-radius:2px;height:8px;margin-top:2px;overflow:hidden;">
-      <div style="height:100%;width:${pct}%;background:${color};"></div>
+    <div class="token-budget-track">
+      <div class="token-budget-fill" style="width:${pct}%;background:${color};"></div>
+      <div class="token-budget-tick" style="left:70%" title="warn threshold (70%)"></div>
+      <div class="token-budget-tick" style="left:99.5%" title="budget limit"></div>
     </div>`;
 }
 
@@ -997,23 +1262,47 @@ function renderTokenTrend() {
     .sort((a, b) => a.sessionId - b.sessionId);
   if (related.length < 2) { container.innerHTML = ''; return; }
   const max = Math.max(1, ...related.map((s) => s.totalEstTokens));
-  const bars = related.map((s) => {
+  const sortedTokens = related.map((s) => s.totalEstTokens).sort((a, b) => a - b);
+  const mid = Math.floor(sortedTokens.length / 2);
+  const median = sortedTokens.length % 2 ? sortedTokens[mid] : (sortedTokens[mid - 1] + sortedTokens[mid]) / 2;
+  const medianPct = Math.min(100, (median / max) * 100);
+  const tracks = related.map((s) => {
     const h = Math.max(2, (s.totalEstTokens / max) * 30);
     const isCurrent = s.sessionId === currentSessionId;
     return `<div class="token-trend-bar" title="#${s.sessionId}: ~${s.totalEstTokens} estimated tokens">
       <div class="token-trend-bar-track"><div style="width:100%;height:${h}px;background:${isCurrent ? 'var(--accent-predator)' : 'var(--accent-info)'};"></div></div>
-      <div class="muted" style="font-size:9px;">#${s.sessionId}</div>
     </div>`;
   }).join('');
-  container.innerHTML = `<div class="muted">Token cost trend across sessions tagged ${[...tagSet].map((t) => `<span class="chip">${esc(t)}</span>`).join('')}:</div><div style="margin-top:4px;">${bars}</div>`;
+  const labels = related.map((s) => `<div class="token-trend-bar"><div class="muted" style="font-size:9px;">#${s.sessionId}</div></div>`).join('');
+  container.innerHTML = `<div class="muted">Token cost trend across sessions tagged ${[...tagSet].map((t) => `<span class="chip">${esc(t)}</span>`).join('')}:</div>
+    <div class="token-trend-plot">
+      <div class="token-trend-median-line" style="bottom:${medianPct}%" title="median: ~${Math.round(median)} tokens"></div>
+      <div style="display:flex;align-items:flex-end;height:100%;">${tracks}</div>
+    </div>
+    <div style="display:flex;">${labels}</div>`;
+}
+
+// Cheap "is this session's spend accelerating" signal from data already on
+// hand (lastActions, populated by refreshActions before this ever runs) -
+// no extra fetch, just a span next to the static total.
+function computeBurnRate(report) {
+  if (lastActions.length < 2) return null;
+  const times = lastActions.map((a) => new Date(a.started_at).getTime()).filter(Number.isFinite);
+  if (times.length < 2) return null;
+  const spanMin = (Math.max(...times) - Math.min(...times)) / 60000;
+  return spanMin >= 0.5 ? report.totalEstTokens / spanMin : null;
 }
 
 function renderTokenReport(report) {
   lastTokenReport = report;
   el('tokenCostEmpty').hidden = report.byType.length > 0;
   const body = document.querySelector('#tokenCostTable tbody');
-  body.innerHTML = report.byType.map((t) => `<tr><td>${esc(t.type)}</td><td>${t.calls}</td><td>${t.avgResultBytes}</td><td>${t.estTokens}</td></tr>`).join('');
+  const rows = [...report.byType].sort((a, b) => b.estTokens - a.estTokens);
+  const maxTokens = Math.max(1, ...rows.map((t) => t.estTokens));
+  body.innerHTML = rows.map((t) => `<tr><td>${esc(t.type)}</td><td>${t.calls}</td><td>${t.avgResultBytes}</td><td><div class="token-cost-bar-cell"><span>${t.estTokens}</span><div class="token-cost-bar" style="width:${Math.max(2, (t.estTokens / maxTokens) * 100)}%"></div></div></td></tr>`).join('');
   el('tokenCostTotal').textContent = `Total: ${report.totalCalls} call(s), ~${report.totalEstTokens} estimated tokens`;
+  const burnRate = computeBurnRate(report);
+  el('tokenBurnRate').textContent = burnRate ? ` (~${Math.round(burnRate)} tokens/min)` : '';
   el('tokenLoopsList').innerHTML = report.loops?.length
     ? '<strong>Repeated-call loops:</strong> ' + report.loops.map((l) => `<span class="chip" title="${esc(l.firstAt)} to ${esc(l.lastAt)}">${esc(l.type)} x${l.count}</span>`).join(' ')
     : '';
@@ -1033,6 +1322,8 @@ async function refreshTokenReport() {
   } catch { /* best-effort - a transient fetch failure here shouldn't break the rest of the dashboard */ }
 }
 
+let timelineKindFilter = 'all';
+
 function renderTimeline() {
   // Merges the already-fetched panels into one lane by timestamp - answers
   // "which diff came from that click, right after that console error"
@@ -1045,7 +1336,7 @@ function renderTimeline() {
     ...lastConsoleEntries.map((c) => ({ at: c.occurred_at, kind: 'console', dot: 'tl-console', label: c.level, text: c.message })),
     ...lastNetEntries.map((n) => ({ at: n.occurred_at, kind: 'net', dot: 'tl-net', label: n.method, text: n.url || '' })),
     ...lastVerityRuns.map((v) => ({ at: v.imported_at, kind: 'verity', dot: 'tl-verity', label: 'verity', text: `${v.label ?? ''} (${v.passed === null ? 'unknown' : (v.passed ? 'PASS' : 'FAIL')}, ${v.passed_count}/${v.step_count})` })),
-  ].filter((i) => i.at).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 200);
+  ].filter((i) => i.at && (timelineKindFilter === 'all' || i.kind === timelineKindFilter)).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 200);
   el('timelineEmpty').hidden = items.length > 0;
   el('timeline').innerHTML = items.map((i) => `
     <div class="timeline-item">
@@ -1057,6 +1348,20 @@ function renderTimeline() {
   renderHud();
 }
 
+// Turns a store-by-store +/-/~ summary into one small horizontal stacked
+// bar - "how big was this diff" at a glance, without opening the raw JSON.
+function diffStackedBarHtml(summary) {
+  const totals = Object.values(summary).reduce((acc, c) => ({ added: acc.added + c.added, removed: acc.removed + c.removed, changed: acc.changed + c.changed }), { added: 0, removed: 0, changed: 0 });
+  const total = totals.added + totals.removed + totals.changed;
+  if (!total) return '';
+  const pct = (n) => (n / total * 100).toFixed(1);
+  return `<div class="diff-stack-bar" title="+${totals.added}/-${totals.removed}/~${totals.changed}">
+    <div style="width:${pct(totals.added)}%;background:var(--accent-alien);"></div>
+    <div style="width:${pct(totals.removed)}%;background:var(--accent-danger);"></div>
+    <div style="width:${pct(totals.changed)}%;background:var(--accent-predator);"></div>
+  </div>`;
+}
+
 function renderSnapshots(snapshots) {
   lastSnapshots = snapshots;
   el('snapshotsEmpty').hidden = snapshots.length > 0;
@@ -1064,10 +1369,12 @@ function renderSnapshots(snapshots) {
   body.innerHTML = '';
   for (const s of snapshots) {
     const tr = document.createElement('tr');
-    tr.className = 'expandable';
+    tr.className = 'expandable' + (s.golden_name ? ' snapshot-golden' : '');
     const countsSummary = Object.entries(s.counts).filter(([, n]) => n > 0).map(([k, n]) => `${k}:${n}`).join(', ') || '(all empty)';
     const goldenBadge = s.golden_name ? ` <span class="badge badge-crv" title="golden regression baseline - diffable from any future session via idb diff-golden">golden: ${esc(s.golden_name)}</span>` : '';
-    tr.innerHTML = `<td>${s.id}</td><td>${fmtTime(s.taken_at)}${goldenBadge}</td><td>${esc(s.agent_name ?? 'default')}</td><td>${esc(countsSummary)}</td><td>${(s.byte_size / 1024).toFixed(1)} KB</td><td><button class="diffSinceBtn" title="take a fresh snapshot of the same stores now and diff it against this one">diff vs now</button></td>`;
+    const sizeKb = (s.byte_size / 1024).toFixed(1);
+    const sizeStyle = s.byte_size > 100000 ? ' style="color:var(--accent-predator);"' : '';
+    tr.innerHTML = `<td>${s.id}</td><td>${fmtTime(s.taken_at)}${goldenBadge}</td><td>${esc(s.agent_name ?? 'default')}</td><td>${esc(countsSummary)}</td><td${sizeStyle}>${sizeKb} KB</td><td><button class="diffSinceBtn" title="take a fresh snapshot of the same stores now and diff it against this one">diff vs now</button></td>`;
     tr.addEventListener('click', async (ev) => {
       if (ev.target.closest('.diffSinceBtn')) return; // handled below, doesn't toggle the raw-JSON row
       const existing = tr.nextElementSibling;
@@ -1095,7 +1402,7 @@ function renderSnapshots(snapshots) {
         ).join(', ') || '<span class="muted">(no change)</span>';
         const existing = tr.nextElementSibling;
         if (existing && existing.classList.contains('detail-row')) existing.remove();
-        toggleRow(tr, `<div>vs. snapshot #${fresh.id} (just taken): ${summaryHtml}</div><pre>${esc(JSON.stringify(diff.diff, null, 2))}</pre>`);
+        toggleRow(tr, `<div>vs. snapshot #${fresh.id} (just taken): ${summaryHtml}${diffStackedBarHtml(diff.summary)}</div><pre>${esc(JSON.stringify(diff.diff, null, 2))}</pre>`);
       } catch (err) {
         alert('diff vs now failed: ' + err.message);
       } finally {
@@ -1118,7 +1425,7 @@ function renderDiffs(diffs) {
     const summaryHtml = Object.entries(d.summary).map(([store, c]) =>
       `${esc(store)}: <span class="diff-added">+${c.added}</span>/<span class="diff-removed">-${c.removed}</span>/<span class="diff-changed">~${c.changed}</span>`
     ).join(', ') || '<span class="muted">(no change)</span>';
-    tr.innerHTML = `<td>${d.id}</td><td>${d.snapshot_from_id} &rarr; ${d.snapshot_to_id}</td><td>${summaryHtml}</td>`;
+    tr.innerHTML = `<td>${d.id}</td><td>${d.snapshot_from_id} &rarr; ${d.snapshot_to_id}</td><td>${summaryHtml}${diffStackedBarHtml(d.summary)}</td>`;
     tr.addEventListener('click', async () => {
       const existing = tr.nextElementSibling;
       if (existing && existing.classList.contains('detail-row')) { existing.remove(); return; }
@@ -1133,7 +1440,32 @@ function renderConsole(entries) {
   lastConsoleEntries = entries;
   el('consoleEmpty').hidden = entries.length > 0;
   const body = document.querySelector('#consoleTable tbody');
-  body.innerHTML = entries.map((c) => `<tr><td>${fmtTime(c.occurred_at)}</td><td>${esc(c.agent_name)}</td><td class="level-${esc(c.level)}">${esc(c.level)}</td><td>${esc(c.message)}</td></tr>`).join('');
+  body.innerHTML = entries.map((c) => `<tr><td class="${levelAccentClass(c.level)}">${fmtTime(c.occurred_at)}</td><td>${esc(c.agent_name)}</td><td class="level-${esc(c.level)}">${esc(c.level)}</td><td>${esc(c.message)}</td></tr>`).join('');
+  renderConsoleErrorTrend(entries);
+}
+
+// Bucketed the same way as the HUD sparkline (renderSparkline) - a burst of
+// console errors shows up here as a spike distinct from the flat row list
+// below, without cross-referencing the Timeline for "when did these start".
+function renderConsoleErrorTrend(entries) {
+  const container = el('consoleErrorTrend');
+  if (!container) return;
+  const now = Date.now();
+  const buckets = new Array(30).fill(0);
+  for (const c of entries) {
+    if (!/error|uncaught|unhandledrejection/.test(c.level)) continue;
+    const t = new Date(c.occurred_at).getTime();
+    const bucket = 29 - Math.floor((now - t) / 60000);
+    if (bucket >= 0 && bucket < 30) buckets[bucket]++;
+  }
+  if (!buckets.some((v) => v > 0)) { container.innerHTML = ''; return; }
+  const max = Math.max(1, ...buckets);
+  const w = 4, gap = 1;
+  const bars = buckets.map((v, i) => {
+    const h = Math.max(1, (v / max) * 20);
+    return `<rect x="${i * (w + gap)}" y="${20 - h}" width="${w}" height="${h}" fill="var(--accent-danger)"/>`;
+  }).join('');
+  container.innerHTML = `<svg viewBox="0 0 ${30 * (w + gap)} 20" preserveAspectRatio="none" style="display:block;height:20px;width:100%;">${bars}</svg><div class="muted" style="font-size:10px;">console errors, last 30min</div>`;
 }
 
 // A row over this duration gets the slow-request flag - lets a
@@ -1165,8 +1497,58 @@ function renderNet(entries) {
   body.innerHTML = rows.map((n) => {
     const ms = netDurationMs(n);
     const slow = ms !== null && ms >= settings.netSlowMs;
-    return `<tr><td>${fmtTime(n.occurred_at)}</td><td>${esc(n.agent_name)}</td><td>${esc(n.via)}</td><td>${esc(n.method)}</td><td>${esc(n.url)}</td><td>${n.status ?? (n.error ? `ERR: ${esc(n.error)}` : '')}</td><td class="${slow ? 'net-slow' : ''}">${fmtDuration(ms)}</td></tr>`;
+    return `<tr><td class="${methodAccentClass(n.method)}">${fmtTime(n.occurred_at)}</td><td>${esc(n.agent_name)}</td><td>${esc(n.via)}</td><td>${esc(n.method)}</td><td>${esc(n.url)}</td><td>${n.status ?? (n.error ? `ERR: ${esc(n.error)}` : '')}</td><td class="${slow ? 'net-slow' : ''}">${fmtDuration(ms)}</td></tr>`;
   }).join('');
+  renderNetLatencyStrip(entries);
+  renderNetWaterfall(entries);
+}
+
+// DevTools-style waterfall: each request is a bar offset by its own start
+// time (relative to the earliest request shown) and sized by its own
+// duration - shows overlap/serialization the chronological table and the
+// single-axis latency strip (renderNetLatencyStrip, duration only, no
+// timing) both miss. Capped to the most recent NET_WATERFALL_ROWS requests,
+// oldest first, so the shared time axis stays readable.
+const NET_WATERFALL_ROWS = 30;
+const METHOD_COLOR_VAR = { get: '--accent-info', post: '--accent-alien', put: '--accent-predator', patch: '--accent-predator', delete: '--accent-danger' };
+function renderNetWaterfall(entries) {
+  const container = el('netWaterfallContainer');
+  if (!container) return;
+  const rows = entries.map((n) => ({ n, start: Date.parse(n.started_at), ms: netDurationMs(n) }))
+    .filter((r) => Number.isFinite(r.start) && r.ms !== null)
+    .sort((a, b) => a.start - b.start)
+    .slice(-NET_WATERFALL_ROWS);
+  if (rows.length < 2) { container.innerHTML = ''; return; }
+  const minStart = Math.min(...rows.map((r) => r.start));
+  const maxEnd = Math.max(...rows.map((r) => r.start + r.ms));
+  const span = Math.max(1, maxEnd - minStart);
+  const lines = rows.map((r) => {
+    const leftPct = ((r.start - minStart) / span) * 100;
+    const widthPct = Math.max(0.3, (r.ms / span) * 100);
+    const color = `var(${METHOD_COLOR_VAR[String(r.n.method || '').toLowerCase()] || '--ink-muted'})`;
+    return `<div class="net-waterfall-row">
+      <div class="net-waterfall-label">${esc(r.n.method)}</div>
+      <div class="net-waterfall-track"><div class="net-waterfall-bar" style="left:${leftPct.toFixed(2)}%; width:${widthPct.toFixed(2)}%; background:${color};" title="${esc(r.n.method)} ${esc(r.n.url || '')} - ${fmtDuration(r.ms)}, status ${r.n.status ?? (r.n.error ? 'ERR' : '?')}"></div></div>
+    </div>`;
+  }).join('');
+  container.innerHTML = `${lines}<div class="muted" style="font-size:10px; margin-top:2px;">waterfall - last ${rows.length} requests over ${fmtDuration(span)}</div>`;
+}
+
+// A dot per request positioned by its own duration on a fixed axis - "mostly
+// fast, one outlier" reads at a glance, which the chronological table below
+// (not duration-ordered by default) doesn't show without sorting.
+function renderNetLatencyStrip(entries) {
+  const container = el('netLatencyStrip');
+  if (!container) return;
+  const durations = entries.map((n) => ({ ms: netDurationMs(n), n })).filter((d) => d.ms !== null);
+  if (durations.length < 2) { container.innerHTML = ''; return; }
+  const max = Math.max(...durations.map((d) => d.ms), 1);
+  const dots = durations.map((d) => {
+    const pct = Math.min(100, (d.ms / max) * 100);
+    const slow = d.ms >= settings.netSlowMs;
+    return `<span class="net-latency-dot ${slow ? 'slow' : ''}" style="left:${pct}%" title="${esc(d.n.method)} ${esc(d.n.url || '')} - ${fmtDuration(d.ms)}"></span>`;
+  }).join('');
+  container.innerHTML = `<div class="net-latency-track">${dots}</div><div class="muted" style="font-size:10px;">latency spread (fast &rarr; slow, this session)</div>`;
 }
 
 function renderQA(qa) {
@@ -1186,12 +1568,22 @@ function renderQA(qa) {
 // recorded-from session's goal, unless {"confirm": true}. Surfaces that
 // exact message via a real confirm() dialog and retries with confirm:true
 // on OK, instead of the error just reading as an opaque failure.
+// Client-only "last run this session" tracking - the relay's macro object
+// carries no last-run timestamp, so this is the cheapest honest signal
+// without a backend change: set right after a run this dashboard itself
+// triggered, read back by refreshMacros' table render.
+const macroLastRun = new Map();
+
 async function runMacro(macroId, extraBody) {
   try {
-    return await api('POST', `/macros/${macroId}/run`, extraBody);
+    const result = await api('POST', `/macros/${macroId}/run`, extraBody);
+    macroLastRun.set(macroId, Date.now());
+    return result;
   } catch (err) {
     if (err.message.startsWith('cross-context replay guard:') && confirm(`${err.message}\n\nRun anyway?`)) {
-      return await api('POST', `/macros/${macroId}/run`, { ...extraBody, confirm: true });
+      const result = await api('POST', `/macros/${macroId}/run`, { ...extraBody, confirm: true });
+      macroLastRun.set(macroId, Date.now());
+      return result;
     }
     throw err;
   }
@@ -1202,7 +1594,7 @@ function renderMacroStepInspector(m) {
   list.className = 'macro-steps-list';
   m.steps.forEach((step, i) => {
     const li = document.createElement('li');
-    li.innerHTML = `<span class="muted">${i}.</span> <span class="step-type">${esc(step.type)}</span>
+    li.innerHTML = `<span class="step-index">${i + 1}</span> <span class="step-type" style="color:${actionTypeAccentColor(step.type)}">${esc(step.type)}</span>
       <button class="stepUpBtn" ${i === 0 ? 'disabled' : ''}>&uarr;</button>
       <button class="stepDownBtn" ${i === m.steps.length - 1 ? 'disabled' : ''}>&darr;</button>
       <button class="stepRemoveBtn">Remove</button>
@@ -1239,6 +1631,19 @@ function renderMacroStepInspector(m) {
   return list;
 }
 
+function verityStepBarHtml(v) {
+  const total = v.step_count || 0;
+  if (!total) return '';
+  const passedPct = (v.passed_count / total * 100).toFixed(1);
+  const failedPct = (v.failed_count / total * 100).toFixed(1);
+  const remainingPct = Math.max(0, 100 - parseFloat(passedPct) - parseFloat(failedPct)).toFixed(1);
+  return `<div class="verity-step-bar" title="${v.passed_count} passed / ${v.failed_count} failed / ${total} total">
+    <div style="width:${passedPct}%;background:var(--accent-alien);"></div>
+    <div style="width:${failedPct}%;background:var(--accent-danger);"></div>
+    <div style="width:${remainingPct}%;background:var(--ink-muted);opacity:.3;"></div>
+  </div>`;
+}
+
 function renderVerityRuns(runs) {
   lastVerityRuns = runs;
   el('verityEmpty').hidden = runs.length > 0;
@@ -1248,7 +1653,7 @@ function renderVerityRuns(runs) {
     const tr = document.createElement('tr');
     tr.className = 'expandable';
     const outcome = v.passed === null ? '<span class="muted">unknown</span>' : `<span class="badge ${v.passed ? 'badge-ok' : 'badge-fail'}">${v.passed ? 'PASS' : 'FAIL'}</span>`;
-    tr.innerHTML = `<td>${v.id}</td><td>${esc(v.label ?? '')}</td><td>${outcome}</td><td>${v.passed_count}/${v.step_count} (${v.failed_count} failed)</td><td>${fmtTime(v.imported_at)}</td>`;
+    tr.innerHTML = `<td>${v.id}</td><td>${esc(v.label ?? '')}</td><td>${outcome}</td><td>${v.passed_count}/${v.step_count} (${v.failed_count} failed)${verityStepBarHtml(v)}</td><td>${fmtTime(v.imported_at)}</td>`;
     tr.addEventListener('click', async () => {
       const existing = tr.nextElementSibling;
       if (existing && existing.classList.contains('detail-row')) { existing.remove(); return; }
@@ -1269,7 +1674,9 @@ async function refreshMacros() {
   for (const m of macros) {
     const tr = document.createElement('tr');
     tr.className = 'expandable';
-    tr.innerHTML = `<td>${m.id}</td><td>${esc(m.name)}</td><td>${m.steps.length}</td><td>${m.source_session_id ?? ''}</td><td>${fmtTime(m.created_at)}</td><td><button class="runMacroBtn">Run</button> <button class="delMacroBtn">Delete</button></td>`;
+    const lastRunAt = macroLastRun.get(m.id);
+    const lastRunText = lastRunAt ? `${fmtUptime(Date.now() - lastRunAt)} ago` : 'n/a';
+    tr.innerHTML = `<td>${m.id}</td><td>${esc(m.name)}</td><td>${m.steps.length}</td><td>${m.source_session_id ?? ''}</td><td>${fmtTime(m.created_at)}</td><td class="muted">${lastRunText}</td><td><button class="runMacroBtn">Run</button> <button class="delMacroBtn">Delete</button></td>`;
     tr.querySelector('.runMacroBtn').addEventListener('click', async (e) => {
       e.stopPropagation();
       try {
@@ -1323,6 +1730,11 @@ async function refreshSessionMeta() {
   badge.className = 'badge ' + (session.status === 'active' ? 'badge-active' : 'badge-ended');
   el('sessionCrvBadge').hidden = !session.strict_crv;
   el('endSessionBtn').disabled = session.status !== 'active';
+  const startedMs = new Date(session.started_at).getTime();
+  const endMs = session.ended_at ? new Date(session.ended_at).getTime() : Date.now();
+  el('sessionDuration').textContent = Number.isFinite(startedMs)
+    ? (session.status === 'active' ? `running ${fmtUptime(endMs - startedMs)}` : `ended after ${fmtUptime(endMs - startedMs)}`)
+    : '';
 }
 
 // Every row in every panel has an autoincrement `id` - since rows are only
@@ -1480,6 +1892,170 @@ function triggerSweep(changedFlags) {
   });
 }
 
+// All-sessions hero strip - same tile look as the per-session hudStatStrip
+// (renderStatStrip), but sourced from GET /analytics (computeAnalytics in
+// relay.mjs), which already scans every session ever recorded rather than
+// just the currently-selected one. failureRateByType only lists types with
+// >=1 failure, but summing its `failed` across every type still equals the
+// true all-time fail count (a type with zero fails just contributes 0),
+// so no separate all-time-fail-count query is needed.
+function renderAllSessionsHero(a) {
+  const totalFails = a.failureRateByType.reduce((sum, t) => sum + t.failed, 0);
+  const totalActions = a.totals.actions;
+  const failRate = totalActions ? (totalFails / totalActions * 100) : 0;
+  const band = failRate < 10 ? 'ok' : failRate < 30 ? 'warn' : 'fail';
+  const totalEstTokens = (a.sessionTokenTotals || []).reduce((sum, s) => sum + s.totalEstTokens, 0);
+  el('allSessionsStatStrip').innerHTML = `
+    <div class="hud-tile" data-hint="Sessions ever recorded."><div class="hud-tile-label">Sessions</div><div class="hud-tile-value">${a.totals.sessions}</div></div>
+    <div class="hud-tile" data-hint="Actions run across every session."><div class="hud-tile-label">Actions</div><div class="hud-tile-value">${totalActions}</div></div>
+    <div class="hud-tile hud-tile-${band}" data-hint="Failed actions / total actions across every session."><div class="hud-tile-label">Fail rate</div><div class="hud-tile-value">${failRate.toFixed(1)}%</div></div>
+    <div class="hud-tile" data-hint="Macros recorded across every session."><div class="hud-tile-label">Macros</div><div class="hud-tile-value">${a.totals.macros}</div></div>
+    <div class="hud-tile" data-hint="Verity UI-check results imported across every session."><div class="hud-tile-label">Verity runs</div><div class="hud-tile-value">${a.totals.verityRuns}</div></div>
+    <div class="hud-tile" data-hint="Estimated tokens spent (chars/4) across every session."><div class="hud-tile-label">Est. tokens</div><div class="hud-tile-value">${totalEstTokens}</div></div>`;
+}
+
+// ---------- Failure heatmap (type x last-15-sessions) ----------
+// a.heatmap comes pre-bounded from computeAnalytics (relay.mjs) - 15
+// sessions x 8 types, max - safe to render as a plain table with no
+// client-side pagination.
+function renderHeatmap(a) {
+  const h = a.heatmap;
+  const container = el('heatmapContainer');
+  if (!h || !h.sessions.length || !h.types.length) { container.innerHTML = ''; el('heatmapEmpty').hidden = false; return; }
+  el('heatmapEmpty').hidden = true;
+  const maxTotal = Math.max(1, ...h.cells.map((c) => c.total));
+  const byKey = new Map(h.cells.map((c) => [`${c.sessionId}::${c.type}`, c]));
+  const headerCells = h.sessions.map((s) => `<th title="${esc(s.goal)}">#${s.id}</th>`).join('');
+  const rows = h.types.map((type) => {
+    const cells = h.sessions.map((s) => {
+      const c = byKey.get(`${s.id}::${type}`);
+      if (!c || c.total === 0) return `<td class="heat-cell heat-empty" title="${esc(type)} / session #${s.id}: no calls">&middot;</td>`;
+      const failRate = c.failed / c.total;
+      const hue = 130 - 130 * failRate;
+      const alpha = 0.15 + 0.65 * (c.total / maxTotal);
+      return `<td class="heat-cell" style="background: hsla(${hue.toFixed(0)},70%,40%,${alpha.toFixed(2)})" title="${esc(type)} / session #${s.id}: ${c.failed}/${c.total} failed (${(failRate * 100).toFixed(0)}%)">${c.failed || ''}</td>`;
+    }).join('');
+    return `<tr><th style="text-align:left;">${esc(type)}</th>${cells}</tr>`;
+  }).join('');
+  container.innerHTML = `<table class="heatmap-table"><thead><tr><th></th>${headerCells}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// ---------- Recurring-selector failure graph (bipartite: type <-> selector) ----------
+function renderSelectorGraph(a) {
+  const container = el('selectorGraphContainer');
+  const items = (a.topFailedSelectors || []).slice(0, 12);
+  if (!items.length) { container.innerHTML = ''; el('selectorGraphEmpty').hidden = false; return; }
+  el('selectorGraphEmpty').hidden = true;
+  const types = [...new Set(items.map((i) => i.type))];
+  const rowH = 26;
+  const height = Math.max(types.length, items.length) * rowH + 10;
+  const width = 420;
+  const typeY = new Map(types.map((t, i) => [t, 10 + i * rowH + (rowH / 2)]));
+  const selY = new Map(items.map((it, i) => [it.selector + '::' + it.type, 10 + i * rowH + (rowH / 2)]));
+  const maxFail = Math.max(1, ...items.map((i) => i.failCount));
+  const lines = items.map((it) => {
+    const y1 = typeY.get(it.type);
+    const y2 = selY.get(it.selector + '::' + it.type);
+    const w = 1 + (it.failCount / maxFail) * 5;
+    return `<line x1="90" y1="${y1}" x2="${width - 130}" y2="${y2}" stroke-width="${w.toFixed(1)}" opacity="${(0.3 + 0.6 * (it.failCount / maxFail)).toFixed(2)}"><title>${esc(it.type)} -&gt; ${esc(it.selector)}: failed ${it.failCount}x across ${it.sessionCount} session(s)</title></line>`;
+  }).join('');
+  const typeNodes = types.map((t) => `<g><circle class="sg-node-type" cx="90" cy="${typeY.get(t)}" r="4"/><text x="80" y="${typeY.get(t) + 3}" text-anchor="end">${esc(t)}</text></g>`).join('');
+  const selNodes = items.map((it) => {
+    const y = selY.get(it.selector + '::' + it.type);
+    const label = it.selector.length > 22 ? it.selector.slice(0, 21) + '…' : it.selector;
+    return `<g><circle class="sg-node-selector" cx="${width - 130}" cy="${y}" r="4"/><text x="${width - 120}" y="${y + 3}"><title>${esc(it.selector)}</title>${esc(label)}</text></g>`;
+  }).join('');
+  container.innerHTML = `<svg class="selector-graph-svg" viewBox="0 0 ${width} ${height}" style="width:100%; height:${height}px;">${lines}${typeNodes}${selNodes}</svg>`;
+}
+
+// ---------- Cross-session cumulative token burn ----------
+function renderBurnChart(a) {
+  const container = el('burnChartContainer');
+  const totals = (a.sessionTokenTotals || []).filter((s) => s.totalEstTokens > 0);
+  if (totals.length < 2) { container.innerHTML = ''; el('burnChartEmpty').hidden = false; return; }
+  el('burnChartEmpty').hidden = true;
+  let cum = 0;
+  const points = totals.map((s) => { cum += s.totalEstTokens; return { ...s, cum }; });
+  const maxCum = Math.max(1, cum);
+  const width = 900, height = 110, padL = 4, padR = 4, padT = 8, padB = 8;
+  const innerW = width - padL - padR, innerH = height - padT - padB;
+  const x = (i) => padL + (points.length === 1 ? 0 : (i / (points.length - 1)) * innerW);
+  const y = (v) => padT + innerH - (v / maxCum) * innerH;
+  const line = points.map((p, i) => `${x(i).toFixed(1)},${y(p.cum).toFixed(1)}`).join(' ');
+  const area = `${padL},${padT + innerH} ${line} ${x(points.length - 1).toFixed(1)},${padT + innerH}`;
+  const overDots = points.map((p, i) => {
+    if (!p.tokenBudget || p.totalEstTokens <= p.tokenBudget) return '';
+    return `<circle class="burn-over" cx="${x(i).toFixed(1)}" cy="${y(p.cum).toFixed(1)}" r="3"><title>session #${p.sessionId} "${esc(p.goal)}": ${p.totalEstTokens} tokens, over its ${p.tokenBudget}-token budget</title></circle>`;
+  }).join('');
+  container.innerHTML = `<svg class="burn-chart-svg" viewBox="0 0 ${width} ${height}" style="width:100%; height:${height}px;" preserveAspectRatio="none">
+    <line class="burn-axis" x1="${padL}" y1="${padT + innerH}" x2="${width - padR}" y2="${padT + innerH}"/>
+    <polygon class="burn-area" points="${area}"/>
+    <polyline class="burn-line" points="${line}"/>
+    ${overDots}
+  </svg><div class="burn-chart-legend">${points.length} sessions with recorded activity - cumulative ~${cum} estimated tokens</div>`;
+}
+
+// ---------- Duration-by-type percentile bars ----------
+function renderDurationChart(a) {
+  const container = el('durationChartContainer');
+  const rows = (a.durationByType || []).slice(0, 15);
+  if (!rows.length) { container.innerHTML = ''; el('durationChartEmpty').hidden = false; return; }
+  el('durationChartEmpty').hidden = true;
+  const maxVal = Math.max(1, ...rows.map((r) => r.max));
+  container.innerHTML = rows.map((r) => {
+    const pMax = 100, pP95 = Math.min(100, (r.p95 / maxVal) * 100), pP50 = Math.min(100, (r.p50 / maxVal) * 100);
+    return `<div class="duration-bar-row">
+      <div class="duration-bar-label" title="${esc(r.type)}">${esc(r.type)}</div>
+      <div class="duration-bar-track" title="${esc(r.type)}: p50 ${fmtDuration(r.p50)}, p95 ${fmtDuration(r.p95)}, max ${fmtDuration(r.max)} (n=${r.count})">
+        <div class="duration-bar-max" style="width:${pMax}%"></div>
+        <div class="duration-bar-p95" style="width:${pP95.toFixed(1)}%"></div>
+        <div class="duration-bar-p50" style="width:${pP50.toFixed(1)}%"></div>
+      </div>
+      <div class="duration-bar-value">p50 ${fmtDuration(r.p50)} / p95 ${fmtDuration(r.p95)} / max ${fmtDuration(r.max)}</div>
+    </div>`;
+  }).join('');
+}
+
+// ---------- Session activity punchcard ----------
+const PUNCHCARD_DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function renderPunchcard(a) {
+  const container = el('punchcardContainer');
+  const grid = a.activityPunchcard;
+  const total = grid ? grid.flat().reduce((s, v) => s + v, 0) : 0;
+  if (!total) { container.innerHTML = ''; el('punchcardEmpty').hidden = false; return; }
+  el('punchcardEmpty').hidden = true;
+  const max = Math.max(1, ...grid.flat());
+  const hourHeader = Array.from({ length: 24 }, (_, h) => `<th>${h % 3 === 0 ? h : ''}</th>`).join('');
+  const rows = grid.map((hours, day) => {
+    const cells = hours.map((count, hour) => {
+      const alpha = count ? 0.15 + 0.85 * (count / max) : 0.06;
+      return `<td class="punchcard-cell" style="background: rgba(124,255,60,${alpha.toFixed(2)})" title="${PUNCHCARD_DAY_LABELS[day]} ${hour}:00 - ${count} session(s) started"></td>`;
+    }).join('');
+    return `<tr><td class="punchcard-day-label">${PUNCHCARD_DAY_LABELS[day]}</td>${cells}</tr>`;
+  }).join('');
+  container.innerHTML = `<table class="punchcard-table"><thead><tr><th></th>${hourHeader}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// ---------- Macro run-history health strip (CI-build-style dots) ----------
+function renderMacroHealth(a) {
+  const container = el('macroHealthStrip');
+  const rows = (a.macroHealth || []).filter((m) => m.runs.length > 0);
+  if (!rows.length) { container.innerHTML = ''; return; }
+  container.innerHTML = rows.map((m) => {
+    const dots = m.runs.map((ok, i) => `<span class="macro-health-dot ${ok ? 'ok' : 'fail'}" title="run ${i + 1}/${m.runs.length}: ${ok ? 'all steps ok' : 'at least one step failed'}"></span>`).join('');
+    return `<div class="macro-health-row"><span class="macro-health-name" title="${esc(m.name)}">${esc(m.name)}</span>${dots}</div>`;
+  }).join('');
+}
+
+function renderCrossSessionCharts(a) {
+  renderHeatmap(a);
+  renderSelectorGraph(a);
+  renderBurnChart(a);
+  renderDurationChart(a);
+  renderPunchcard(a);
+  renderMacroHealth(a);
+}
+
 let frictionDismissed = false;
 
 function renderFriction(a) {
@@ -1516,11 +2092,31 @@ async function refreshFriction() {
   try {
     const a = await api('GET', '/analytics');
     lastAnalyticsData = a;
+    renderAllSessionsHero(a);
+    renderCrossSessionCharts(a);
     renderFriction(a);
     renderTokenTrend();
   } catch {
     // Best-effort - a relay that can't even answer /health has already
     // surfaced its own error via refreshHealth's catch below.
+  }
+}
+
+// Numbers each currently-visible banner "1/2" etc so a second banner pushed
+// below the fold isn't silently missed - only shown at all once there's
+// more than one to disambiguate.
+function syncBannerStack() {
+  const all = ['dbVersionBanner', 'wasteBanner', 'frictionBanner'].map((id) => el(id));
+  const visible = all.filter((b) => !b.hidden);
+  for (const b of all) {
+    let badge = b.querySelector('.banner-stack-badge');
+    const idx = visible.indexOf(b);
+    if (idx !== -1 && visible.length > 1) {
+      if (!badge) { badge = document.createElement('span'); badge.className = 'banner-stack-badge'; b.appendChild(badge); }
+      badge.textContent = `${idx + 1}/${visible.length}`;
+    } else if (badge) {
+      badge.remove();
+    }
   }
 }
 
@@ -1531,6 +2127,7 @@ async function refreshAll() {
     await refreshSessionDetail();
     await refreshMacros();
     await refreshFriction();
+    syncBannerStack();
   } catch (err) {
     document.body.classList.add('relay-down');
     relayConnectedSince = null;
@@ -1641,6 +2238,18 @@ el('netDurationHeader').addEventListener('click', () => {
   el('netDurationHeader').textContent = netSortByDuration ? 'Duration ▼' : 'Duration';
   renderNet(lastNetEntries);
 });
+el('actionDurationHeader').addEventListener('click', () => {
+  actionsSortByDuration = !actionsSortByDuration;
+  el('actionDurationHeader').textContent = actionsSortByDuration ? 'ms ▼' : 'ms';
+  renderActions(lastActions);
+});
+el('timelineKindFilter').addEventListener('click', (e) => {
+  const btn = e.target.closest('.tl-filter-chip');
+  if (!btn) return;
+  timelineKindFilter = btn.dataset.kind;
+  el('timelineKindFilter').querySelectorAll('.tl-filter-chip').forEach((b) => b.classList.toggle('active', b === btn));
+  renderTimeline();
+});
 el('globalSearch').addEventListener('keydown', (e) => { if (e.key === 'Enter') runGlobalSearch(); });
 
 el('frictionToggle').addEventListener('click', () => {
@@ -1693,6 +2302,17 @@ el('endSessionBtn').addEventListener('click', async () => {
   await refreshAll();
 });
 
+const verityDropzone = el('verityDropzone');
+['dragenter', 'dragover'].forEach((evt) => verityDropzone.addEventListener(evt, (e) => { e.preventDefault(); verityDropzone.classList.add('dragover'); }));
+['dragleave', 'drop'].forEach((evt) => verityDropzone.addEventListener(evt, (e) => { e.preventDefault(); verityDropzone.classList.remove('dragover'); }));
+verityDropzone.addEventListener('drop', (e) => {
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  const dt = new DataTransfer();
+  dt.items.add(file);
+  el('verityFileInput').files = dt.files;
+});
+
 el('verityImportBtn').addEventListener('click', async () => {
   if (!currentSessionId) { alert('select a session first'); return; }
   const file = el('verityFileInput').files[0];
@@ -1735,15 +2355,21 @@ el('exportReportBtn').addEventListener('click', async () => {
   URL.revokeObjectURL(url);
 });
 
+el('askQuestion').addEventListener('input', () => {
+  const n = el('askQuestion').value.length;
+  el('askCharCount').textContent = n ? `~${Math.round(n / 4)} est. tokens (${n} chars)` : '';
+});
+
 el('askForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const question = el('askQuestion').value.trim();
   if (!question || !currentSessionId) return;
   el('askSubmit').disabled = true;
-  el('askStatus').textContent = 'asking...';
+  el('askStatus').innerHTML = '<span class="spinner"></span>asking...';
   try {
     await api('POST', '/ask', { session_id: currentSessionId, question });
     el('askQuestion').value = '';
+    el('askCharCount').textContent = '';
     el('askStatus').textContent = '';
     await refreshQA();
   } catch (err) {
@@ -1779,6 +2405,12 @@ function populateSettingsForm() {
 function showSettingsTab(name) {
   document.querySelectorAll('.settings-tab-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === name));
   document.querySelectorAll('.settings-tab').forEach((sec) => { sec.hidden = sec.id !== `settingsTab${name}`; });
+  const activeBtn = document.querySelector(`.settings-tab-btn[data-tab="${name}"]`);
+  const indicator = el('settingsTabIndicator');
+  if (activeBtn && indicator) {
+    indicator.style.left = activeBtn.offsetLeft + 'px';
+    indicator.style.width = activeBtn.offsetWidth + 'px';
+  }
 }
 document.querySelectorAll('.settings-tab-btn').forEach((btn) => btn.addEventListener('click', () => showSettingsTab(btn.dataset.tab)));
 
@@ -1815,12 +2447,13 @@ async function loadConfigTabs() {
   el('settingsAiBackendStatus').textContent = '';
   try {
     const cfg = await api('GET', '/config');
-    el('serverConfigView').innerHTML = `
-      <div>Relay: <code>${esc(cfg.host)}:${esc(cfg.port)}</code> <span class="muted">(WEBSCOUT_PORT - restart to change)</span></div>
-      <div>Database: <code>${esc(cfg.dbPath)}</code></div>
-      <div>Node: <code>${esc(cfg.nodeVersion)}</code> on <code>${esc(cfg.platform)}</code></div>
-      <div>Auto-open dashboard on session start: <code>${cfg.autoOpenEnabled ? 'enabled' : 'disabled'}</code> <span class="muted">(WEBSCOUT_NO_AUTOOPEN)</span></div>
-      <div>web-scout version: <code>${esc(cfg.webscoutVersion)}</code></div>`;
+    el('serverConfigView').innerHTML = `<table style="width:auto;">
+      <tr><td class="muted">Relay</td><td><code>${esc(cfg.host)}:${esc(cfg.port)}</code> <span class="muted">(WEBSCOUT_PORT - restart to change)</span></td></tr>
+      <tr><td class="muted">Database</td><td><code>${esc(cfg.dbPath)}</code></td></tr>
+      <tr><td class="muted">Node</td><td><code>${esc(cfg.nodeVersion)}</code> on <code>${esc(cfg.platform)}</code></td></tr>
+      <tr><td class="muted">Auto-open</td><td><code>${cfg.autoOpenEnabled ? 'enabled' : 'disabled'}</code> <span class="muted">(WEBSCOUT_NO_AUTOOPEN)</span></td></tr>
+      <tr><td class="muted">Version</td><td><code>${esc(cfg.webscoutVersion)}</code></td></tr>
+    </table>`;
     el('setAiBackendUrl').value = cfg.aiBackendUrl;
     el('settingsAiBackendStatus').textContent = cfg.aiBackendUrlIsOverridden
       ? 'overridden for this relay process (resets on relay restart unless WEBSCOUT_AI_BACKEND_URL is also set in its environment)'
@@ -1839,8 +2472,8 @@ async function loadConfigTabs() {
 
 el('settingsBtn').addEventListener('click', () => {
   populateSettingsForm();
-  showSettingsTab('Display');
   el('settingsDialog').showModal();
+  showSettingsTab('Display'); // after showModal - offsetLeft/Width used for the tab indicator are 0 on a still-hidden <dialog>
   loadConfigTabs();
 });
 

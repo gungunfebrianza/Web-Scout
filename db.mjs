@@ -947,7 +947,7 @@ export function getActionCostByTarget(sessionId) {
 // "which tag to trend on" is a per-viewer choice (the currently open
 // session's own tags), not something this function should guess.
 const stmtSessionTokenTotals = db.prepare(`
-  SELECT s.id AS sessionId, s.goal AS goal, s.tags AS tagsJson, s.started_at AS startedAt,
+  SELECT s.id AS sessionId, s.goal AS goal, s.tags AS tagsJson, s.started_at AS startedAt, s.token_budget AS tokenBudget,
     SUM(LENGTH(COALESCE(a.result_json, rb.json, '')) + LENGTH(COALESCE(a.params_json, pb.json, ''))) AS totalBytes
   FROM sessions s LEFT JOIN actions a ON a.session_id = s.id LEFT JOIN result_blobs rb ON a.result_hash = rb.hash
     LEFT JOIN params_blobs pb ON a.params_hash = pb.hash
@@ -960,6 +960,7 @@ export function getSessionTokenTotals() {
     goal: r.goal,
     tags: r.tagsJson ? JSON.parse(r.tagsJson) : [],
     startedAt: r.startedAt,
+    tokenBudget: r.tokenBudget ?? null,
     totalEstTokens: Math.round((r.totalBytes || 0) / CHARS_PER_TOKEN_ESTIMATE),
   }));
 }

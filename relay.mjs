@@ -704,6 +704,96 @@ function computeAnalytics() {
     .filter(({ runs }) => runs[runs.length - 1].passed === false)
     .map(({ label, runs }) => ({ label, importCount: runs.length, lastImportedAt: runs[runs.length - 1].imported_at }));
 
+  // 5. Type x session failure-rate heatmap - the last HEATMAP_SESSION_LIMIT
+  // sessions (most recent, chronological) crossed with the
+  // HEATMAP_TYPE_LIMIT busiest action types (by total call count). Bounded
+  // both ways so this stays a glanceable grid instead of growing unreadable
+  // (or unboundedly expensive) as the DB accumulates history - a heatmap
+  // with 500 columns defeats its own purpose.
+  const HEATMAP_SESSION_LIMIT = 15;
+  const HEATMAP_TYPE_LIMIT = 8;
+  const recentSessions = sessions.slice(-HEATMAP_SESSION_LIMIT);
+  const recentSessionIds = new Set(recentSessions.map((s) => s.id));
+  const topTypes = [...byType.values()].sort((a, b) => b.total - a.total).slice(0, HEATMAP_TYPE_LIMIT).map((t) => t.type);
+  const topTypeSet = new Set(topTypes);
+  const heatmapCells = new Map(); // `${sessionId}::${type}` -> { total, failed }
+  for (const a of actions) {
+    if (!recentSessionIds.has(a.session_id) || !topTypeSet.has(a.type)) continue;
+    const key = `${a.session_id}::${a.type}`;
+    const cell = heatmapCells.get(key) ?? { total: 0, failed: 0 };
+    cell.total += 1;
+    if (!a.ok) cell.failed += 1;
+    heatmapCells.set(key, cell);
+  }
+  const heatmap = {
+    sessions: recentSessions.map((s) => ({ id: s.id, goal: s.goal })),
+    types: topTypes,
+    cells: recentSessions.flatMap((s) => topTypes.map((type) => {
+      const cell = heatmapCells.get(`${s.id}::${type}`);
+      return { sessionId: s.id, type, total: cell?.total ?? 0, failed: cell?.failed ?? 0 };
+    })),
+  };
+
+  // 6. Per-macro run history (pass/fail dot strip, CI-build-style). A "run"
+  // is a burst of consecutive same-macroId actions in the overall
+  // chronological action log - macro steps for one invocation are always
+  // logged back-to-back, so a macroId change (or a non-macro action
+  // between them) is a real run boundary, not an artifact of storage order.
+  // Capped to the last MACRO_RUN_HISTORY_LIMIT runs per macro (most recent
+  // last) - this feeds a small dot strip, not a full audit log.
+  const MACRO_RUN_HISTORY_LIMIT = 20;
+  const macroRunHistory = new Map(); // macroId -> [{ ok, startedAt }]
+  let currentRun = null;
+  for (const a of actions) {
+    const macroId = a.params?.macroId;
+    if (macroId === undefined) { currentRun = null; continue; }
+    if (!currentRun || currentRun.macroId !== macroId) {
+      currentRun = { macroId, ok: true, startedAt: a.started_at };
+      const list = macroRunHistory.get(macroId) ?? [];
+      list.push(currentRun);
+      if (list.length > MACRO_RUN_HISTORY_LIMIT) list.shift();
+      macroRunHistory.set(macroId, list);
+    }
+    if (!a.ok) currentRun.ok = false;
+  }
+  const macroHealth = macros.map((m) => ({
+    id: m.id,
+    name: m.name,
+    runs: (macroRunHistory.get(m.id) ?? []).map((r) => r.ok),
+  }));
+
+  // 7. Session activity punchcard - hour-of-day x day-of-week counts across
+  // EVERY session's own started_at, github-contributions-style. Answers
+  // "when does work/friction actually happen" at a glance, which no
+  // existing single-session view (all scoped to one session's own short
+  // window) can show.
+  const activityPunchcard = Array.from({ length: 7 }, () => new Array(24).fill(0));
+  for (const s of sessions) {
+    const d = new Date(s.started_at);
+    if (Number.isNaN(d.getTime())) continue;
+    activityPunchcard[d.getDay()][d.getHours()] += 1;
+  }
+
+  // 8. Action duration percentiles by type, across every session - the
+  // Action log's own "ms" column sorts one session at a time and shows raw
+  // values; this answers "which action TYPE has a long tail" project-wide,
+  // which sorting a single session's rows can't (a type that's usually fast
+  // but occasionally very slow looks identical to a consistently-medium one
+  // in a sorted list).
+  const durationsByType = new Map();
+  for (const a of actions) {
+    const list = durationsByType.get(a.type) ?? [];
+    list.push(a.duration_ms);
+    durationsByType.set(a.type, list);
+  }
+  const percentile = (sorted, p) => sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
+  const durationByType = [...durationsByType.entries()]
+    .map(([type, list]) => {
+      const sorted = [...list].sort((a, b) => a - b);
+      return { type, count: sorted.length, p50: percentile(sorted, 0.5), p95: percentile(sorted, 0.95), max: sorted[sorted.length - 1] };
+    })
+    .sort((a, b) => b.p95 - a.p95);
+
   return {
     totals: { sessions: sessions.length, actions: actions.length, macros: macros.length, verityRuns: verityRuns.length },
     malformedActionsSkipped,
@@ -712,6 +802,10 @@ function computeAnalytics() {
     macrosNeverRun,
     macrosNeverSucceeding,
     verityLabelsStillFailing,
+    heatmap,
+    macroHealth,
+    activityPunchcard,
+    durationByType,
     // One row per session (id/goal/tags/startedAt/totalEstTokens) - the
     // dashboard groups these by shared tag client-side to trend token cost
     // across repeated work (this project's own round-1/round-2/... CRV
