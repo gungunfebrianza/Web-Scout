@@ -1,0 +1,6 @@
+# LF in the index AND in every checkout, regardless of a contributor's core.autocrlf.
+# Without this, Windows checkouts get CRLF working files and every scripted or
+# byte-level edit has to guess the ending; git also warns on each `git add`.
+* text=auto eol=lf
+*.png binary
+*.db binary
