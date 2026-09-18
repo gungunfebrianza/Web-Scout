@@ -36,10 +36,32 @@ export async function request(method, pathName, body) {
   } catch (err) {
     throw new Error(`cannot reach the web-scout relay at ${BASE} - is it running? Start it with "node tools/web-scout/relay.mjs". (${err.message})`);
   }
+  // Mid-session macro nudge (see relay.mjs's /command handler): carried as a
+  // response HEADER, not folded into the JSON body, because /command's body
+  // is the dispatched command's own real result (dom.click's {clicked,
+  // mutated, ...}, idb.put's {stored, key, row}, ...) - every existing
+  // caller (dashboard, mcp-server.mjs, macro replay) reads that shape
+  // directly, so injecting an extra field into it would silently change
+  // what `result.<field>` means for everyone. console.error (stderr) is
+  // safe from BOTH callers of this shared client: cli.mjs already nudges
+  // this way at session end, and mcp-server.mjs's stdio JSON-RPC channel is
+  // stdout-only, so a stderr line here can never corrupt a JSON-RPC reply.
+  const nudge = res.headers.get('x-webscout-nudge');
+  if (nudge) console.error(`[web-scout] ${nudge}`);
   const json = await res.json();
   if (!json.ok) {
     const err = new Error(json.error || `request to ${pathName} failed`);
     err.status = res.status;
+    // A failed dom.click/dom.fill/idb.put/idb.patch TIMEOUT (504) is not
+    // necessarily a failed ACTION - the page may have received and even
+    // finished processing the command; only the reply never made it back in
+    // time. relay.mjs's dispatchTracked best-effort re-checks live state
+    // right after a timeout on one of those types and returns it as
+    // `postTimeoutVerification` in the error body - surfaced here on the
+    // thrown Error so cli.mjs's top-level catch (and any MCP caller
+    // inspecting the error) can print it alongside the bare timeout message
+    // instead of the timeout reading as a flat, uninformative failure.
+    if (json.extra) Object.assign(err, json.extra);
     throw err;
   }
   return json.result;
@@ -144,11 +166,28 @@ export async function waitForReconnect({ agent, timeoutMs } = {}) {
   const target = agent || 'default';
   const start = Date.now();
   let sawDisconnect = false;
+  // Confirmed false negative in real use: the "disconnect, THEN reconnect"
+  // rule below only proves reconnection if a poll happens to land during the
+  // (often sub-150ms) window the agent is actually absent - a fast
+  // reload can tear down and re-establish the WebSocket between two polls,
+  // so `present` reads true on every single poll and `sawDisconnect` never
+  // flips, even though the tab genuinely reloaded and reconnected. Fixed by
+  // also comparing `connectedAt` (relay.mjs's agentsDetail(), a real
+  // per-connection timestamp) against its value at call time - a LATER
+  // connectedAt for the same agent name is proof of a fresh connection
+  // regardless of whether the gap was ever observed. Falls back to the
+  // original disconnect-then-reconnect signal when no agent was connected
+  // yet at call time (nothing to compare a "later" timestamp against).
+  const initialDetail = await request('GET', '/agents');
+  const initialConnectedAt = initialDetail.detail?.find((a) => a.name === target)?.connectedAt ?? null;
   while (Date.now() - start < limit) {
-    const { agents } = await request('GET', '/agents');
+    const { agents, detail } = await request('GET', '/agents');
     const present = agents.includes(target);
+    const connectedAtNow = detail?.find((a) => a.name === target)?.connectedAt ?? null;
     if (!present) sawDisconnect = true;
-    if (sawDisconnect && present) return { reconnected: true, waitedMs: Date.now() - start };
+    if (present && (sawDisconnect || (initialConnectedAt !== null && connectedAtNow !== null && connectedAtNow > initialConnectedAt))) {
+      return { reconnected: true, waitedMs: Date.now() - start };
+    }
     await new Promise((r) => setTimeout(r, 150));
   }
   return {

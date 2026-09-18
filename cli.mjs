@@ -168,6 +168,25 @@ function usage() {
                                    selector with nested quotes/brackets/attribute values through
                                    bash was a real, repeated time-sink. Overrides the positional
                                    selector argument when both are given.
+  dom click-wait <selector> [--wait-selector <sel>] [--text <substr>|--changed|--stable [--stable-count <n>]] [--timeout <ms>]
+                                   click, then wait for a (possibly different) --wait-selector to
+                                   reach a state - one round trip instead of separate click+wait
+                                   calls, and a real "did the handler finish" answer where
+                                   dom.click's own mutated:true is not one (it only proves SOME
+                                   DOM change happened synchronously within its 200ms grace window
+                                   - confirmed live: a dialog-opening click reported mutated:true
+                                   immediately while the dialog's own async open logic was still
+                                   running). --wait-selector defaults to the clicked selector.
+  dom wait <selector> --stable [--stable-count <n>] [--timeout <ms>]
+                                   poll until the selector's textContent reads IDENTICAL on
+                                   <n> (default 3) consecutive polls - for this app's own
+                                   confirmed fire-and-forget concurrent-render race (several
+                                   unawaited renderAll() calls landing on the same DOM node after
+                                   a navigation/click): --changed fires the INSTANT the first of
+                                   several in-flight renders lands, which can still be a
+                                   mid-race, about-to-be-overwritten intermediate state. Distinct
+                                   from dom.settle (a generic MutationObserver quiet-period over a
+                                   whole subtree) - this only tracks one selector's own text.
   dom pick [--timeout <ms>]       arm a one-time click listener and BLOCK until a HUMAN clicks
                                    something in the real browser tab - not a programmatic
                                    selector finder, there is no way to feed it a target
@@ -231,6 +250,13 @@ function usage() {
                                    response includes the full stored row (key merged in), not
                                    just the key, so a caller never has to assume/re-dump to
                                    learn what autoIncrement actually assigned
+  idb patch <store> <json-key> <json-patch>
+                                   read the existing row, shallow-merge <json-patch> onto it,
+                                   write the merged row back - replaces re-typing a whole row
+                                   (idb.put's real REPLACE semantics) for a small mutation (e.g.
+                                   maturing an execution window, flipping outcome_status).
+                                   Requires an EXISTING row at <json-key> - errors rather than
+                                   silently inserting a sparse row if the key doesn't exist yet.
   idb delete <store> <json-key>   delete one row by key
   idb delete-many <store> <json-array-of-keys>   delete many rows by key, one transaction -
                                    response includes deletedKeys/failedKeys (not just counts), so
@@ -265,7 +291,36 @@ function usage() {
   net clear                       clear the captured (live) network log
 
   console log                     captured console.error/warn + uncaught error entries
+  console wait "<substr>" [--timeout <ms>] [--grace <ms>]
+                                   attach-and-wait for a console entry whose message contains
+                                   the given substring, instead of a blind sleep+"console log"-
+                                   poll loop that can race the app's own async console.error call.
   console clear                   clear the captured console log
+
+  debug state                     THIS TOOL's own live runtime state (WebSocket readyState,
+                                   pending event-batch sizes, reconnect backoff) plus an app-
+                                   declared window.__appDebug object if the app sets one - shrinks
+                                   the manual "add a console.error, bump ?v=, reload, read log,
+                                   remove it, bump again" debugging cycle. Also reachable inline
+                                   via "eval window.__webscoutDebug.state" with no relay round
+                                   trip. Requires a session like every other action command.
+  debug sweep <tag>                CLI-only, no session needed: greps the whole repo for <tag>
+                                   (e.g. a temporary debug marker like "P46DEBUG") and reports
+                                   every remaining hit (file:line) - verifies hand-added debug
+                                   instrumentation was fully removed before shipping instead of a
+                                   manual "grep -c" the caller has to remember and run themselves.
+                                   Exits 1 if anything is still found - clean:true/hitCount:0 if not.
+
+  dev bump-reload <file> [--no-reload] [--agent <name>]
+                                   finds every "<basename>?v=N" reference to <file> ANYWHERE in
+                                   the repo and bumps each by +1 (the manual half of this repo's
+                                   own cache-busting convention - editing a file needs its version
+                                   bumped at every importer, confirmed real repeated friction),
+                                   then (unless --no-reload) runs "page reload --hard
+                                   --wait-reconnect" - the step this convention always needs next
+                                   anyway. Warns if importers disagreed on the version BEFORE this
+                                   ran (each still bumped +1 from its own prior value, never
+                                   silently normalized to one number).
 
   page reload                     true location.reload() - re-activates + reconnects
                                    automatically (activation flag survives via localStorage/URL).
@@ -572,6 +627,113 @@ async function handleSession(sub, rawArgs) {
   throw new Error(`unknown 'session ${sub || ''}'`);
 }
 
+// Walks the repo (skipping node_modules/.git/dist-style build output) and
+// bumps EVERY `<basename>?v=N` reference to `targetFile` by 1, across every
+// importer - the manual half of this repo's own cache-busting convention
+// (editing a file requires bumping its version at every importer, often a
+// bulk sed across dozens of files, confirmed real repeated friction across
+// a real session). Matches on basename only (not the full relative path) -
+// this repo's own import specifiers are written relative to each importing
+// file, so the same target is referenced with different leading paths from
+// different files; basename + `?v=` is the one thing every reference to a
+// given file shares. Reports every file it touched and the old->new version
+// per match (a target with inconsistent versions across importers - already
+// a latent bug before this ran - is surfaced, not silently "fixed" to one
+// arbitrary value). Then (unless --no-reload) issues a hard reload with
+// --wait-reconnect, the exact next step this convention always needs
+// anyway.
+function walkFiles(dir, out, skipDirs) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch { return out; }
+  for (const entry of entries) {
+    if (skipDirs.has(entry.name)) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) walkFiles(full, out, skipDirs);
+    else if (/\.(js|mjs|html|css)$/.test(entry.name)) out.push(full);
+  }
+  return out;
+}
+
+async function handleDev(sub, rawArgs) {
+  if (sub === 'bump-reload') {
+    let args = rawArgs;
+    let noReload;
+    let hard;
+    ({ args, value: noReload } = extractBooleanFlag(args, '--no-reload'));
+    ({ args, value: hard } = extractBooleanFlag(args, '--soft'));
+    ({ args, value: agentFlag } = extractFlag(args, '--agent'));
+    const targetFile = args[0];
+    if (!targetFile) throw new Error('dev bump-reload requires a file path, e.g. js/pages/capital-flow.js');
+    const basename = path.basename(targetFile);
+    const escaped = basename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`(${escaped}\\?v=)(\\d+)`, 'g');
+    const skipDirs = new Set(['node_modules', '.git', 'dist', 'build', '.claude']);
+    const files = walkFiles(process.cwd(), [], skipDirs);
+    const touched = [];
+    for (const file of files) {
+      let content;
+      try {
+        content = fs.readFileSync(file, 'utf8');
+      } catch { continue; }
+      if (!pattern.test(content)) continue;
+      pattern.lastIndex = 0;
+      const matches = [];
+      const updated = content.replace(pattern, (whole, prefix, num) => {
+        const oldV = Number(num);
+        const newV = oldV + 1;
+        matches.push({ from: oldV, to: newV });
+        return `${prefix}${newV}`;
+      });
+      if (updated !== content) {
+        fs.writeFileSync(file, updated, 'utf8');
+        touched.push({ file: path.relative(process.cwd(), file), matches });
+      }
+    }
+    if (!touched.length) {
+      console.error(`WARNING: no "${basename}?v=N" reference found anywhere in the repo - nothing bumped. Check the basename is right and the referencing files use this exact "?v=" convention.`);
+    }
+    const distinctVersions = new Set(touched.flatMap((t) => t.matches.map((m) => m.from)));
+    if (distinctVersions.size > 1) {
+      console.error(`WARNING: found ${distinctVersions.size} DIFFERENT existing version numbers across importers before this bump (${[...distinctVersions].join(', ')}) - that inconsistency predates this command and every occurrence was still bumped by +1 from whatever it already was, not normalized to one value. Review the list below.`);
+    }
+    printResult({ basename, filesTouched: touched.length, touched });
+    if (!noReload) {
+      const result = await send('page.hardReload', {});
+      result.reconnect = await waitForReconnect({ agent: agentFlag, timeoutMs: 60000 });
+      printResult(result);
+    }
+    return;
+  }
+  throw new Error(`unknown 'dev ${sub || ''}'`);
+}
+
+async function handleDebugCli(sub, rawArgs) {
+  if (sub === 'sweep') {
+    const tag = rawArgs[0];
+    if (!tag) throw new Error('debug sweep requires a tag string, e.g. debug sweep P46DEBUG');
+    const skipDirs = new Set(['node_modules', '.git', 'dist', 'build', '.claude']);
+    const files = walkFiles(process.cwd(), [], skipDirs);
+    const hits = [];
+    for (const file of files) {
+      let content;
+      try {
+        content = fs.readFileSync(file, 'utf8');
+      } catch { continue; }
+      if (!content.includes(tag)) continue;
+      const lines = content.split('\n');
+      lines.forEach((line, i) => {
+        if (line.includes(tag)) hits.push({ file: path.relative(process.cwd(), file), line: i + 1, text: line.trim().slice(0, 200) });
+      });
+    }
+    printResult({ tag, hitCount: hits.length, hits, clean: hits.length === 0 });
+    if (hits.length) process.exitCode = 1;
+    return;
+  }
+  throw new Error(`unknown 'debug ${sub || ''}' (CLI-level - for the live in-page state, use "debug state")`);
+}
+
 async function handleDb(sub, rawArgs) {
   if (sub === 'version-check') {
     let args = rawArgs;
@@ -790,6 +952,16 @@ async function main() {
     return;
   }
 
+  if (command === 'dev') {
+    await handleDev(rest[0], rest.slice(1));
+    return;
+  }
+
+  if (command === 'debug' && rest[0] === 'sweep') {
+    await handleDebugCli(rest[0], rest.slice(1));
+    return;
+  }
+
   if (command === 'dashboard') {
     console.log(`${BASE}/dashboard`);
     return;
@@ -815,6 +987,12 @@ async function main() {
   let waitReconnectValue;
   let whereValue;
   let selectorFileValue;
+  let stableValue;
+  let stableCountValue;
+  let waitSelectorValue;
+  ({ args, value: stableValue } = extractBooleanFlag(args, '--stable'));
+  ({ args, value: stableCountValue } = extractFlag(args, '--stable-count'));
+  ({ args, value: waitSelectorValue } = extractFlag(args, '--wait-selector'));
   ({ args, value: selectorFileValue } = extractFlag(args, '--selector-file'));
   ({ args, value: whereValue } = extractFlag(args, '--where'));
   ({ args, value: changedValue } = extractBooleanFlag(args, '--changed'));
@@ -955,8 +1133,20 @@ async function main() {
       fill: () => send('dom.fill', { selector: domSelector, value: subArgs[1], nth: nthValue !== undefined ? Number(nthValue) : undefined }),
       rect: () => send('dom.rect', { selector: domSelector }),
       style: () => send('dom.computedStyle', { selector: domSelector, properties: subArgs[1] ? subArgs[1].split(',').map((s) => s.trim()) : undefined }),
-      wait: () => send('dom.wait', { selector: domSelector, text: textValue, timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined, changed: changedValue }),
+      wait: () => send('dom.wait', { selector: domSelector, text: textValue, timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined, changed: changedValue, stable: stableValue, stableCount: stableCountValue !== undefined ? Number(stableCountValue) : undefined }),
       pick: () => send('dom.pick', { timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined }),
+      // Click, then wait for a (possibly different) --wait-selector to reach
+      // a state - one round trip instead of "dom click" then a separate
+      // "dom wait", and a real answer to "did the handler actually finish"
+      // instead of dom.click's own mutated:true (which only proves the
+      // click's synchronous 200ms grace window saw SOME DOM change, not
+      // that an async handler - dialog open, dispatch commit - is done).
+      'click-wait': () => send('dom.clickWait', {
+        selector: domSelector, nth: nthValue !== undefined ? Number(nthValue) : undefined,
+        waitSelector: waitSelectorValue, text: textValue,
+        timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined,
+        changed: changedValue, stable: stableValue, stableCount: stableCountValue !== undefined ? Number(stableCountValue) : undefined,
+      }),
       // Generic "wait until quiet" - pass a selector to scope it (default:
       // document.body). Use after a click/rebuild and before the next
       // dom.query/dom.click instead of a guessed sleep.
@@ -1000,6 +1190,13 @@ async function main() {
       'diff-golden': () => request('POST', '/state/diff', { golden: subArgs[0], idB: Number(subArgs[1]) }),
       restore: () => request('POST', '/state/restore', { agent: agentFlag, snapshotId: subArgs[0] ? Number(subArgs[0]) : undefined, golden: goldenValue }),
       put: () => send('idb.put', { store: subArgs[0], row: JSON.parse(subArgs[1]) }),
+      // Merge-then-write: reads the existing row, shallow-merges the given
+      // JSON patch onto it, writes the merged row back - replaces re-typing
+      // a whole row (idb.put's real REPLACE semantics) for a 2-3 field
+      // change (e.g. maturing an execution window, flipping outcome_status).
+      // Requires an existing row at <json-key> - errors rather than
+      // silently inserting a sparse row if the key doesn't already exist.
+      patch: () => send('idb.patch', { store: subArgs[0], key: JSON.parse(subArgs[1]), patch: JSON.parse(subArgs[2]) }),
       delete: () => send('idb.delete', { store: subArgs[0], key: JSON.parse(subArgs[1]) }),
       'delete-many': () => send('idb.deleteMany', { store: subArgs[0], keys: JSON.parse(subArgs[1]) }),
       clear: () => send('idb.clear', { store: subArgs[0] }),
@@ -1029,6 +1226,22 @@ async function main() {
     console: {
       log: () => send('console.log', {}),
       clear: () => send('console.clear', {}),
+      // Attach-and-wait for a console entry containing a substring, instead
+      // of a blind sleep+"console log"-poll loop - the same fix, same
+      // reason, as net.wait: a poll called right after triggering an action
+      // can race the app's own (often async) console.error call, reading as
+      // "nothing logged yet" even though the entry lands a moment later.
+      wait: () => send('console.wait', { substr: subArgs[0], timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined, graceMs: graceValue !== undefined ? Number(graceValue) : undefined }),
+    },
+    debug: {
+      // Introspection shortcut for THIS tool's own runtime state (WebSocket
+      // readyState, pending event-batch sizes, reconnect backoff) plus an
+      // app-declared `window.__appDebug` object if the app itself sets one -
+      // exists to shrink the manual "add a console.error, bump the
+      // importer's ?v=, reload, read the log, remove it, bump again" cycle
+      // that was the single biggest confirmed time-sink debugging a real
+      // session's live state.
+      state: () => send('debug.state', {}),
     },
   };
 
@@ -1053,6 +1266,15 @@ main().catch((err) => {
   console.error('web-scout cli error:', err.message);
   if (err.status === 409) {
     console.error('Hint: start a session first - node tools/web-scout/cli.mjs session start "<goal>" ["<context>"]');
+  }
+  // See relay.mjs's verifyAfterTimeout()/dispatchTracked - a 504 on
+  // dom.click/dom.clickWait/dom.fill/idb.put/idb.patch does NOT prove the
+  // command never ran, only that the reply didn't arrive in time. Surface
+  // the best-effort re-check here so a timeout doesn't read as a flat,
+  // uninformative failure that just gets retried blind.
+  if (err.postTimeoutVerification) {
+    console.error('Post-timeout verification (best-effort - does not prove the original command succeeded, only offers a second signal):');
+    console.error(JSON.stringify(err.postTimeoutVerification, null, 2));
   }
   process.exitCode = 1;
 });

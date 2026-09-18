@@ -39,7 +39,7 @@ const HOST = '127.0.0.1';
 const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
 // Bumped alongside docs/web-scout-roadmap.md's latest "## VN" entry - purely
 // informational (the dashboard's About panel), never read by any behavior.
-const WEBSCOUT_VERSION = '0.16.0'; // bumped alongside docs/web-scout-roadmap.md's V20 entry
+const WEBSCOUT_VERSION = '0.17.0'; // bumped alongside docs/web-scout-roadmap.md's V21 entry
 const COMMAND_TIMEOUT_MS = 15000; // interactive dom/net/eval round trips
 const SNAPSHOT_TIMEOUT_MS = 60000; // bulk idb.snapshot reads can be large
 // Short, independent budgets for two round trips that must never inherit
@@ -59,25 +59,34 @@ const DEFAULT_AGENT = 'default';
 // deliberately includes idb.put/idb.delete/idb.clear/idb.deleteMany (the
 // tool's real write paths besides eval), since excluding them would leave
 // strict-CRV not covering the exact thing it exists to audit.
-const STRICT_CRV_TYPES = new Set(['dom.click', 'dom.fill', 'eval', 'idb.put', 'idb.delete', 'idb.clear', 'idb.deleteMany']);
+const STRICT_CRV_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'eval', 'idb.put', 'idb.patch', 'idb.delete', 'idb.clear', 'idb.deleteMany']);
 // dom.wait/idb.wait poll, dom.pick blocks on a real human click, and eval
 // now races its own page-side timeout (see inject.js's eval handler,
 // EVAL_TIMEOUT_MS) so an async hang gets a diagnostic reply instead of
 // silently masking as the relay's own generic timeout - all for up to
 // their own `timeoutMs` - the relay's own round-trip timeout must exceed
 // that or it fires first and masks the more informative in-page message.
-const LONG_POLL_TYPES = new Set(['dom.wait', 'dom.settle', 'idb.wait', 'net.wait', 'dom.pick', 'eval']);
+const LONG_POLL_TYPES = new Set(['dom.wait', 'dom.clickWait', 'dom.settle', 'idb.wait', 'net.wait', 'console.wait', 'dom.pick', 'eval']);
 // Default replayable action types for macro record - excludes read-only
 // query/dump/list/snapshot/net/console commands, which are noise in a
 // replay (nothing to "redo"). Pass {"all": true} to POST /macros to
 // include everything the session logged instead.
-const DEFAULT_MACRO_TYPES = new Set(['dom.click', 'dom.fill', 'dom.wait', 'dom.settle', 'idb.wait', 'net.wait', 'idb.put', 'idb.delete', 'idb.deleteMany', 'idb.clear', 'page.reload', 'eval']);
+const DEFAULT_MACRO_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'dom.wait', 'dom.settle', 'idb.wait', 'net.wait', 'console.wait', 'idb.put', 'idb.patch', 'idb.delete', 'idb.deleteMany', 'idb.clear', 'page.reload', 'eval']);
+// Types whose reply the CLI should best-effort re-verify against live state
+// after a genuine TIMEOUT (not a real failure reply from the page) - a
+// timed-out reply does not prove the command never ran; the page may have
+// received and finished it, only the reply never made it back within
+// COMMAND_TIMEOUT_MS. Deliberately narrow: only types with an obvious,
+// cheap, generic way to re-check ("does this selector still/now look
+// right", "did this store's row count move") - see verifyAfterTimeout()
+// below.
+const TIMEOUT_VERIFIABLE_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'idb.put', 'idb.patch']);
 // A failure on one of these carries a selector worth screenshotting - the
 // broken state is often gone by the time a human goes looking for it by
 // hand (confirmed: this was previously a manual, opt-in-after-the-fact
 // step). Best-effort: capture failure never masks or replaces the original
 // error, it is logged as its own separate action row.
-const AUTO_SCREENSHOT_ON_FAILURE_TYPES = new Set(['dom.click', 'dom.fill', 'dom.wait']);
+const AUTO_SCREENSHOT_ON_FAILURE_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'dom.wait']);
 // macro run's cross-context guard threshold (see the route below) - a
 // crude, deliberately cheap Jaccard-similarity-of-goal-words check, not
 // real NLP. Low enough that two genuinely related goals ("verify P3.8
@@ -100,9 +109,13 @@ function jaccardSimilarity(setA, setB) {
 }
 
 class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, extra) {
     super(message);
     this.status = status;
+    // Additive, optional sidecar data for a failure response - e.g. the
+    // post-timeout verification dispatchTracked() attaches below. Never
+    // required; every existing HttpError call site (two-arg) is unaffected.
+    if (extra) this.extra = extra;
   }
 }
 
@@ -356,10 +369,52 @@ async function withLoggedAction(sessionId, type, params, fn, agentName = DEFAULT
 // row - simpler, and the action log is append-only by convention) before
 // rethrowing the original error unchanged. Screenshot failure never masks
 // or replaces the original error.
+// Best-effort re-check of live state right after a TIMED-OUT (not
+// genuinely-failed) dom.click/dom.fill/idb.put/idb.patch - a timeout only
+// proves the RELAY never got a reply in time, never that the page didn't
+// receive or even finish the command. Confirmed real, repeated friction: a
+// dom.click that timed out was treated as "the click failed", triggering a
+// retry, when idb.dump ground-truth later showed it had actually landed -
+// the CLI had no way to tell those two situations apart from a bare error
+// message. Uses its own short PING_TIMEOUT_MS-scale budget per probe (not
+// the original command's full timeout) - if the page is still that slow,
+// this should fail fast and cheap rather than piling a second long wait on
+// top of the first. Never throws - a failed verification attempt (the page
+// is ALSO not responding to the cheap probe) is itself real signal, folded
+// into the same shape as a successful one.
+async function verifyAfterTimeout(type, params, agentName) {
+  const probeTimeoutMs = PING_TIMEOUT_MS * 2;
+  try {
+    if (type === 'dom.click' || type === 'dom.clickWait' || type === 'dom.fill') {
+      if (!params?.selector) return { attempted: false, reason: 'no selector on the timed-out command to re-query' };
+      const query = await dispatchCommand('dom.query', { selector: params.selector }, probeTimeoutMs, agentName);
+      return { attempted: true, via: 'dom.query', selector: params.selector, ...query };
+    }
+    if (type === 'idb.put' || type === 'idb.patch') {
+      if (!params?.store) return { attempted: false, reason: 'no store on the timed-out command to re-check' };
+      const list = await dispatchCommand('idb.list', {}, probeTimeoutMs, agentName);
+      return { attempted: true, via: 'idb.list', store: params.store, rowCountNow: list.counts?.[params.store] ?? null, note: 'compare rowCountNow against what you expected before the timed-out write - this cannot prove the SPECIFIC row landed, only whether the store moved at all. Use "idb get"/"idb dump" for a definitive answer.' };
+    }
+  } catch (err) {
+    return { attempted: true, failed: true, error: err.message, note: 'the re-verification probe ALSO failed/timed out - this is a stronger signal the page is genuinely unresponsive, not just that one command was slow' };
+  }
+  return { attempted: false, reason: `no verification strategy for type '${type}'` };
+}
+
 async function dispatchTracked(session, type, params, agentName, dispatchTimeoutMs) {
   try {
     return await withLoggedAction(session.id, type, params ?? {}, () => dispatchCommand(type, params ?? {}, dispatchTimeoutMs, agentName), agentName);
   } catch (err) {
+    if (err instanceof HttpError && err.status === 504 && TIMEOUT_VERIFIABLE_TYPES.has(type)) {
+      // Logged as its own action either way, same append-only convention as
+      // the auto-screenshot-on-failure block below - never mutates or
+      // replaces the original timeout error being rethrown.
+      try {
+        const { result: verification } = await withLoggedAction(session.id, 'timeout.verify', { for: type, params, via: 'auto-on-timeout' }, () => verifyAfterTimeout(type, params, agentName), agentName);
+        err.extra = { ...err.extra, postTimeoutVerification: verification };
+      } catch { /* verification itself threw unexpectedly - leave the original timeout error unannotated */ }
+      broadcastUpdate('action', session.id);
+    }
     if (AUTO_SCREENSHOT_ON_FAILURE_TYPES.has(type) && params?.selector) {
       // Logged as its own action EITHER way (success or failure) - a
       // silent swallow on failure would hide exactly the case confirmed
@@ -375,6 +430,34 @@ async function dispatchTracked(session, type, params, agentName, dispatchTimeout
     }
     throw err;
   }
+}
+
+// ---------- Mid-session macro nudge ----------
+//
+// "consider macro record" previously only ever printed at `session end`
+// (see the /sessions/:id/end route) - confirmed real friction: a session
+// hand-rolling a seed/verify/cleanup shape got the nudge only after the
+// work was already fully done by hand, too late to actually save the
+// re-typing it exists to prevent. Surfaced instead the moment a session
+// crosses the SAME >=5-replayable-actions threshold mid-flight, then again
+// every MID_SESSION_NUDGE_REPEAT_EVERY actions after that (a still-growing
+// session doing a second distinct repeatable shape deserves a second nudge,
+// not silence for the rest of its life) - never more than once per
+// threshold crossing. Delivered via the x-webscout-nudge response header
+// (see client.mjs's request()) rather than the JSON body, so it can never
+// change the shape of any command's own real result.
+const MID_SESSION_NUDGE_REPEAT_EVERY = 8;
+const sessionNudgeState = new Map(); // sessionId -> last replayable count a nudge was sent at
+
+function maybeMidSessionNudge(sessionId, res) {
+  try {
+    const replayableCount = dbApi.listActions(sessionId).filter((a) => a.ok && DEFAULT_MACRO_TYPES.has(a.type)).length;
+    if (replayableCount < 5) return;
+    const lastNudgedAt = sessionNudgeState.get(sessionId) ?? 0;
+    if (replayableCount - lastNudgedAt < (lastNudgedAt === 0 ? 5 : MID_SESSION_NUDGE_REPEAT_EVERY)) return;
+    sessionNudgeState.set(sessionId, replayableCount);
+    res.setHeader('x-webscout-nudge', `${replayableCount} replayable action(s) so far this session - consider "macro record \\"<name>\\" ${sessionId}" if this shape will repeat.`);
+  } catch { /* best-effort - never block a command reply on this */ }
 }
 
 function requireActiveSession() {
@@ -684,7 +767,21 @@ function getRepoInfo() {
 }
 
 const routes = [
-  { method: 'GET', pattern: /^\/health$/, handler: async () => ({ status: 'ok', agents_connected: connectedAgentNames(), agents_detail: agentsDetail(), active_session: dbApi.getCurrentSession(), db_version_drift: await getDbVersionDrift() }) },
+  {
+    // pending_command_count: how many dispatched commands are currently
+    // in-flight (awaiting a reply from any agent) RIGHT NOW - global, not
+    // per-agent/session (this tool has one operator at a time in practice).
+    // Exists to answer a real, previously unanswerable question during a
+    // string of back-to-back timeouts: is the relay genuinely stuck
+    // processing a backlog of piled-up retries, or is each new command a
+    // fresh, independent attempt against a slow-but-not-jammed page? A
+    // caller retrying blind into a growing queue makes the real problem
+    // worse; seeing this stay high across polls is the signal to stop
+    // retrying and investigate instead.
+    method: 'GET',
+    pattern: /^\/health$/,
+    handler: async () => ({ status: 'ok', agents_connected: connectedAgentNames(), agents_detail: agentsDetail(), active_session: dbApi.getCurrentSession(), db_version_drift: await getDbVersionDrift(), pending_command_count: pending.size }),
+  },
   {
     // Powers the dashboard's Settings dialog (Server config + About tabs).
     // Everything except aiBackendUrl is read-only from the browser's point
@@ -1144,7 +1241,7 @@ const routes = [
   {
     method: 'POST',
     pattern: /^\/command$/,
-    handler: async (req) => {
+    handler: async (req, _m, res) => {
       const body = await readJsonBody(req);
       const { type, params } = body;
       const agentName = body.agent || DEFAULT_AGENT;
@@ -1176,6 +1273,7 @@ const routes = [
         broadcastUpdate('action', session.id);
         broadcastUpdate('snapshot', session.id);
         broadcastUpdate('diff', session.id);
+        maybeMidSessionNudge(session.id, res);
 
         return {
           data: triggering.result,
@@ -1185,6 +1283,7 @@ const routes = [
 
       const { result } = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
       broadcastUpdate('action', session.id);
+      maybeMidSessionNudge(session.id, res);
       return result;
     },
   },
@@ -1414,7 +1513,7 @@ const server = http.createServer(async (req, res) => {
   }
   try {
     const match = pathname.match(route.pattern);
-    const result = await route.handler(req, match);
+    const result = await route.handler(req, match, res);
     if (route.isHtml) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(result);
@@ -1427,7 +1526,7 @@ const server = http.createServer(async (req, res) => {
     // missing row - translated to 404 here rather than teaching the
     // persistence layer about HTTP status codes.
     const status = err instanceof HttpError ? err.status : (err.message?.startsWith('no such ') ? 404 : 500);
-    sendJson(res, status, { ok: false, error: err.message });
+    sendJson(res, status, { ok: false, error: err.message, extra: err.extra });
   }
 });
 

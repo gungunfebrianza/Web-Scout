@@ -222,6 +222,21 @@ by hand. Reach for `page reload --hard` any time you've just edited a file
 this app's Service Worker might have cached and a plain reload doesn't
 appear to reflect it.
 
+### The post-hard-reload slow-ack window
+
+The first ~5-10s after `page reload --hard` resolves `reconnected:true` is
+measurably flakier for `dom.click`/`dom.fill`/`idb.put` than steady state -
+not a bug in web-scout or a sign the app didn't actually reload, just a real
+timing characteristic worth knowing about before reading an early post-
+reload failure as a genuine regression. The app's own concurrent init/
+render passes (module imports, first `renderAll()`, event-listener wiring)
+are still settling during that window even though the WebSocket has already
+reconnected and the page is technically responsive. If a command sent
+immediately after a hard reload times out or reports unexpected DOM state,
+retry once after a few seconds before concluding something is actually
+broken - `dom settle`/`dom wait --stable` (see below) are a better bet than
+a blind extra sleep for confirming the window has passed.
+
 ### Freshness check
 
 `page fresh <local-file-path> [--url </served/path>]` answers "is the tab

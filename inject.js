@@ -201,6 +201,28 @@
   // same-shaped button in an unrelated section). Ambiguous matches now
   // fail loudly with a preview of every match instead of silently picking
   // the first one; pass `nth` (0-based) once you've seen the preview.
+  // An element inside a hidden tab/page section (offsetParent === null - the
+  // standard, cheap "is this actually rendered" check; covers display:none
+  // and the [hidden] attribute alike, both real patterns this app's own
+  // tab-shell pages use for an inactive section) is never a plausible click/
+  // fill/query target - confirmed live: an unscoped `[data-id="26"]` matched
+  // an unrelated table row on a DIFFERENT, currently-hidden page before the
+  // intended (visible) Capital Flow row, with no ambiguity error at all
+  // (only one element existed matching that exact combination at that
+  // moment) - a silently WRONG single match, worse than the multi-match
+  // ambiguity case this file already guards. document.body itself has no
+  // offsetParent and must never be filtered out by this check.
+  function isRendered(el) {
+    return el === document.body || el.offsetParent !== null || el.getClientRects().length > 0;
+  }
+
+  function previewOf(el, i) {
+    const cls = el.className ? `.${String(el.className).trim().split(/\s+/).join('.')}` : '';
+    return `[${i}] <${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ''}${cls}> ${(el.textContent ?? '').trim().slice(0, 60)}`;
+  }
+
+  // `nth` (explicit caller choice) always wins and is never filtered - this
+  // narrowing only applies to the ambiguous, no-`nth` case.
   function resolveTarget(selector, nth) {
     const all = document.querySelectorAll(selector);
     if (all.length === 0) throw new Error(`no element matches selector: ${selector}`);
@@ -209,16 +231,18 @@
       if (!Number.isInteger(idx) || idx < 0 || idx >= all.length) {
         throw new Error(`nth=${nth} out of range - selector matched ${all.length} element(s)`);
       }
-      return all[idx];
+      return { el: all[idx], autoPickedFromAmbiguous: false };
     }
     if (all.length > 1) {
-      const preview = [...all].slice(0, 5).map((el, i) => {
-        const cls = el.className ? `.${String(el.className).trim().split(/\s+/).join('.')}` : '';
-        return `[${i}] <${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ''}${cls}> ${(el.textContent ?? '').trim().slice(0, 60)}`;
-      });
-      throw new Error(`selector matched ${all.length} elements, ambiguous: ${JSON.stringify(preview)} - pass nth to pick one`);
+      const visible = [...all].filter(isRendered);
+      if (visible.length === 1) {
+        return { el: visible[0], autoPickedFromAmbiguous: true, filteredHiddenCount: all.length - 1 };
+      }
+      const pool = visible.length ? visible : [...all];
+      const preview = pool.slice(0, 5).map(previewOf);
+      throw new Error(`selector matched ${all.length} element(s) (${visible.length} visible), ambiguous: ${JSON.stringify(preview)} - pass nth to pick one`);
     }
-    return all[0];
+    return { el: all[0], autoPickedFromAmbiguous: false };
   }
 
   // ---------- Selector picker helpers (used by dom.pick) ----------
@@ -362,9 +386,23 @@
     // already answer, confirmed real friction during a session where every
     // diagnostic paid its own full ~15-20s timeout in serial.
     ping: () => ({ pong: Date.now() }),
+    // Biased, not hard-scoped, toward the same "prefer a rendered match"
+    // rule as dom.click/dom.fill: `querySelector`'s own first-DOM-order
+    // match can easily be a hidden tab/page's element (same cross-page id
+    // collision this file's resolveTarget() now guards for click/fill) -
+    // when MULTIPLE elements match and exactly one is rendered, that one is
+    // returned instead of blindly the first. This is read-only exploration,
+    // so it never throws on ambiguity (unlike resolveTarget) - `matchCount`/
+    // `renderedMatchCount` are always included so a caller can tell a clean
+    // single match from a biased pick among several.
     'dom.query': ({ selector }) => {
-      const el = document.querySelector(selector);
-      if (!el) return { found: false };
+      const all = document.querySelectorAll(selector);
+      if (all.length === 0) return { found: false };
+      let el = all[0];
+      if (all.length > 1) {
+        const visible = [...all].filter(isRendered);
+        if (visible.length === 1) el = visible[0];
+      }
       return {
         found: true,
         tag: el.tagName,
@@ -372,6 +410,8 @@
         className: el.className || null,
         outerHTML: el.outerHTML.slice(0, 20000),
         text: el.textContent?.slice(0, 5000) ?? null,
+        matchCount: all.length,
+        renderedMatchCount: all.length > 1 ? [...all].filter(isRendered).length : undefined,
       };
     },
     // Uses the element's OWN `.click()` method, not a hand-dispatched
@@ -395,13 +435,14 @@
     // cheap same-tick-ish signal, not a "wait until done" primitive; use
     // dom.wait/dom.settle after this for anything that renders async.
     'dom.click': ({ selector, nth }) => new Promise((resolve, reject) => {
-      let el;
+      let target;
       try {
-        el = resolveTarget(selector, nth);
+        target = resolveTarget(selector, nth);
       } catch (err) {
         reject(err);
         return;
       }
+      const { el, autoPickedFromAmbiguous, filteredHiddenCount } = target;
       const hrefBefore = location.href;
       let mutated = false;
       const observer = new MutationObserver(() => { mutated = true; });
@@ -413,9 +454,28 @@
       }
       setTimeout(() => {
         observer.disconnect();
-        resolve({ clicked: true, mutated, hrefChanged: location.href !== hrefBefore });
+        resolve({
+          clicked: true, mutated, hrefChanged: location.href !== hrefBefore,
+          ...(autoPickedFromAmbiguous ? { autoPickedFromAmbiguous, filteredHiddenCount, note: `selector was ambiguous but exactly one match was visible (offsetParent !== null) - auto-picked it, ${filteredHiddenCount} hidden match(es) skipped. Pass --nth explicitly if this wasn't the intended element.` } : {}),
+        });
       }, 200);
     }),
+    // Composite: click, THEN wait for a (possibly different) selector to
+    // reach a state - one round trip instead of two, and closes a real gap
+    // in dom.click's own `mutated:true` signal. `mutated` only proves SOME
+    // DOM changed synchronously within click's own 200ms grace window - it
+    // is not a "the handler finished" signal: confirmed live, a click on a
+    // button that opens a <dialog> (a synchronous DOM change) reported
+    // mutated:true immediately while the dialog's own async open/dispatch
+    // logic was still running, reading as false confidence that the whole
+    // action had completed. `waitSelector` defaults to the clicked
+    // selector itself; `changed`/`text`/`stable`/`stableCount` are the same
+    // options dom.wait already takes, applied to the wait phase only.
+    'dom.clickWait': async ({ selector, nth, waitSelector, text, timeoutMs, changed, stable, stableCount }) => {
+      const clickResult = await handlers['dom.click']({ selector, nth });
+      const waitResult = await handlers['dom.wait']({ selector: waitSelector || selector, text, timeoutMs, changed, stable, stableCount });
+      return { click: clickResult, wait: waitResult };
+    },
     // Waits until the DOM has been quiet (no mutations observed) for
     // `quietMs` inside the subtree rooted at `selector` (default:
     // document.body) - a generic "settle" primitive, as opposed to
@@ -456,12 +516,15 @@
       check();
     }),
     'dom.fill': ({ selector, value, nth }) => {
-      const el = resolveTarget(selector, nth);
+      const { el, autoPickedFromAmbiguous, filteredHiddenCount } = resolveTarget(selector, nth);
       const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set;
       if (setter) setter.call(el, value); else el.value = value;
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
-      return { filled: true };
+      return {
+        filled: true,
+        ...(autoPickedFromAmbiguous ? { autoPickedFromAmbiguous, filteredHiddenCount, note: `selector was ambiguous but exactly one match was visible - auto-picked it, ${filteredHiddenCount} hidden match(es) skipped. Pass --nth explicitly if this wasn't the intended element.` } : {}),
+      };
     },
     // Polls until `selector` matches (and, if given, its textContent
     // contains `text`) or `timeoutMs` elapses. Replaces the hand-rolled
@@ -477,13 +540,41 @@
     // tells the caller nothing; without `changed`, the caller has no choice
     // but to guess the eventual result text ahead of time just to wait
     // correctly.
-    'dom.wait': ({ selector, text, timeoutMs, changed }) => new Promise((resolve, reject) => {
+    // `stable` mode: resolves once `selector`'s textContent has read
+    // IDENTICAL on `stableCount` (default 3) consecutive polls, instead of
+    // "differs from baseline" (--changed) or "matches a predicted substring"
+    // (--text). Exists for this app's own confirmed fire-and-forget
+    // concurrent-render race (several unawaited renderAll() calls landing on
+    // the same DOM node after a navigation/click) - `--changed` fires the
+    // INSTANT the first of several in-flight renders lands, which can still
+    // be a mid-race, about-to-be-overwritten intermediate state, not the
+    // final one; a live `eval` poll was the only way to confirm the real
+    // settle point before this existed. Distinct from dom.settle (which
+    // waits for a MutationObserver quiet PERIOD across a whole subtree,
+    // generic completion signal) - this only cares about one selector's own
+    // text content reading the same value repeatedly.
+    'dom.wait': ({ selector, text, timeoutMs, changed, stable, stableCount }) => new Promise((resolve, reject) => {
       const limit = Number(timeoutMs) || 10000;
       const start = Date.now();
       const baseline = changed ? (document.querySelector(selector)?.textContent ?? null) : null;
+      const neededStableReads = Math.max(2, Number(stableCount) || 3);
+      let lastStableText;
+      let stableReads = 0;
       const check = () => {
         const el = document.querySelector(selector);
-        if (changed) {
+        if (stable) {
+          const current = el ? (el.textContent ?? '') : null;
+          if (current === lastStableText) {
+            stableReads += 1;
+          } else {
+            lastStableText = current;
+            stableReads = 1;
+          }
+          if (stableReads >= neededStableReads) {
+            resolve({ found: !!el, stable: true, stableReads, waitedMs: Date.now() - start, outerHTML: el ? el.outerHTML.slice(0, 2000) : null });
+            return;
+          }
+        } else if (changed) {
           const current = el ? (el.textContent ?? '') : null;
           if (current !== baseline) {
             resolve({ found: true, changed: true, waitedMs: Date.now() - start, outerHTML: el ? el.outerHTML.slice(0, 2000) : null });
@@ -494,7 +585,7 @@
           return;
         }
         if (Date.now() - start >= limit) {
-          reject(new Error(`dom.wait timed out after ${limit}ms waiting for '${selector}'${changed ? ' to change from its baseline content' : text ? ` containing "${text}"` : ''}`));
+          reject(new Error(`dom.wait timed out after ${limit}ms waiting for '${selector}'${stable ? ` to read identical content on ${neededStableReads} consecutive polls (reached ${stableReads})` : changed ? ' to change from its baseline content' : text ? ` containing "${text}"` : ''}`));
           return;
         }
         setTimeout(check, 150);
@@ -614,6 +705,35 @@
           resolve({ stored: true, key, row: storedRow });
         };
         req.onerror = () => { db.close(); reject(req.error); };
+      }, reject);
+    }),
+    // Merge-then-put: reads the existing row by key, shallow-merges `patch`
+    // onto it, writes the merged row back - replaces the re-type-the-whole-
+    // row dance idb.put's real REPLACE semantics forced for every small
+    // mutation (confirmed real friction: maturing an execution window or
+    // flipping an outcome_status meant copy-pasting a prior `idb get`'s
+    // full JSON back into `idb put` just to change 2-3 fields, with a real
+    // risk of silently dropping an untouched field along the way). Requires
+    // an EXISTING row at `key` - unlike idb.put (insert-or-replace), a
+    // patch with nothing to merge onto is almost certainly the wrong store/
+    // key, not an intentional sparse insert, so it errors rather than
+    // silently creating a partial row.
+    'idb.patch': ({ store, key, patch }) => new Promise((resolve, reject) => {
+      if (!patch || typeof patch !== 'object' || Array.isArray(patch)) { reject(new Error('idb.patch requires a "patch" object of fields to merge')); return; }
+      openDb().then((db) => {
+        if (!db.objectStoreNames.contains(store)) { db.close(); reject(new Error(`no such store: ${store}`)); return; }
+        const tx = db.transaction(store, 'readwrite');
+        const os = tx.objectStore(store);
+        const getReq = os.get(key);
+        getReq.onsuccess = () => {
+          const existing = getReq.result;
+          if (existing === undefined) { db.close(); reject(new Error(`idb.patch found no existing row in '${store}' for key ${JSON.stringify(key)} - use "idb put" to insert a new row instead`)); return; }
+          const merged = { ...existing, ...patch };
+          const putReq = os.put(merged);
+          putReq.onsuccess = () => { db.close(); resolve({ store, key, patched: true, before: existing, after: merged, row: merged }); };
+          putReq.onerror = () => { db.close(); reject(putReq.error); };
+        };
+        getReq.onerror = () => { db.close(); reject(getReq.error); };
       }, reject);
     }),
     'idb.delete': ({ store, key }) => new Promise((resolve, reject) => {
@@ -813,6 +933,58 @@
       consoleLog.length = 0;
       return { cleared };
     },
+    // Attach-and-wait for a console entry whose message contains a
+    // substring - same shape as net.wait, for the same reason: a single
+    // `console log` poll called right after triggering an action can race a
+    // console.error that hasn't been emitted by the app's own (often async)
+    // code yet, reading as "nothing logged" even though the entry lands a
+    // moment later - console.error/warn writes to `consoleLog` SYNCHRONOUSLY
+    // the instant they're called, so this is never a capture-side delay,
+    // only a caller-side race against WHEN the app itself logs. `graceMs`
+    // (default 3000, same default as net.wait) also matches an entry that
+    // was already recorded just before this call arrived, covering the
+    // normal trigger-then-wait race.
+    'console.wait': ({ substr, timeoutMs, graceMs }) => new Promise((resolve, reject) => {
+      if (!substr) { reject(new Error('console.wait requires substr (a substring to match against console entry messages)')); return; }
+      const limit = Number(timeoutMs) || 15000;
+      const grace = Number(graceMs) || 3000;
+      const start = Date.now();
+      const cutoff = start - grace;
+      const findMatch = () => consoleLog.find((e) => e.message && e.message.includes(substr) && Date.parse(e.at) >= cutoff);
+      const already = findMatch();
+      if (already) { resolve({ found: true, entry: already, waitedMs: 0 }); return; }
+      const check = () => {
+        const hit = findMatch();
+        if (hit) { resolve({ found: true, entry: hit, waitedMs: Date.now() - start }); return; }
+        if (Date.now() - start >= limit) {
+          reject(new Error(`console.wait timed out after ${limit}ms waiting for a console entry containing "${substr}"`));
+          return;
+        }
+        setTimeout(check, 150);
+      };
+      check();
+    }),
+    // Introspection shortcut for THIS tool's own runtime state - exists to
+    // shrink the manual "add a console.error, bump the importer's ?v=,
+    // reload, read the log, remove the console.error, bump again" debugging
+    // cycle confirmed as a real, repeated time-sink in a live session, at
+    // least for the subset of questions this file's own state can already
+    // answer without any app-side instrumentation at all. `window.__webscoutDebug`
+    // is set unconditionally alongside this (see "Relay connection" below)
+    // so it's also directly reachable from a plain `eval` for anyone who
+    // prefers that over a named command. `appDebug` is a deliberately
+    // OPT-IN extension point - undefined unless the app itself has set
+    // `window.__appDebug` to a plain object, never required or assumed.
+    'debug.state': () => ({
+      wsReadyState: ws ? ws.readyState : null,
+      wsReadyStateText: ws ? ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][ws.readyState] ?? String(ws.readyState) : 'not connected',
+      pendingConsoleEvents: pendingConsole.length,
+      pendingNetEvents: pendingNet.length,
+      consoleLogSize: consoleLog.length,
+      netLogSize: netLog.length,
+      reconnectDelayMs,
+      appDebug: (typeof window.__appDebug === 'object' && window.__appDebug !== null) ? window.__appDebug : undefined,
+    }),
     // True reload primitive - replaces re-invoking a page module's own
     // init function via `eval` as a re-render workaround. Confirmed in a
     // real session that repeated init-function re-calls stack duplicate
@@ -966,6 +1138,13 @@
   // ---------- Relay connection ----------
   // (`ws` itself is declared earlier, alongside the event-batch flushing
   // that references it by closure)
+
+  // Directly reachable via a plain `eval` (`window.__webscoutDebug`) without
+  // going through the relay round trip at all - same underlying state as
+  // the `debug.state` command above, exposed both ways since a live `eval`
+  // session sometimes wants it inline alongside other page inspection in
+  // the same call.
+  window.__webscoutDebug = { get state() { return handlers['debug.state'](); } };
 
   let reconnectDelayMs = 500;
   const MAX_RECONNECT_DELAY_MS = 8000;

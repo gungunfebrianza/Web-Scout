@@ -1509,6 +1509,128 @@ speculative surface growth). Dashboard-side surfacing of `agents_detail`
 real value, but the CLI-side `status`/`ping` already answer the same
 question and no real dashboard-only session has hit this gap yet.
 
+## V21 - CLI/dashboard lessons from a real P4.6 CRV session (implemented)
+
+Every item here traces to a specific friction point hit during one real CRV
+pass (Controlled Decision Admission, P4.6) - not a self-audit.
+
+- **Timeout != failure: `dom.click`/`dom.clickWait`/`dom.fill`/`idb.put`/
+  `idb.patch` now auto-verify against live state after a genuine 504
+  timeout** (`verifyAfterTimeout` in `relay.mjs`, run from `dispatchTracked`,
+  logged as its own `timeout.verify` action). A timeout only proves the
+  RELAY never got a reply in time - not that the page never received or
+  even finished the command. Confirmed live: a `dom.click` that timed out
+  was treated as "the click failed" and retried, when `idb.dump` ground
+  truth later showed it had actually landed. The verification result is
+  attached to the thrown error as `postTimeoutVerification` (via a new
+  `extra` field on `HttpError`, surfaced through `POST /command`'s error
+  body and `client.mjs`'s `request()`) and printed by the CLI's top-level
+  catch instead of a bare, uninformative timeout message.
+- **`dom wait --stable [--stable-count <n>]` (new mode):** resolves once a
+  selector's textContent reads IDENTICAL on `n` (default 3) consecutive
+  polls, for this app's own confirmed fire-and-forget concurrent-render race
+  (several unawaited `renderAll()` calls landing on the same DOM node after
+  a navigation/click). `--changed` fires the INSTANT the first of several
+  in-flight renders lands, which can still be a mid-race, about-to-be-
+  overwritten intermediate state - a live `eval` poll was the only way to
+  confirm the real settle point before this existed.
+- **`page reload --wait-reconnect` false-negative fix:** the old
+  disconnect-then-reconnect check only proved reconnection if a poll
+  happened to land during the (often sub-150ms) window the agent was
+  actually absent - a fast reload could tear down and re-establish the
+  WebSocket between two polls, so `present` read true on every single poll
+  and the wait fell through to a false `reconnected:false` even though the
+  tab genuinely came back. `waitForReconnect` (`client.mjs`) now also
+  compares `connectedAt` (already-existing per-connection timestamp from
+  V20's `agents_detail`) against its value at call time - a strictly LATER
+  `connectedAt` is proof of a fresh connection regardless of whether the gap
+  was ever directly observed.
+- **`console wait "<substr>"` (new command) + `console.wait` (new
+  inject.js handler):** same shape, same reason, as `net.wait` - a bare
+  `console log` poll called immediately after triggering an action can race
+  the app's own (often async) `console.error` call, reading as "nothing
+  logged" even though the entry lands a moment later. `graceMs` (default
+  3000) also matches an entry already recorded just before the call arrives.
+- **Ambiguous-selector auto-pick for `dom.click`/`dom.fill`/`dom.query`:**
+  when a selector matches multiple elements and exactly one is actually
+  rendered (`offsetParent !== null`), that one is now used automatically
+  (`autoPickedFromAmbiguous`/`filteredHiddenCount` in the response) instead
+  of always hard-erroring. Confirmed live, twice: an unscoped
+  `[data-id="26"]` silently matched an unrelated table row on a different,
+  currently-hidden page/tab before the intended (visible) row - a single,
+  silently WRONG match with no ambiguity error at all, worse than the
+  already-guarded multi-match case. `dom.query` applies the same bias
+  (never throws, read-only) and reports `matchCount`/`renderedMatchCount`.
+  `--nth` always overrides and is never filtered.
+- **`debug state` (new CLI command) + `debug.state` (new inject.js
+  handler) + `window.__webscoutDebug.state`:** live introspection of this
+  tool's own runtime state (WebSocket readyState, pending event-batch
+  sizes, reconnect backoff) plus an app-declared `window.__appDebug` object
+  if the app sets one - shrinks the manual "add a `console.error`, bump the
+  importer's `?v=`, reload, read the log, remove it, bump again" debugging
+  cycle confirmed as this session's single biggest time sink. Also directly
+  `eval`-reachable with no relay round trip.
+- **`idb patch <store> <json-key> <json-patch>` (new command) + `idb.patch`
+  (new inject.js handler):** reads the existing row, shallow-merges the
+  patch onto it, writes the merged row back - `idb put`'s real REPLACE
+  semantics forced re-typing an entire row (copy-pasted from a prior `idb
+  get`) for every small mutation (maturing an execution window, flipping
+  `outcome_status`), with a real risk of silently dropping an untouched
+  field along the way. Errors (rather than silently inserting a sparse row)
+  if no existing row is found at the given key.
+- **`dom click-wait <selector> [--wait-selector <sel>]` (new command) +
+  `dom.clickWait` (new inject.js handler):** click, then wait for a
+  (possibly different) selector to reach a state, in one round trip -
+  closes a real gap in `dom.click`'s own `mutated:true`, which only proves
+  SOME DOM change happened synchronously within its 200ms grace window, not
+  that an async handler (dialog open, dispatch commit) is actually done.
+  Confirmed live: a dialog-opening click reported `mutated:true`
+  immediately while the dialog's own async logic was still running.
+- **`GET /health`'s new `pending_command_count` field:** when several
+  commands timed out back-to-back, there was no way to tell whether they
+  were genuinely failing or simply queued behind a growing backlog. Exposes
+  `pending.size` (in-flight, awaiting-reply command count) directly, so a
+  string of timeouts reads as "stop retrying, something is jammed" instead
+  of blind repeated retries making a real backlog worse.
+- **Mid-session "consider macro record" nudge:** V20's nudge only ever
+  fired at `session end` - too late to save the re-typing it exists to
+  prevent, for a session that hand-rolls a repeatable shape and keeps going.
+  `POST /command` now nudges (via a new `x-webscout-nudge` response header,
+  read by `client.mjs`'s `request()` and printed to stderr - deliberately
+  NOT folded into the JSON body, which is a command's own real result
+  shape) the moment a session crosses 5 replayable actions, then again
+  every 8 actions after that - never more than once per threshold.
+- **`dev bump-reload <file>` (new CLI-only command):** finds every
+  `<basename>?v=N` reference to a file anywhere in the repo and bumps each
+  by +1, then runs `page reload --hard --wait-reconnect` - automates the
+  manual half of this repo's own cache-busting convention (editing a file
+  needs its version bumped at every importer, confirmed real, repeated,
+  error-prone friction across an iterative debugging session). Warns
+  (without silently "fixing") if importers disagreed on the version before
+  the bump ran.
+- **`debug sweep <tag>` (new CLI-only command, no session needed):** greps
+  the whole repo for a tag string (e.g. a temporary debug marker like
+  `P46DEBUG`) and reports every remaining hit - replaces the manual `grep
+  -c ... && echo clean` check a caller previously had to remember and run
+  by hand to confirm hand-added debug instrumentation was fully removed
+  before shipping. Exits 1 if anything is still found.
+- **Doc note (no behavior change): the post-`page reload --hard` slow-ack
+  window.** The first ~5-10s after a hard reload is measurably flakier for
+  writes/clicks than steady state, because the app's own concurrent init/
+  render passes are still settling - not a bug in web-scout or the app,
+  just a real timing characteristic worth knowing before reading an early
+  post-reload failure as a genuine regression.
+
+**Considered and not done this round:** MCP server parity for
+`click-wait`/`idb.patch`/`console.wait`/`debug.state`/`dom.wait --stable`
+(this round's friction was hit entirely through the CLI in the real session
+that produced it, matching V20's own precedent for deferring MCP parity
+until a real MCP-driven session hits the same gaps). A cleanup-verification
+convention baked into the session-cleanup flow itself (auto-tagging/
+sweeping debug instrumentation) - `debug sweep` covers the manual case for
+now; folding it into `session end` was considered but deferred as
+speculative without a second real session confirming the same gap.
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a
