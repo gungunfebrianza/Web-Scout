@@ -15,6 +15,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const BASELINE_CHARS_PER_TOKEN = 4;
+// A measured calibration older than this is reported as stale: tokenizers and the shape of what
+// this tool returns both drift, and a band nobody has re-measured in a quarter is a guess again.
+export const STALE_AFTER_DAYS = 90;
 
 // chars per token: `ratio` is the central guess, `low`..`high` the range a real
 // tokenizer is expected to land in. A LOWER chars-per-token ratio means MORE tokens.
@@ -77,17 +80,31 @@ export function baselineBand(chars, kind = 'json') {
   return { baseline: baselineTokens(chars), low: e.low, high: e.high };
 }
 
-export function estimatorInfo() {
+// status: 'uncalibrated' (no usable file) | 'partial' (some kinds measured) | 'stale' (measured, but
+// older than STALE_AFTER_DAYS or undated) | 'calibrated'. `now` is a parameter for tests.
+export function estimatorInfo({ now = Date.now() } = {}) {
   const { kinds, meta } = state();
   const calibrated = Object.keys(kinds);
+  const complete = calibrated.length === Object.keys(DEFAULT_KINDS).length;
+  const sampled = meta?.sampledAt ? Date.parse(meta.sampledAt) : NaN;
+  const ageDays = Number.isFinite(sampled) ? Math.max(0, Math.floor((now - sampled) / 86400000)) : null;
+  const status = !calibrated.length ? 'uncalibrated' : !complete ? 'partial' : ageDays === null || ageDays > STALE_AFTER_DAYS ? 'stale' : 'calibrated';
+  const rerun = 'Run "node tools/web-scout/calibrate-tokens.mjs --write" (needs ANTHROPIC_API_KEY)';
+  const notes = {
+    uncalibrated: `no usable token-calibration.json - ranges are rule-of-thumb defaults. ${rerun} to measure them; ledgers keep reporting chars/4 either way`,
+    partial: `only ${calibrated.join(', ')} are measured; the other kinds still use rule-of-thumb defaults. ${rerun} to measure all three`,
+    stale: `the calibration is ${ageDays === null ? 'undated' : `${ageDays} days old (limit ${STALE_AFTER_DAYS})`}. ${rerun} to refresh it`,
+    calibrated: 'ranges come from token-calibration.json; every ledger still reports chars/4 so numbers stay comparable across versions',
+  };
   return {
     unit: `chars/${BASELINE_CHARS_PER_TOKEN}`,
-    calibrated: calibrated.length === Object.keys(DEFAULT_KINDS).length,
+    calibrated: complete,
+    status,
+    ageDays,
+    staleAfterDays: STALE_AFTER_DAYS,
     calibratedKinds: calibrated,
     kinds: kindsInUse(),
-    source: meta ? `measured (${meta.model ?? 'unknown model'}, ${meta.sampledAt ?? 'unknown date'})` : 'uncalibrated rule-of-thumb defaults',
-    note: meta
-      ? 'ranges come from token-calibration.json; every ledger still reports chars/4 so numbers stay comparable across versions'
-      : 'no token-calibration.json - ranges are rule-of-thumb defaults. Run "node tools/web-scout/calibrate-tokens.mjs --write" to measure them; ledgers keep reporting chars/4 either way',
+    source: meta && calibrated.length ? `measured (${meta.model ?? 'unknown model'}, ${meta.sampledAt ?? 'unknown date'})` : 'uncalibrated rule-of-thumb defaults',
+    note: notes[status],
   };
 }

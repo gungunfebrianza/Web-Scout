@@ -10,11 +10,17 @@
 //   table     --table, or a tightened budget: rows as {columns, rows:[[...]]}
 //   full      otherwise, exactly as before
 //
+// A session started with --lean makes the first four the DEFAULT (rows as tables, a
+// repeat as a pointer or delta, a large body as its shape) so one setting replaces
+// a flag on every call; --no-guard on a call still gets the body.
+//
 // "Holds" is tracked precisely: a body counts as held only when it was actually
 // delivered in full (or tabulated, or rebuilt from a delta) - never after a peek.
 // The pipeline also watches what callers do next (peek then narrow or full read,
 // scoped then unscoped, identical full re-deliveries) and turns that into one-line
-// hints, measured for whether they were followed. Pure state machine: no I/O, the
+// hints, measured for whether they were followed, capped per session and silenced
+// per kind once the caller has ignored two of them, and costed (bytes sent vs bytes
+// saved on the calls that adopted one). Pure state machine: no I/O, the
 // ledger writer is injected, so read-pipeline.test.mjs drives it directly.
 
 import { tabulate, peekSummary, computeReadDelta, sizeOf } from './read-shape.mjs';
@@ -23,13 +29,26 @@ import { baselineTokens, baselineBand, kindForType } from './token-estimate.mjs'
 // Params that narrow a read, per type. A scoped read (one whose reply claimed
 // avoided bytes) followed within the window by the same read on the same tab
 // WITHOUT them means the caller paid for the rest anyway.
-export const SCOPING_PARAM_KEYS = { 'dom.query': ['meta'], 'idb.dump': ['where', 'fields', 'limit'], 'net.log': ['urlContains', 'limit'], 'console.log': ['limit'] };
+export const SCOPING_PARAM_KEYS = {
+  'dom.query': ['meta', 'pick'],
+  'react.inspect': ['pick'],
+  'idb.list': ['stores', 'nonEmpty'],
+  'idb.dump': ['where', 'fields', 'limit', 'countOnly'],
+  'idb.get': ['fields'],
+  'net.log': ['urlContains', 'limit', 'fields', 'failed'],
+  'console.log': ['limit', 'level', 'contains', 'fields'],
+};
 export const FOLLOW_UP_WINDOW_MS = 90000;
 export const HINT_MIN_TOKENS = 1500;
 export const REUSE_HINT_AFTER_FULL_HITS = 2;
 export const BUDGET_TIGHTEN_PCT = 60;
 export const BUDGET_STRICT_PCT = 85;
 export const GUARD_TOKENS_BY_LEVEL = { tighten: 3000, strict: 1000 };
+// Tuned on real-session traces (trace.mjs replay --sweep): 4000 had the lower worst case on three of
+// four traces and cost little best case; 2500 was the earlier judgement.
+export const LEAN_GUARD_TOKENS = 4000;
+export const MAX_HINTS_PER_SESSION = 4;
+export const HINT_IGNORED_LIMIT = 2;
 
 export function readTargetKey(type, params) {
   const rest = { ...(params ?? {}) };
@@ -61,28 +80,44 @@ export function budgetLevel(limit, used) {
 
 const tok = (bytes) => baselineTokens(bytes);
 
-export function createReadPipeline({ bump, now = () => Date.now() }) {
+// leanGuardTokens is a parameter only so trace.mjs can sweep it; the relay uses the default.
+export function createReadPipeline({ bump, now = () => Date.now(), leanGuardTokens = LEAN_GUARD_TOKENS }) {
   const delivered = new Map(); // sessionId -> Map(cacheKey -> { result, actionId })
   const trails = new Map(); // sessionId -> per-session behaviour trail
   const budgetAnnounced = new Map(); // sessionId -> last level announced
 
   const deliveredFor = (sid) => { if (!delivered.has(sid)) delivered.set(sid, new Map()); return delivered.get(sid); };
   const trailFor = (sid) => {
-    if (!trails.has(sid)) trails.set(sid, { scopedAt: new Map(), lastScope: new Map(), reReads: new Map(), fullHits: new Map(), hinted: new Set(), pendingScope: new Set(), pendingReuse: new Set(), peeks: new Map() });
+    if (!trails.has(sid)) trails.set(sid, { scopedAt: new Map(), lastScope: new Map(), reReads: new Map(), fullHits: new Map(), hinted: new Set(), pendingScope: new Set(), pendingReuse: new Map(), peeks: new Map(), hintsSent: 0, kinds: new Map() });
     return trails.get(sid);
   };
 
   // One line, at most, per shaped read. Only from what the caller has actually done.
-  function behaviourHint({ trail, type, params, cacheKey, target, mode, hit, outBytes, opts }) {
+  const kindState = (trail, kind) => { if (!trail.kinds.has(kind)) trail.kinds.set(kind, { sent: 0, adopted: 0 }); return trail.kinds.get(kind); };
+  // A hint goes out only while the session is under its cap and the caller has not already
+  // ignored HINT_IGNORED_LIMIT hints of this kind: advice nobody follows is noise they pay for.
+  const mayHint = (trail, kind) => trail.hintsSent < MAX_HINTS_PER_SESSION && kindState(trail, kind).sent - kindState(trail, kind).adopted < HINT_IGNORED_LIMIT;
+  const noteAdopted = (trail, kind, savedBytes) => { kindState(trail, kind).adopted += 1; bump('hintAdopted', savedBytes); };
+
+  // spared: bytes this very call kept off the caller's screen (what an adopting call is credited with)
+  function behaviourHint({ trail, type, params, cacheKey, target, mode, hit, outBytes, opts, spared }) {
     const t = now();
     const narrowed = isNarrowed(type, params);
     const scopable = !!SCOPING_PARAM_KEYS[type];
     const fullDelivery = mode === 'full' || mode === 'table';
     let hint = null;
+    const issue = (kind, text) => {
+      const state = kindState(trail, kind);
+      state.sent += 1;
+      trail.hintsSent += 1;
+      bump(kind === 'scope' ? 'hintScope' : 'hintReuse', 0);
+      bump('hintBytes', text.length);
+      return text;
+    };
 
     // adoption of an earlier hint
-    if (trail.pendingReuse.has(cacheKey) && (opts.ifChanged || opts.delta || opts.table)) { trail.pendingReuse.delete(cacheKey); bump('hintAdopted', 0); }
-    if (scopable && narrowed && trail.pendingScope.has(target)) { trail.pendingScope.delete(target); bump('hintAdopted', 0); }
+    if (trail.pendingReuse.has(cacheKey) && (opts.ifChanged || opts.delta || opts.table)) { const kind = trail.pendingReuse.get(cacheKey); trail.pendingReuse.delete(cacheKey); noteAdopted(trail, kind, spared); }
+    if (scopable && narrowed && trail.pendingScope.has(target)) { trail.pendingScope.delete(target); noteAdopted(trail, 'scope', 0); }
 
     if (scopable && narrowed) {
       trail.scopedAt.set(target, t);
@@ -90,42 +125,42 @@ export function createReadPipeline({ bump, now = () => Date.now() }) {
     } else if (scopable && fullDelivery && trail.scopedAt.has(target)) {
       trail.reReads.set(target, (trail.reReads.get(target) ?? 0) + 1);
       const big = tok(outBytes) >= HINT_MIN_TOKENS;
-      if (big && (trail.reReads.get(target) ?? 0) >= 2 && !trail.hinted.has(`reuse:${target}`)) {
+      if (big && (trail.reReads.get(target) ?? 0) >= 2 && !trail.hinted.has(`reuse:${target}`) && mayHint(trail, 'reuse')) {
         trail.hinted.add(`reuse:${target}`);
-        trail.pendingReuse.add(cacheKey);
-        bump('hintReuse', 0);
-        hint = `this ${type} target was read in full again after being scoped (${trail.reReads.get(target)} times this session, ~${tok(outBytes)} tokens each). Scoping is not answering it - use --delta (only what changed since your last read) or --table (keys stated once) for these full reads.`;
-      } else if (big && !trail.hinted.has(`scope:${target}`)) {
+        trail.pendingReuse.set(cacheKey, 'reuse');
+        hint = issue('reuse', `this ${type} target was read in full again after being scoped (${trail.reReads.get(target)} times this session, ~${tok(outBytes)} tokens each). Scoping is not answering it - use --delta (only what changed since your last read) or --table (keys stated once) for these full reads.`);
+      } else if (big && !trail.hinted.has(`scope:${target}`) && mayHint(trail, 'scope')) {
         trail.hinted.add(`scope:${target}`);
         trail.pendingScope.add(target);
-        bump('hintScope', 0);
-        hint = `this unscoped ${type} read cost ~${tok(outBytes)} tokens; earlier this session you read the same target with ${JSON.stringify(trail.lastScope.get(target))}. Reuse that scope unless you need everything.`;
+        hint = issue('scope', `this unscoped ${type} read cost ~${tok(outBytes)} tokens; earlier this session you read the same target with ${JSON.stringify(trail.lastScope.get(target))}. Reuse that scope unless you need everything.`);
       }
     }
 
     if (hit && fullDelivery) {
       const n = (trail.fullHits.get(cacheKey) ?? 0) + 1;
       trail.fullHits.set(cacheKey, n);
-      if (!hint && n >= REUSE_HINT_AFTER_FULL_HITS && tok(outBytes) >= HINT_MIN_TOKENS && !trail.hinted.has(`hit:${cacheKey}`)) {
+      if (!hint && n >= REUSE_HINT_AFTER_FULL_HITS && tok(outBytes) >= HINT_MIN_TOKENS && !trail.hinted.has(`hit:${cacheKey}`) && mayHint(trail, 'hit')) {
         trail.hinted.add(`hit:${cacheKey}`);
-        trail.pendingReuse.add(cacheKey);
-        bump('hintReuse', 0);
-        hint = `this identical read has now been served from the relay cache ${n} times and re-delivered in full each time (~${tok(outBytes)} tokens each). Add --if-changed and an unchanged repeat becomes a one-line pointer.`;
+        trail.pendingReuse.set(cacheKey, 'hit');
+        hint = issue('hit', `this identical read has now been served from the relay cache ${n} times and re-delivered in full each time (~${tok(outBytes)} tokens each). Add --if-changed and an unchanged repeat becomes a one-line pointer.`);
       }
     }
     return hint;
   }
 
   // full: the complete result (never mutated); returns what to hand the caller.
-  function shape({ sessionId, type, agentName, params, cacheKey, full, hit, entry, actionId, opts: rawOpts, budget, envGuardTokens }) {
-    const opts = normalizeShapeOpts(rawOpts);
+  function shape({ sessionId, type, agentName, params, cacheKey, full, hit, entry, actionId, opts: rawOpts, budget, envGuardTokens, lean }) {
+    const explicit = normalizeShapeOpts(rawOpts);
+    // a lean session shapes by default; --no-guard on the call asks for the body as it is
+    const leanOn = !!lean && !explicit.noGuard;
+    const opts = leanOn ? { ...explicit, table: true, delta: true } : explicit;
     const held = deliveredFor(sessionId);
     const trail = trailFor(sessionId);
     const target = `${agentName}::${type}::${readTargetKey(type, params)}`;
     const fullBytes = sizeOf(full);
     const base = hit ? { ...full, __cacheHit: true, __cachedAt: entry?.cachedAt } : full;
     const previous = held.get(cacheKey);
-    const guardTokens = [budget?.guardTokens, envGuardTokens].filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b)[0] ?? null;
+    const guardTokens = [budget?.guardTokens, envGuardTokens, leanOn ? leanGuardTokens : null].filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b)[0] ?? null;
     let out = null;
     let mode = 'full';
 
@@ -175,7 +210,12 @@ export function createReadPipeline({ bump, now = () => Date.now() }) {
       bump(isNarrowed(type, params) ? 'peekThenNarrowed' : 'peekThenFull', outBytes);
     }
 
-    const hint = behaviourHint({ trail, type, params, cacheKey, target, mode, hit, outBytes, opts });
+    // who chose the shaping: the caller (explicit flags), the session (lean), or nobody (plain)
+    const asked = explicit.table || explicit.ifChanged || explicit.delta || explicit.peek;
+    bump(asked ? 'readExplicit' : leanOn ? 'readLean' : 'readPlain', outBytes);
+
+    // opts as the CALLER gave them: the hint logic is about what the caller chose to do
+    const hint = behaviourHint({ trail, type, params, cacheKey, target, mode, hit, outBytes, opts: explicit, spared });
     return { out, mode, fullBytes, outBytes, spared, hint };
   }
 

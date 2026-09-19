@@ -2317,11 +2317,97 @@ start; not a logged action; `--no-briefing` skips it.
 
 **Honest limits.** Shaping savings are measured against the full result the same call
 would have returned, so unlike scoped reads they are not an upper bound, but they are
-still not "tokens saved": the per-session `token-report` ("Read by callers") counts full
-results as logged, and the new `deliveryShaping` ledger and the receipt carry the
-difference. A pointer or delta trusts the caller's word that it still holds the earlier
+still not "tokens saved" (V33 note: the per-session `token-report` "Read by callers"
+now counts delivered bytes too - see V33 - so a shaped reply is no longer counted at its
+logged size); the `deliveryShaping` ledger and the receipt carry the difference. A pointer or delta trusts the caller's word that it still holds the earlier
 result. The tight thresholds (60% / 85%, 3000 / 1000 tokens, 30% delta margin) are
 judgement, not measured optima.
+
+## V33 - fewer tokens before the first read, one honest number, and a benchmark on real sessions (implemented)
+
+V32 made a read cheaper when the caller asked for it. Using it showed where the tokens
+still went: a CRV run reads the same state three times to prove one change; every
+shaping option needed a flag on every call; the ledgers disagreed about what "read"
+meant; the tool list and the help text were paid for before any read; the only benchmark
+was a script that cannot lose; and V32 itself sat unused behind a relay nobody restarted.
+Ten changes, same rule as V32 (log and cache the FULL result, change only the reply).
+
+**`idb verify` (1).** `POST /state/verify` is the verify step of baseline -> action ->
+verify in one call: re-snapshot the baseline's stores, diff, check `--expect
+"notes:+1,tags:same"` (`+N` added, `+N+` at least, `-N` removed, `~N` changed,
+`same`; JSON accepted), and answer in a few lines when it passed. A changed store you did
+not name is "unexpected" and fails; no expectations means nothing may change. Rows come
+back only for the stores that failed, changed rows as `{field: [before, after]}`, and the
+snapshot and full diff are still saved, so the evidence trail is as complete as by hand.
+The default baseline is the session's newest snapshot, so consecutive verifies each
+measure one step. Pure logic in `crv-verify.mjs`.
+
+**Lean sessions (2) and a measured adoption rate.** `session start --lean` makes tables,
+pointer/delta and a shape for any body over ~4000 tokens the default for the session
+(`--no-guard` on a call gives the body). `readStrategy.adoption` counts cacheable reads
+by who chose the shaping - a flag, `--lean`, or nobody - with the bytes that flowed
+unshaped, so the size of the opportunity is measured rather than assumed.
+
+**Projection in the page (3).** The reads that return a lot now cut it in `inject.js`,
+before it crosses the wire, and count what they cut in the scoped-reads ledger:
+`dom query --pick`, `react inspect --pick` (dotted paths), `idb list --stores/--non-empty`,
+`idb dump --count`, `idb get --fields`, `net log --failed/--fields`, `console log
+--level/--contains/--fields`. All are in `SCOPING_PARAM_KEYS`, so a scoped read followed
+by the unscoped one is still noticed.
+
+**One delivered-bytes number (4).** `actions.delivered_bytes` records what the caller was
+handed when that is less than the logged result. The running total, the budget, the
+receipt and the per-type token report (`deliveredBytes`, `withheldBytes`, `estTokens`
+following delivered) all read it; V32's separate `sessionDeliveryAdjust` correction is gone.
+The logged result is still complete.
+
+**A benchmark from real sessions (5).** `trace.mjs` exports a session anonymised (every
+string becomes a same-length, same-equality stand-in; only `keyPath` values are kept) and
+replays it through the reply pipeline under `default`, `leanBest` (every shape sufficed)
+and `leanWorst` (callers always re-asked for the body). Four committed traces of real CRV
+sessions gave read-byte ratios of 0.40-0.58 best case on three and 0.05 on one dominated by
+a few huge reads, and 0.52-0.75 worst case - against 0.046 for the scripted fixture, which
+is a best case by construction. The guard sweep moved the lean guard from 2500 (judgement)
+to 4000 tokens: lower worst case on three of four traces for a small best-case cost. Four
+traces from one project are a small sample; `trace-replay.test.mjs` holds each band with a
+margin so a regression fails, and says so.
+
+**A cheaper tool list and help (6).** `usage.txt` is ~16k tokens and every unknown command
+printed all of it; the MCP tool list is sent on every session. `help.mjs` slices `usage.txt`
+by its own structure (`help`, `help idb`, `help idb dump`, `idb dump --help`, `help all`); the
+tool list was compressed from 17,973 to 16,296 bytes while gaining verify, pick and lean
+(`+shape` names the five shaping params once); `schema-budget.test.mjs` fails a change that
+grows either.
+
+**Quiet by default (7).** At most 4 hints a session; a kind ignored twice goes quiet;
+hint bytes are booked and set against what the adopting calls saved
+(`hints.sentBytes/adoptedBytesSaved/netBytes`, first-order). The running-total note prints
+only when a call added 1000+ tokens or the total crossed a doubling (the relay sets
+`x-webscout-tokens-quiet`).
+
+**A read-only contract (8).** `read-only-contract.test.mjs` fingerprints every IndexedDB
+database, localStorage, sessionStorage, cookies and the DOM in a real browser around every
+non-mutating registry command and around the briefing, snapshot and verify routes; the
+registry cross-check fails until a new read command is added. Mutation-checked: making
+`db.probeUpgrade` commit its upgrade fails it.
+
+**A stale relay restarts itself at a session boundary (9).** `session start` restarts a
+relay running older code than disk (nothing is in flight; tabs reconnect; the event is in
+the relay log as `auto-restart`). Never mid-session, where it would drop the read cache and
+what each caller holds - a warning only. `WEBSCOUT_NO_AUTORESTART=1` opts out.
+
+**The estimator says how old its measurement is (10).** `savings.estimator.status` is
+uncalibrated / partial / stale (over 90 days) / calibrated; `calibrate-tokens.mjs --check`
+is the offline exit-code form, and `WEBSCOUT_REQUIRE_CALIBRATION=1` makes CI enforce it.
+**The calibration itself was not produced**: it needs `ANTHROPIC_API_KEY`, none was
+available, and a measured file is not something to invent. The bands stay labelled
+uncalibrated until someone runs `calibrate-tokens.mjs --write` and commits the result.
+
+**Honest limits.** The lean numbers are a replay of four sessions from one project with a
+two-point model of caller behaviour (always satisfied / always re-asks); real callers sit
+between and the width of the band is the risk of turning lean on. The hint costing credits
+only the adopting call. Thresholds (60%/85%, 3000/1000, the 30% delta margin, the 1000-token
+and doubling note rule, 4 hints) are judgement except the lean guard, which the sweep chose.
 
 ## Explicit non-goals
 

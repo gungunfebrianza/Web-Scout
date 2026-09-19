@@ -100,6 +100,20 @@ size is pinned by `token-benchmark.test.mjs` - if a change legitimately moves it
 raise `NAIVE_BUDGET_BYTES` in the same commit and say why. An in-page command must not
 leave state behind that the app did not create: `openDb()` in `inject.js` rolls back
 the database creation a version-less `indexedDB.open` would otherwise cause.
+`read-only-contract.test.mjs` enforces this against a real browser for every non-mutating
+command in the registry: a new read command must be added to its `COVERED` list (or
+`EXEMPT`, with a reason) or its registry cross-check fails. A read that narrows what it
+returns (a filter, a projection, a count) is a new in-page param: list it in
+`SCOPING_PARAM_KEYS`, call `noteAvoided` with the unscoped size, and give it a case in
+`inject-browser.test.mjs`.
+
+Every byte in an MCP tool description or in `usage.txt` is paid for by callers before
+they read anything: `schema-budget.test.mjs` caps the MCP tool list, one tool, and the
+biggest help slice. Write the shaping params as `+shape` (defined once under
+`webscout_dom`), keep new usage entries at the start-of-line shape `help.mjs` slices by
+(two spaces, then the command), and raise a cap only in the commit that adds the text.
+Ship a claim about token savings with a number from `trace.mjs replay` on real traces,
+not only the scripted benchmark, which is a best case.
 
 Run the full test suite before opening a PR (see "Testing" in the README):
 

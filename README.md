@@ -120,7 +120,27 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   re-deliveries) and says one line when it sees waste, then measures whether the
   hint was followed; peeks are measured the same way (narrowed next, or read in
   full anyway)
-- Token estimates carry a labelled error band (`savings.estimator`), and
+- `idb verify --expect "notes:+1,tags:same"` is the verify step of baseline -> action
+  -> verify in one call: it re-snapshots, diffs and checks the expectations, and
+  answers in a few lines when it passed (rows only for what failed)
+- `session start --lean` makes shaping the default for a whole session instead of a
+  flag on every call; reads can also be narrowed in the page itself (`dom query --pick`,
+  `idb dump --count`, `net log --failed --fields ...`, `console log --level ...`, ...)
+- One delivered-bytes number: the running total, the budget, the per-type report and
+  the session receipt all count what the caller was handed, not what was logged
+- Quiet by default: hints are capped per session and go silent for a kind you keep
+  ignoring (and are costed against what following them saved); the running-total note
+  prints only when a call was big or the total crossed a doubling; `help` prints an
+  index or one command instead of ~16k tokens of usage text; the MCP tool list has a
+  byte budget in CI
+- `trace.mjs` exports a real session anonymised and replays it through the reply
+  pipeline, so the read strategy is benchmarked on what callers actually read (not only
+  the scripted fixture) and the lean guard threshold is tuned from a sweep
+- A relay running older code than disk is restarted at `session start` (never
+  mid-session); `read-only-contract.test.mjs` proves every read command leaves
+  IndexedDB, storage and the DOM exactly as it found them
+- Token estimates carry a labelled error band (`savings.estimator`, with a status:
+  uncalibrated / partial / stale / calibrated and `calibrate-tokens.mjs --check`), and
   `token-benchmark.test.mjs` runs a scripted CRV session against a fixture in CI so
   a change that makes replies bigger fails there
 
@@ -160,6 +180,10 @@ node tools/web-scout/relay.mjs
 
 # 5. Confirm the browser tab connected
 node tools/web-scout/cli.mjs status
+
+# Help is sliced (the full text is ~16k tokens): the index, one group, or one command
+node tools/web-scout/cli.mjs help                 # topics and their commands
+node tools/web-scout/cli.mjs help idb dump        # one command (also: idb dump --help; help all = everything)
 
 # 6. Declare a goal - required before any command that touches the page
 node tools/web-scout/cli.mjs session start "check that clicking save updates the list" "manual verification"
@@ -257,6 +281,7 @@ idb clear my_store
 idb wait my_store --count-gte 4 --timeout 15000
 idb snapshot --stores my_store --golden my-baseline   # named regression baseline
 idb snapshot --since 12        # fresh snapshot, prints ONLY the delta vs. snapshot 12
+idb verify --expect "notes:+1,tags:same"  # verify step of baseline -> action -> verify in ONE call: re-snapshots, diffs, checks, prints pass/fail (rows only for what failed)
 idb diff 1 2                  # or: idb diff-golden my-baseline 2 - both cache-aware: identical
                                # content to an already-computed diff skips re-sending the full body
 idb restore --golden my-baseline
@@ -404,11 +429,35 @@ re-delivered in full from cache); `token-report` counts whether you then acted o
 Output is compact JSON when piped; a terminal, `--pretty` or `WEBSCOUT_PRETTY=1` gets
 the indented form.
 
+`session start --lean` turns the shaping above into the session default: rows as
+tables, a repeat of a result you hold as a pointer or delta, and a body over ~4000
+tokens as its shape (repeat the call for the body; `--no-guard` gives it as it is).
+`token-report` (`readStrategy.adoption`) counts reads by who chose the shaping. On
+four real CRV sessions replayed with `trace.mjs` a lean session delivered 0.40-0.58 of
+the default's read bytes on three (0.05 on one dominated by a few huge reads) if every
+shape sufficed, and 0.52-0.75 if callers always re-asked for the body: much less than
+the scripted benchmark below, which is a best case. Reads can also be narrowed **in
+the page**, before anything crosses the wire:
+```bash
+dom query "a.next" --pick attr:href,text    # the href and text, not the markup around them
+react inspect ".row" --pick props.user.id   # one path, not the whole component
+idb list --stores notes,tags --non-empty
+idb dump notes --count                      # did 3 rows land? counts, no rows
+idb get notes 7 --fields title,tag
+net log --failed --fields method,url,status
+console log --level error,warn --fields level,message
+node tools/web-scout/cli.mjs help idb dump  # sliced help (also: idb dump --help)
+node tools/web-scout/trace.mjs export 87 --out traces/mine.json.gz   # anonymised real session
+node tools/web-scout/trace.mjs replay traces/*.json.gz --sweep       # lean band + guard sweep
+```
+
 Token figures everywhere are chars/4 - one ratio for JSON, markup and prose, which
 tokenize very differently. `token-report` labels them: `savings.estimator` gives a
 low..high band per kind and `spend.estTokensBand` brackets the total. The band is a
 rule of thumb until `node tools/web-scout/calibrate-tokens.mjs --write` (needs
-`ANTHROPIC_API_KEY`) measures real ratios from your own sessions.
+`ANTHROPIC_API_KEY`) measures real ratios from your own sessions;
+`calibrate-tokens.mjs --check` says offline whether the committed file is complete and
+fresh (this repository has not been measured yet, so the band is still a rule of thumb).
 
 The dashboard's **Token savings** panel shows the all-time ledgers behind
 `token-report`, split into what they actually measure: bytes never stored
@@ -509,6 +558,8 @@ startup unless noted:
 | `WEBSCOUT_READ_GUARD_TOKENS` | unset | Arms the read guard without a session budget: a read over this many estimated tokens returns its shape (`--no-guard` per call overrides). Read by the relay. |
 | `WEBSCOUT_PRETTY` / `WEBSCOUT_COMPACT` | unset | The CLI prints compact JSON when piped and indented JSON on a terminal; `WEBSCOUT_PRETTY=1` (or `--pretty`) forces indented, `WEBSCOUT_COMPACT=1` forces compact even on a terminal. |
 | `WEBSCOUT_TOKEN_CALIBRATION` | `tools/web-scout/token-calibration.json` | Where measured chars-per-token ratios (written by `calibrate-tokens.mjs --write`) are read from. |
+| `WEBSCOUT_NO_AUTORESTART` | unset | Set to `1` to stop `session start` restarting a relay that is running older code than what is on disk (it only ever restarts between sessions, never during one). |
+| `WEBSCOUT_REQUIRE_CALIBRATION` | unset | Set to `1` (CI) to make the suite fail unless `token-calibration.json` is complete and fresh. |
 | `WEBSCOUT_NO_AUTOSTART` | unset | Set to `1` to stop the CLI/MCP client from starting a relay when the port refuses connections (it retries the call once after starting one, at most once per 30s). |
 | `WEBSCOUT_REQUIRE_BROWSER` | unset | Set to `1` (CI does) to make the headless-browser tests fail instead of skip when no Chromium/Edge is found. |
 | `WEBSCOUT_PID_PATH` | `<tmpdir>/webscout-relay-<port>.pid` | Where the relay writes its pidfile, used by `relay stop/restart`. |
@@ -626,6 +677,17 @@ against a fixture twice - default reads and the documented read strategy - and
 prints the delivered bytes per phase; it fails if default replies grow past a
 budget or the strategy stops beating them by its margin (the fixture is a best
 case for the strategy, so read the ratio as a ceiling on the effect, not a forecast).
+`crv-verify.test.mjs` covers `idb verify` (the expectation syntax, and the whole call
+through a real relay). `read-only-contract.test.mjs` fingerprints IndexedDB, storage,
+cookies and the DOM in a real browser before and after **every non-mutating command in
+the registry** and after the briefing, snapshot and verify routes - a new read command
+must be added to it or the registry cross-check fails. `schema-budget.test.mjs` caps the
+MCP tool list (bytes sent to the model on every session) and the size of a help slice;
+`help.test.mjs` checks every command slices out of `usage.txt`. `trace-replay.test.mjs`
+replays the committed anonymised traces in `traces/` and holds their measured lean bands;
+`auto-restart.test.mjs` covers the session-start restart; `token-calibration.test.mjs`
+covers the estimator's status (its last test skips until a measured calibration is
+committed).
 See `.github/workflows/web-scout-tests.yml`.
 
 ## Relationship to Verity UI Relay

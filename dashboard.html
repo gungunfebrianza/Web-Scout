@@ -1901,7 +1901,7 @@ function renderSavingsPanel(report) {
   const ctx = sv.storageContext || {};
   const tile = (label, value, hint, band) => `<div class="hud-tile${band ? ` hud-tile-${band}` : ''}" data-hint="${esc(hint)}"><div class="hud-tile-label">${esc(label)}</div><div class="hud-tile-value">${value}</div></div>`;
   el('savingsStatStrip').innerHTML = [
-    tile('Read by callers', `~${svNum(spend.estTokens)}`, `Estimated tokens (chars/4) callers actually read off stdout across ${svNum(spend.calls)} calls - the real context-window spend. No ledger below reduces this number.`, 'warn'),
+    tile('Read by callers', `~${svNum(spend.estTokens)}`, `Estimated tokens (chars/4) callers actually read off stdout across ${svNum(spend.calls)} calls - the real context-window spend. It counts what was DELIVERED: a peeked, tabulated, delta or pointer reply counts as the reply the caller got, not the full logged result. The storage-dedup ledgers below do not change it.`, 'warn'),
     tile('Disk avoided', svBytes(storage.bytesSaved), `Bytes dedup kept out of webscout.db. About ${svNum(storage.estTokensSaved)} tokens-EQUIVALENT (bytes / 4) - a storage saving, not tokens a caller avoided.`, 'ok'),
     tile('DB size cut', ctx.reductionPct === null || ctx.reductionPct === undefined ? '-' : `${ctx.reductionPct}%`, ctx.dbFileBytes ? `webscout.db is ${svBytes(ctx.dbFileBytes)} on disk; without dedup it would be about ${svBytes(ctx.bytesWithoutDedup)} (approximate - SQLite keeps freed pages).` : 'database size unavailable', 'ok'),
     tile('Left out by scoping', `~${svNum(scoped.estTokensSaved)}`, `Tokens (bytes / 4) that scoped reads (--where / --fields / --limit / --meta / whole-page outline) did not return, measured against the unscoped call in the page. An upper bound: the caller may never have made the unscoped call.`, 'ok'),
@@ -1975,10 +1975,13 @@ function renderSavingsTrend(trend, strategy, estimator) {
   if (sh && (sh.pointer.calls + sh.delta.calls + sh.table.calls + sh.peek.calls)) {
     parts.push(`${svNum(sh.pointer.calls)} pointers, ${svNum(sh.delta.calls)} deltas, ${svNum(sh.table.calls)} tables, ${svNum(sh.peek.calls)} peeks (${svNum(sh.peek.guardedCalls)} by the budget guard): <strong>${svBytes(sh.netBytesSaved)}</strong> kept off the caller's screen${sh.peek.calls ? `; peeks: ${sh.peek.narrowedRatePct ?? 0}% narrowed next, ${sh.peek.fullRatePct ?? 0}% read in full (${svBytes(sh.peek.bytesSpentAfterwards)} spent afterwards)` : ''}`);
   }
+  // who chose the shaping: the caller, a --lean session, or nobody (plain reads are the size of the opportunity)
+  const ad = strategy?.adoption;
+  if (ad && ad.reads) parts.push(`${svNum(ad.reads)} cacheable reads: <strong>${ad.explicitRatePct ?? 0}%</strong> shaped by a flag, <strong>${ad.leanRatePct ?? 0}%</strong> by a <code>--lean</code> session, ${svNum(ad.plain.calls)} plain (${svBytes(ad.plain.deliveredBytes)} delivered unshaped)`);
   const hn = strategy?.hints;
-  if (hn && (hn.scope + hn.reuse)) parts.push(`${svNum(hn.scope + hn.reuse)} read hints given, <strong>${hn.adoptedRatePct ?? 0}%</strong> followed`);
+  if (hn && (hn.scope + hn.reuse)) parts.push(`${svNum(hn.scope + hn.reuse)} read hints given, <strong>${hn.adoptedRatePct ?? 0}%</strong> followed; the hints cost ${svBytes(hn.sentBytes ?? 0)} and the calls that followed one kept ${svBytes(hn.adoptedBytesSaved ?? 0)} off the screen (net ${(hn.netBytes ?? 0) >= 0 ? '' : '-'}${svBytes(Math.abs(hn.netBytes ?? 0))})`);
   const jk = estimator?.kinds?.json;
-  if (parts.length && jk) parts.push(`token figures are chars/4; for JSON a real tokenizer is expected between ${jk.low} and ${jk.high} chars/token (${esc(estimator.source)})`);
+  if (parts.length && jk) parts.push(`token figures are chars/4; for JSON a real tokenizer is expected between ${jk.low} and ${jk.high} chars/token (${esc(estimator.source)}${estimator.status && estimator.status !== 'calibrated' ? `, ${esc(estimator.status)}` : ''})`);
   note.hidden = !parts.length;
   note.innerHTML = parts.join('<br>');
 }

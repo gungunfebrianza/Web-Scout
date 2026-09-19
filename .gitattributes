@@ -4,3 +4,4 @@
 * text=auto eol=lf
 *.png binary
 *.db binary
+*.gz binary

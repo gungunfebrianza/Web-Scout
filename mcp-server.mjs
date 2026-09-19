@@ -34,11 +34,11 @@
 import fs from 'node:fs';
 import readline from 'node:readline';
 import {
-  request, BASE, netHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, collectNotes,
+  request, BASE, netHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, collectNotes, ensureFreshRelayForNewSession,
 } from './client.mjs';
 
 const SERVER_NAME = 'web-scout';
-const SERVER_VERSION = '0.20.0'; // bumped alongside docs/web-scout-roadmap.md's V32 entry
+const SERVER_VERSION = '0.21.0'; // bumped alongside docs/web-scout-roadmap.md's V33 entry
 
 // ---------- stdio JSON-RPC framing ----------
 //
@@ -87,19 +87,17 @@ function requireField(params, name) {
 const TOOLS = [
   {
     name: 'webscout_meta',
-    description: 'Read-only relay/session status and cross-session utilities.\n'
+    description: 'Relay/session status and cross-session utilities (read-only).\n'
       + 'Actions:\n'
-      + '  status {} - relay health, connected agents, active session, DB_VERSION drift\n'
-      + '  agents {} - list connected multi-tab agent names\n'
-      + '  analytics {} - cross-session Friction Analytics (recurring failure patterns across ALL sessions)\n'
+      + '  status {} - relay health, agents, active session, DB_VERSION drift\n'
+      + '  agents {} - connected multi-tab agent names\n'
+      + '  analytics {} - Friction Analytics: recurring failure patterns across ALL sessions\n'
       + '  search {q} - full-text search across every session\'s actions\n'
-      + '  db_version_check {agent?, dbJsPath?} - compares js/db.js\'s own DB_VERSION (on disk, default "js/db.js") '
-      + 'against the connected tab\'s LIVE IndexedDB version; on drift, also probes whether opening at the source '
-      + 'version is blocked RIGHT NOW (another tab holding a connection at the older version) and by what\n'
-      + '  dashboard_url {} - the realtime dashboard\'s URL (this does not open a browser itself)\n'
-      + '  ping {agent?} - fast liveness probe of the connected tab (does no DOM/IndexedDB work) -> {alive, ...}\n'
-      + '  token_report {sessionId?} - estimated tokens read per command type (+ byTarget/loops/redundantCalls/byMacro when sessionId is given); omit sessionId for the ALL-TIME report including the savings ledgers\n'
-      + '  debug_state {agent?} - this tool\'s own live in-page runtime state (WebSocket readyState, queue sizes, reconnect backoff)',
+      + '  db_version_check {agent?, dbJsPath?} - js/db.js\'s DB_VERSION (default "js/db.js") vs the tab\'s LIVE IndexedDB version; on drift also probes whether opening at the source version is blocked now, and by what\n'
+      + '  dashboard_url {} - the realtime dashboard URL (does not open a browser)\n'
+      + '  ping {agent?} - fast liveness probe (no DOM/IndexedDB work) -> {alive, ...}\n'
+      + '  token_report {sessionId?} - estimated tokens per command type (+ byTarget/loops/redundantCalls/byMacro with sessionId); without it the ALL-TIME report incl. savings ledgers\n'
+      + '  debug_state {agent?} - the in-page runtime\'s live state (WebSocket, queues, reconnect backoff)',
     actions: {
       status: () => request('GET', '/health', undefined, { autostart: false }),
       ping: (p) => request('POST', '/ping', { agent: p?.agent }),
@@ -114,28 +112,28 @@ const TOOLS = [
   },
   {
     name: 'webscout_session',
-    description: 'Session lifecycle and evidence. A session\'s goal/context MUST be declared '
-      + '(action "start") before any dom/idb/net/console/eval/page action below will be accepted '
-      + 'by the relay - there is exactly one "active" session at a time server-side.\n'
+    description: 'Session lifecycle and evidence. A goal MUST be declared (start) before any dom/idb/net/console/eval/page action is accepted; exactly one session is active at a time.\n'
       + 'Actions:\n'
-      + '  start {goal, context?, strictCrv?, strictCrvStores?, tags?, tokenBudget?, noBriefing?} - declare a session; becomes the active one. strictCrvStores scopes every strictCrv auto-snapshot to those stores - omitting it against a real-size db WILL time out. tokenBudget also arms a read guard: past 60% of it reads over ~3000 estimated tokens return their shape instead of the body (noGuard overrides), past 85% the limit drops to ~1000, and rows come back as {columns, rows}. The reply carries a `briefing` (stores + row counts, DB version, tab freshness) unless noBriefing:true\n'
-      + '  end {id?} - end a session (defaults to the active one)\n'
+      + '  start {goal, context?, strictCrv?, strictCrvStores?, tags?, tokenBudget?, noBriefing?, lean?} - declare a session; becomes the active one. strictCrvStores scopes every strictCrv auto-snapshot (omitting it on a real-size db WILL time out). tokenBudget arms a read guard: past 60% of it reads over ~3000 estimated tokens return their shape (noGuard overrides), past 85% ~1000, rows as {columns, rows}. lean makes read shaping the DEFAULT (tables; a pointer/delta for a repeat of a result you hold; the shape of a body over ~4000 tokens; noGuard gives the body). The reply carries a `briefing` (stores + counts, DB version, tab freshness) unless noBriefing\n'
+      + '  end {id?} - end a session (default: the active one)\n'
       + '  current {} - the active session, or {active:false}\n'
       + '  list {} - every session, newest first\n'
-      + '  show {id} - full session detail: actions, snapshots, diffs, qa, console, net\n'
-      + '  report {id, format?: "md"|"json", out?, verityPath?} - export a session report; out writes to a local file instead of returning content inline\n'
-      + '  cleanup {id, confirm?, sinceSnapshotId?, summary?} - list (or, with confirm:true, delete) rows this session\'s own writes left live; dry-run by default. summary:true collapses row lists down to a per-store count instead of full row bodies\n'
-      + '  assert {id, checks, agent?} - declarative regression checks against LIVE state (checks: one check object or an array)\n'
-      + '  ask {question, sessionId?} - ask the configured AI backend to explain a session\'s recorded evidence (optional feature - see README "Ask AI")\n'
-      + '  verity_import {sessionId, label?, path?, result?} - fold a Verity UI Relay scenario-result into this session\'s evidence trail (path: local file; result: inline JSON, one of the two required)',
+      + '  show {id} - full detail: actions, snapshots, diffs, qa, console, net\n'
+      + '  report {id, format?: "md"|"json", out?, verityPath?} - export a report; out writes a local file instead of returning it\n'
+      + '  cleanup {id, confirm?, sinceSnapshotId?, summary?} - list (confirm:true deletes) rows this session\'s writes left live; dry-run by default; summary: per-store counts instead of row bodies\n'
+      + '  assert {id, checks, agent?} - declarative checks against LIVE state (one check object or an array)\n'
+      + '  ask {question, sessionId?} - ask the configured AI backend about a session\'s evidence (optional, see README "Ask AI")\n'
+      + '  verity_import {sessionId, label?, path?, result?} - fold a Verity UI Relay scenario-result into the evidence trail (path: local file; result: inline JSON; one required)',
     actions: {
       start: async (p) => {
+        await ensureFreshRelayForNewSession();
         const session = await request('POST', '/sessions', {
           goal: requireField(p, 'goal'), context: p.context, strict_crv: !!p.strictCrv,
           strict_crv_stores: Array.isArray(p.strictCrvStores) ? p.strictCrvStores : undefined,
           tags: p.tags ?? [],
           token_budget: p.tokenBudget !== undefined ? Number(p.tokenBudget) : undefined,
           briefing: p.noBriefing ? false : undefined,
+          lean: p.lean || undefined,
           agent: p.agent,
         });
         // Folds the CLI's separate stderr-only warnOnDbVersionDrift() into
@@ -201,11 +199,11 @@ const TOOLS = [
     name: 'webscout_dom',
     description: 'DOM read/write against the active session\'s connected tab.\n'
       + 'Actions:\n'
-      + '  query {selector, full?, meta?, table?, ifChanged?, delta?, peek?, noGuard?} - outerHTML + basic attrs for the first match; outerHTML/text are truncated by default (full:true lifts that), meta:true returns only tag/id/class/matchCount; a whole-page selector (body/html/#app/#root/main/*) returns a depth-limited outline unless full:true\n'
+      + '  query {selector, full?, meta?, pick?, +shape} - outerHTML + basic attrs of the first match, truncated by default (full lifts that); meta: only tag/id/class/matchCount; pick: array of tag|id|class|text|html|value|attr:<name> returns just those parts; a whole-page selector (body/html/#app/#root/main/*) returns a depth-limited outline unless full\n'
       + '  click {selector, nth?} - dispatch a real click (native .click())\n'
       + '  fill {selector, value, nth?} - set a form field + dispatch input/change\n'
-      + '  rect {selector, table?, ifChanged?, delta?, peek?, noGuard?} - getBoundingClientRect\n'
-      + '  style {selector, properties?, table?, ifChanged?, delta?, peek?, noGuard?} - computed style (curated defaults, or a given array of property names)\n'
+      + '  rect {selector, +shape} - getBoundingClientRect\n'
+      + '  style {selector, properties?, +shape} - computed style (curated defaults, or a given array of property names)\n'
       + '  wait {selector, text?, timeoutMs?, changed?, stable?, stableCount?} - poll until selector matches (and, if text given, contains it), '
       + 'or - with changed:true - until its textContent differs from what it was at call time (use for a placeholder-swapped-'
       + 'for-a-real-result pattern, e.g. an AI-review button, instead of predicting the eventual text); stable:true waits until the match count holds for stableCount consecutive polls\n'
@@ -214,9 +212,9 @@ const TOOLS = [
       + '  settle {selector?, quietMs?, timeoutMs?} - wait until the DOM under selector (default document.body) has had no mutations for quietMs (default 300)\n'
       + '  screenshot {selector?, outPath?} - best-effort DOM rasterization; outPath saves a PNG locally, else returns dimensions only\n'
       + 'Every action takes optional `agent` (multi-tab target name).\n'
-      + 'READ SHAPING (query/rect/style here, and the read actions of react/idb/net/console): table:true returns rows as {columns, rows:[[...]]} (keys stated once); ifChanged:true answers {unchanged:true, sameAs} instead of the body when the identical read has not changed since you last received it; delta:true does that and, when it did change, returns only what changed; peek:true returns shape, size and one sample instead of the body (the full result stays cached, so the follow-up call needs no page round trip); noGuard:true overrides the token-budget guard. Use ifChanged/delta only while the earlier result is still in your context.',
+      + '+shape (every read action of dom/react/idb/net/console) = table?, ifChanged?, delta?, peek?, noGuard?: table: rows as {columns, rows:[[...]]}; ifChanged: {unchanged, sameAs} instead of an unchanged body; delta: that, or only what changed; peek: shape, size and a sample (full result stays cached); noGuard: bypass the token-budget guard and a lean session. Use ifChanged/delta only while the earlier result is still in your context.',
     actions: {
-      query: (p) => sendCmd('dom.query', { selector: requireField(p, 'selector'), full: !!p?.full, meta: !!p?.meta }, p?.agent, readOpts(p)),
+      query: (p) => sendCmd('dom.query', { selector: requireField(p, 'selector'), full: !!p?.full, meta: !!p?.meta, pick: p?.pick }, p?.agent, readOpts(p)),
       click: (p) => sendCmd('dom.click', { selector: requireField(p, 'selector'), nth: numOrUndef(p?.nth) }, p?.agent),
       fill: (p) => sendCmd('dom.fill', { selector: requireField(p, 'selector'), value: requireField(p, 'value'), nth: numOrUndef(p?.nth) }, p?.agent),
       rect: (p) => sendCmd('dom.rect', { selector: requireField(p, 'selector') }, p?.agent, readOpts(p)),
@@ -244,44 +242,47 @@ const TOOLS = [
     description: 'React fiber inspection (props/state/hooks), against the active session\'s connected tab. '
       + 'Works only on a React-managed DOM node (throws otherwise); no dependency on the React DevTools extension.\n'
       + 'Actions:\n'
-      + '  inspect {selector, nth?, table?, ifChanged?, delta?, peek?, noGuard?} - props (+ state for a class component, or positional hooks for a function component) '
-      + 'of the nearest enclosing component walking up from selector\n'
-      + '  tree {selector, nth?, maxDepth?, table?, ifChanged?, delta?, peek?, noGuard?} - ancestor chain of enclosing component names (default maxDepth 20), for orienting '
+      + '  inspect {selector, nth?, pick?, +shape} - props (+ state for a class component, or positional hooks for a function component) '
+      + 'of the nearest enclosing component walking up from selector; pick: "props"|"state"|"hooks" or a dotted path ("props.user.id", "hooks.0") returns just that\n'
+      + '  tree {selector, nth?, maxDepth?, +shape} - ancestor chain of enclosing component names (default maxDepth 20), for orienting '
       + 'before drilling into one level with inspect\n'
       + 'Both take optional `agent` (multi-tab target name).',
     actions: {
-      inspect: (p) => sendCmd('react.inspect', { selector: requireField(p, 'selector'), nth: numOrUndef(p?.nth) }, p?.agent, readOpts(p)),
+      inspect: (p) => sendCmd('react.inspect', { selector: requireField(p, 'selector'), nth: numOrUndef(p?.nth), pick: p?.pick }, p?.agent, readOpts(p)),
       tree: (p) => sendCmd('react.tree', { selector: requireField(p, 'selector'), nth: numOrUndef(p?.nth), maxDepth: numOrUndef(p?.maxDepth) }, p?.agent, readOpts(p)),
     },
   },
   {
     name: 'webscout_idb',
-    description: 'IndexedDB read/write plus persisted snapshot/diff/restore, against the active session\'s connected tab.\n'
+    description: 'IndexedDB read/write plus persisted snapshot/diff/verify/restore, against the active session\'s tab. Every action takes optional agent.\n'
       + 'Actions:\n'
-      + '  list {table?, ifChanged?, delta?, peek?, noGuard?} - object store names + a cheap per-store row count (store.count(), not a full dump) - check before an unscoped snapshot on a store you suspect is large\n'
-      + '  dump {store, where?, fields?, limit?, table?, ifChanged?, delta?, peek?, noGuard?} - rows (+ real keyPath) in one store. where (exact-equality field map), fields (array of field names to keep) and limit filter/project IN THE PAGE - use them on any large store instead of paying for every row\n'
-      + '  get {store, key, table?, ifChanged?, delta?, peek?, noGuard?} - single-key lookup (store.get), not a full-store scan - use when the store is large and you already know the key\n'
-      + '  snapshot {stores?, golden?, where?, since?} - since: a baseline snapshot id - takes a fresh snapshot scoped to that baseline\'s stores and returns ONLY what changed since it (far cheaper than a full snapshot). Otherwise: capture + PERSIST a DB snapshot -> {id, counts}; golden tags it as a named regression baseline. where (exact-equality field map) scopes EVERY included store to just the matching rows - partial by construction, the saved snapshot carries `where` back on every later read (diff/restore included)\n'
-      + '  diff {idA, idB} - compute + PERSIST the diff between two persisted snapshots\n'
-      + '  diff_golden {name, idB} - diff a named golden snapshot (from ANY session) against snapshot idB\n'
-      + '  restore {snapshotId?, golden?} - replay a persisted snapshot\'s rows back into IndexedDB (PUTs only, never deletes)\n'
-      + '  put {store, row, dryRun?} - write one row, keyed by the store\'s real keyPath; response includes the full stored row. dryRun:true validates the row\'s shape (keyPath/autoIncrement) WITHOUT writing -> {valid, problems}\n'
-      + '  put_many {store, rows, dryRun?} - batch write, ONE transaction; a single failed row (e.g. a unique-index conflict) is reported per-row in `failed`, not an all-or-nothing abort. dryRun validates every row\'s shape (readonly, no mutation) -> {results:[{index, valid, problems}], validCount, invalidCount}\n'
-      + '  patch {store, key, patch} - shallow-merge `patch` onto the EXISTING row at `key` and write it back; errors if no row exists there (never inserts a sparse row)\n'
-      + '  delete {store, key} - delete one row by key\n'
-      + '  delete_many {store, keys} - delete many rows by key, one transaction; response includes deletedKeys/failedKeys '
-      + '(not just counts), so a caller never has to re-dump/snapshot just to confirm which rows actually went away\n'
+      + '  list {stores?, nonEmpty?, +shape} - store names + cheap row counts (store.count(), not a dump) - check before an unscoped snapshot; stores: only those (unknown ones come back as missing), nonEmpty: skip empty stores\n'
+      + '  dump {store, where?, fields?, limit?, countOnly?, +shape} - rows + real keyPath. where (exact-equality field map), fields (names to keep) and limit filter/project IN THE PAGE - use them on any large store; countOnly: counts, no rows\n'
+      + '  get {store, key, fields?, +shape} - single-key lookup (store.get), not a scan; fields: keep only those keys\n'
+      + '  snapshot {stores?, golden?, where?, since?} - capture + PERSIST -> {id, counts}; golden names it a regression baseline; where scopes every store to matching rows (partial by construction). since: a baseline id - fresh snapshot of that baseline\'s stores returning ONLY what changed\n'
+      + '  verify {baseline?, stores?, expect?, allowExtra?, samples?, verbose?} - the verify step of baseline -> action -> verify in ONE call: re-snapshots the baseline\'s stores, diffs, checks expect, replies pass/fail plus rows only for what failed. expect: "notes:+1,tags:same" (+N added, +N+ at least N, -N removed, ~N changed, same) or a JSON array; a changed store not named is "unexpected" and fails unless allowExtra; no expect = nothing may change. baseline: snapshot id, golden name, or omitted for the session\'s newest snapshot\n'
+      + '  diff {idA, idB} - persisted diff of two snapshots\n'
+      + '  diff_golden {name, idB} - diff a named golden snapshot (any session) against idB\n'
+      + '  restore {snapshotId?, golden?} - PUT a snapshot\'s rows back (never deletes)\n'
+      + '  put {store, row, dryRun?} - write one row by the store\'s keyPath, returns the stored row; dryRun validates the shape without writing -> {valid, problems}\n'
+      + '  put_many {store, rows, dryRun?} - batch write in ONE transaction; a failed row (e.g. unique-index conflict) lands in `failed`, not an abort; dryRun validates every row\n'
+      + '  patch {store, key, patch} - shallow-merge onto the EXISTING row; errors if none (never inserts)\n'
+      + '  delete {store, key} - delete one row\n'
+      + '  delete_many {store, keys} - one transaction; returns deletedKeys/failedKeys\n'
       + '  clear {store} - delete every row in a store\n'
-      + '  wait {store, countGte?, timeoutMs?} - poll a store\'s row count until >= countGte or timeout (default 10000)\n'
-      + '(No "watch" action - it\'s an indefinite streaming poll with no clean single request/response mapping; use "wait" for a bounded check.)\n'
-      + 'Every action takes optional `agent` (multi-tab target name).',
+      + '  wait {store, countGte?, timeoutMs?} - poll the row count until >= countGte or timeout (default 10000)\n'
+      + '(No watch action: use wait for a bounded check.)',
     actions: {
-      list: (p) => sendCmd('idb.list', {}, p?.agent, readOpts(p)),
-      dump: (p) => sendCmd('idb.dump', { store: requireField(p, 'store'), where: p?.where, fields: p?.fields, limit: numOrUndef(p?.limit) }, p?.agent, readOpts(p)),
-      get: (p) => sendCmd('idb.get', { store: requireField(p, 'store'), key: requireField(p, 'key') }, p?.agent, readOpts(p)),
+      list: (p) => sendCmd('idb.list', { stores: p?.stores, nonEmpty: p?.nonEmpty || undefined }, p?.agent, readOpts(p)),
+      dump: (p) => sendCmd('idb.dump', { store: requireField(p, 'store'), where: p?.where, fields: p?.fields, limit: numOrUndef(p?.limit), countOnly: p?.countOnly || undefined }, p?.agent, readOpts(p)),
+      get: (p) => sendCmd('idb.get', { store: requireField(p, 'store'), key: requireField(p, 'key'), fields: p?.fields }, p?.agent, readOpts(p)),
       snapshot: (p) => (p?.since !== undefined
         ? snapshotSince({ baselineId: p.since, stores: p?.stores, golden: p?.golden, agent: p?.agent })
         : request('POST', '/state/snapshot', { agent: p?.agent, stores: p?.stores, golden: p?.golden, where: p?.where })),
+      verify: (p) => request('POST', '/state/verify', {
+        agent: p?.agent, baseline: p?.baseline, stores: p?.stores, expect: p?.expect, allowExtra: p?.allowExtra || undefined,
+        verbose: p?.verbose || undefined, samples: numOrUndef(p?.samples),
+      }),
       diff: (p) => request('POST', '/state/diff', { idA: Number(requireField(p, 'idA')), idB: Number(requireField(p, 'idB')) }),
       diff_golden: (p) => request('POST', '/state/diff', { golden: requireField(p, 'name'), idB: Number(requireField(p, 'idB')) }),
       restore: (p) => request('POST', '/state/restore', { agent: p?.agent, snapshotId: p?.snapshotId !== undefined ? Number(p.snapshotId) : undefined, golden: p?.golden }),
@@ -298,14 +299,14 @@ const TOOLS = [
     name: 'webscout_net',
     description: 'Captured network traffic.\n'
       + 'Actions:\n'
-      + '  log {limit?, urlContains?, table?, ifChanged?, delta?, peek?, noGuard?} - LIVE in-page ring buffer since last clear, capped at 500 entries, evicted by background traffic within minutes. urlContains keeps only entries whose URL contains it; limit keeps the N most recent - both filter IN THE PAGE (an unfiltered log is ~55KB)\n'
+      + '  log {limit?, urlContains?, failed?, fields?, +shape} - LIVE in-page ring buffer since last clear, capped at 500 entries, evicted by background traffic within minutes. urlContains, failed (errors and 4xx/5xx only), fields (keys to keep per entry) and limit (N most recent) all filter IN THE PAGE (an unfiltered log is ~55KB)\n'
       + '  wait {urlPattern, timeoutMs?, graceMs?} - attach-and-wait for a request whose URL contains urlPattern\n'
       + '  history {sessionId?, filter?, minDuration?, sort?: "duration", limit?} - the DURABLE, already-persisted net_entries table (defaults to the active session)\n'
       + '  clear {} - clear the live ring buffer\n'
       + '  capture {filter?, off?} - ADDS filter to the armed response-BODY capture set (fetch/XHR) for requests whose URL contains it - call again with a different filter to watch a second endpoint too; log/wait/history entries then gain a bodyPreview. off:true clears every armed filter (off by default)\n'
       + 'log/wait/clear/capture take optional `agent` (multi-tab target name); history does not (it queries by sessionId, not by live agent connection).',
     actions: {
-      log: (p) => sendCmd('net.log', { limit: numOrUndef(p?.limit), urlContains: p?.urlContains }, p?.agent, readOpts(p)),
+      log: (p) => sendCmd('net.log', { limit: numOrUndef(p?.limit), urlContains: p?.urlContains, fields: p?.fields, failed: p?.failed || undefined }, p?.agent, readOpts(p)),
       wait: (p) => sendCmd('net.wait', { urlPattern: requireField(p, 'urlPattern'), timeoutMs: numOrUndef(p?.timeoutMs), graceMs: numOrUndef(p?.graceMs) }, p?.agent),
       history: (p) => netHistory({ sessionId: p?.sessionId, filter: p?.filter, minDuration: p?.minDuration, sort: p?.sort, limit: p?.limit }),
       clear: (p) => sendCmd('net.clear', {}, p?.agent),
@@ -316,26 +317,22 @@ const TOOLS = [
     name: 'webscout_console',
     description: 'Captured console.error/warn + uncaught error entries.\n'
       + 'Actions:\n'
-      + '  log {limit?, table?, ifChanged?, delta?, peek?, noGuard?} - the captured entries; limit keeps the N most recent\n'
+      + '  log {limit?, level?, contains?, fields?, +shape} - the captured entries; level (error|warn|uncaught|unhandledrejection, comma list ok) and contains filter, fields keeps only those keys per entry (drop stack), limit keeps the N most recent\n'
       + '  wait {substr, timeoutMs?, graceMs?} - attach-and-wait for an entry whose message contains substr, instead of a sleep+poll loop\n'
       + '  clear {}\n'
       + 'All take optional `agent` (multi-tab target name).',
     actions: {
-      log: (p) => sendCmd('console.log', { limit: numOrUndef(p?.limit) }, p?.agent, readOpts(p)),
+      log: (p) => sendCmd('console.log', { limit: numOrUndef(p?.limit), level: p?.level, contains: p?.contains, fields: p?.fields }, p?.agent, readOpts(p)),
       wait: (p) => sendCmd('console.wait', { substr: requireField(p, 'substr'), timeoutMs: numOrUndef(p?.timeoutMs), graceMs: numOrUndef(p?.graceMs) }, p?.agent),
       clear: (p) => sendCmd('console.clear', {}, p?.agent),
     },
   },
   {
     name: 'webscout_page',
-    description: 'Whole-page operations.\n'
+    description: 'Whole-page operations. Both take optional agent.\n'
       + 'Actions:\n'
-      + '  reload {hard?, waitReconnect?, timeoutMs?} - location.reload(); hard also unregisters every Service Worker '
-      + 'and clears Cache Storage first (use for a stale-while-revalidate SW after editing a file). Both reply BEFORE '
-      + 'the real navigation fires - waitReconnect:true blocks until the agent is seen to disconnect then reconnect '
-      + '(default timeout 15000ms) instead of the caller guessing a sleep and retrying on "no agent connected"\n'
-      + '  fresh {localPath, urlPath?} - fetches localPath THROUGH THE PAGE (its real cache/SW stack) and compares its hash to the on-disk file - "is the tab actually running what\'s on disk"\n'
-      + 'Both take optional `agent` (multi-tab target name).',
+      + '  reload {hard?, waitReconnect?, timeoutMs?} - location.reload(); hard also unregisters Service Workers and clears Cache Storage first (for a stale-while-revalidate SW). Replies BEFORE the navigation fires; waitReconnect blocks until the agent disconnects and reconnects (default 15000ms)\n'
+      + '  fresh {localPath, urlPath?} - fetches localPath THROUGH THE PAGE (its real cache/SW stack) and compares its hash to the file on disk: "is the tab running what is on disk"',
     actions: {
       reload: async (p) => {
         const result = await sendCmd(p?.hard ? 'page.hardReload' : 'page.reload', {}, p?.agent);
@@ -354,14 +351,14 @@ const TOOLS = [
   },
   {
     name: 'webscout_macro',
-    description: 'Named, replayable sequences of a session\'s own recorded actions.\n'
+    description: 'Named, replayable sequences of a session\'s recorded actions.\n'
       + 'Actions:\n'
-      + '  record {name, sessionId, all?} - save that session\'s own replayable actions (dom.click/fill/wait, idb.put/delete/deleteMany/clear/wait, page.reload, eval) as a macro\n'
-      + '  list {} - id, name, step count, source session for every saved macro\n'
-      + '  show {id} - full macro detail, including every step\n'
-      + '  run {id, continueOnError?, fromStep?, confirm?, full?} - full:true returns every step\'s complete result instead of the compact summary. Replay against the CURRENTLY active session; refused (409) if that session\'s goal looks unrelated to the macro\'s own recorded-from session (a cross-context replay guard) unless confirm:true\n'
+      + '  record {name, sessionId, all?} - save that session\'s replayable actions (dom.click/fill/wait, idb.put/delete/deleteMany/clear/wait, page.reload, eval) as a macro\n'
+      + '  list {} - id, name, step count, source session per macro\n'
+      + '  show {id} - full detail incl. every step\n'
+      + '  run {id, continueOnError?, fromStep?, confirm?, full?} - replay against the ACTIVE session (409 if its goal looks unrelated to the macro\'s source session unless confirm:true); full:true returns every step\'s complete result instead of the compact summary\n'
       + '  delete {id}\n'
-      + '  export_verity {id, outPath?} - best-effort skeleton Verity scenario JSON from a macro\'s dom.click/dom.wait steps (selectors left as TODO)',
+      + '  export_verity {id, outPath?} - skeleton Verity scenario JSON from dom.click/dom.wait steps (selectors left as TODO)',
     actions: {
       record: (p) => request('POST', '/macros', { name: requireField(p, 'name'), sessionId: Number(requireField(p, 'sessionId')), all: !!p.all }),
       list: () => request('GET', '/macros'),
@@ -437,8 +434,8 @@ function toolInputSchema(tool) {
   return {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: Object.keys(tool.actions), description: 'see the tool description for each action\'s exact params' },
-      params: { type: 'object', description: 'action-specific fields - see the tool description', additionalProperties: true },
+      action: { type: 'string', enum: Object.keys(tool.actions), description: 'see the tool description' },
+      params: { type: 'object', description: 'fields per the tool description', additionalProperties: true },
     },
     required: ['action'],
     additionalProperties: false,

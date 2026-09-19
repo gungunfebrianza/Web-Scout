@@ -12,9 +12,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import {
-  request, BASE, HOST, PORT, netHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince,
+  request, BASE, HOST, PORT, netHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, ensureFreshRelayForNewSession,
 } from './client.mjs';
-import { validateArgs, findMsysMangledArgs } from './cli-spec.mjs';
+import { validateArgs, findMsysMangledArgs, findSpec } from './cli-spec.mjs';
+import { parseUsage, helpTopic, helpMissing } from './help.mjs';
 import { resolveRelayPid, stopRelay, startRelay, restartRelay, RELAY_SOURCE_FILES } from './relay-control.mjs';
 
 // Set once near the top of main() from a `--agent <name>` flag found
@@ -67,8 +68,16 @@ function extractBooleanFlag(args, name) {
 // The help text lives in usage.txt, not a template literal here - a single
 // stray backtick or ${ in ~600 lines of prose used to be a syntax-error trap
 // every time a new flag was documented.
-function usage() {
-  console.log(fs.readFileSync(new URL('./usage.txt', import.meta.url), 'utf8').trimEnd());
+// Printing all of it costs ~16k tokens, so by default a caller gets the index, one group or one
+// command (help.mjs); "help all" prints the whole file. Returns false when nothing matched.
+function usage(topic, sub) {
+  const text = fs.readFileSync(new URL('./usage.txt', import.meta.url), 'utf8').trimEnd();
+  if (topic === 'all') { console.log(text); return true; }
+  const parsed = parseUsage(text);
+  const out = helpTopic(parsed, topic, sub);
+  if (out === null) { console.error(helpMissing(parsed, topic, sub)); return false; }
+  console.log(out);
+  return true;
 }
 
 // Best-effort startup health check: compares the LIVE connected tab's real
@@ -140,7 +149,9 @@ async function handleSession(sub, rawArgs) {
     let autoSnapshot;
     let tokenBudgetValue;
     let noBriefing;
+    let leanValue;
     ({ args, value: noBriefing } = extractBooleanFlag(args, '--no-briefing'));
+    ({ args, value: leanValue } = extractBooleanFlag(args, '--lean'));
     ({ args, value: tagsValue } = extractFlag(args, '--tags'));
     ({ args, value: strictCrv } = extractBooleanFlag(args, '--strict-crv'));
     ({ args, value: storesValue } = extractFlag(args, '--stores'));
@@ -149,7 +160,8 @@ async function handleSession(sub, rawArgs) {
     ({ args, value: agentFlag } = extractFlag(args, '--agent'));
     const tags = tagsValue ? tagsValue.split(',').map((t) => t.trim()).filter(Boolean) : [];
     const strictCrvStores = storesValue ? storesValue.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
-    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, tags, token_budget: tokenBudgetValue !== undefined ? Number(tokenBudgetValue) : undefined, briefing: noBriefing ? false : undefined, agent: agentFlag });
+    await ensureFreshRelayForNewSession();
+    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, tags, token_budget: tokenBudgetValue !== undefined ? Number(tokenBudgetValue) : undefined, briefing: noBriefing ? false : undefined, lean: leanValue || undefined, agent: agentFlag });
     if (strictCrv && !storesValue) {
       console.error('WARNING: --strict-crv with no --stores auto-snapshots the WHOLE db on every dom.click/fill/eval/idb.put/idb.delete - this WILL time out (60s) against a real-size production IndexedDB. Pass --stores a,b,c to scope it.');
     }
@@ -607,6 +619,19 @@ async function main() {
     return;
   }
 
+  if (command === 'help') {
+    process.exitCode = usage(rest[0], rest[1]) ? 0 : 1;
+    return;
+  }
+  // "<command> --help" answers with that command's own entry, not the whole file. eval is exempt:
+  // its expression may legitimately contain --help.
+  if (command !== 'eval' && (rest.includes('--help') || rest.includes('-h'))) {
+    const bare = rest.filter((a) => a !== '--help' && a !== '-h');
+    const spec = findSpec(command, bare);
+    usage(command, spec ? spec.cmd.split(' ')[1] : undefined);
+    return;
+  }
+
   const argError = validateArgs(command, rest);
   if (argError) {
     console.error(`web-scout cli error: ${argError}`);
@@ -788,6 +813,30 @@ async function main() {
   ({ args, value: sortValue } = extractFlag(args, '--sort'));
   ({ args, value: limitValue } = extractFlag(args, '--limit'));
   ({ args, value: sessionValue } = extractFlag(args, '--session'));
+  // read projection flags: applied IN THE PAGE (inject.js), so what they cut never crosses the wire
+  let pickValue;
+  let countOnlyValue;
+  let nonEmptyValue;
+  let failedValue;
+  let levelValue;
+  let containsValue;
+  ({ args, value: pickValue } = extractFlag(args, '--pick'));
+  ({ args, value: countOnlyValue } = extractBooleanFlag(args, '--count'));
+  ({ args, value: nonEmptyValue } = extractBooleanFlag(args, '--non-empty'));
+  ({ args, value: failedValue } = extractBooleanFlag(args, '--failed'));
+  ({ args, value: levelValue } = extractFlag(args, '--level'));
+  ({ args, value: containsValue } = extractFlag(args, '--contains'));
+  const csv = (v) => (v ? String(v).split(',').map((s) => s.trim()).filter(Boolean) : undefined);
+  let expectValue;
+  let expectFileValue;
+  let samplesValue;
+  let allowExtraValue;
+  let verboseValue;
+  ({ args, value: expectValue } = extractFlag(args, '--expect'));
+  ({ args, value: expectFileValue } = extractFlag(args, '--expect-file'));
+  ({ args, value: samplesValue } = extractFlag(args, '--samples'));
+  ({ args, value: allowExtraValue } = extractBooleanFlag(args, '--allow-extra'));
+  ({ args, value: verboseValue } = extractBooleanFlag(args, '--verbose'));
 
   if (command === 'page' && args[0] === 'reload') {
     let a = args.slice(1);
@@ -907,7 +956,7 @@ async function main() {
     dom: {
       // A whole-page selector (body/html/#app/...) is answered with an outline
       // by inject.js itself, so the CLI no longer needs a pre-call warning.
-      query: () => send('dom.query', { selector: domSelector, full: fullValue, meta: metaValue }),
+      query: () => send('dom.query', { selector: domSelector, full: fullValue, meta: metaValue, pick: csv(pickValue) }),
       click: () => send('dom.click', { selector: domSelector, nth: nthValue !== undefined ? Number(nthValue) : undefined }),
       fill: () => send('dom.fill', { selector: domSelector, value: subArgs[1], nth: nthValue !== undefined ? Number(nthValue) : undefined }),
       rect: () => send('dom.rect', { selector: domSelector }),
@@ -935,14 +984,14 @@ async function main() {
       // props (+ state for a class component, or positional hooks for a
       // function component) of the nearest enclosing React component,
       // walking up from domSelector - see inject.js's findComponentFiber.
-      inspect: () => send('react.inspect', { selector: domSelector, nth: nthValue !== undefined ? Number(nthValue) : undefined }),
+      inspect: () => send('react.inspect', { selector: domSelector, nth: nthValue !== undefined ? Number(nthValue) : undefined, pick: csv(pickValue) }),
       // Ancestor chain of enclosing component names only (not full
       // props/state per level) - orient first, then `react inspect` a more
       // specific selector.
       tree: () => send('react.tree', { selector: domSelector, nth: nthValue !== undefined ? Number(nthValue) : undefined, maxDepth: subArgs[1] !== undefined ? Number(subArgs[1]) : undefined }),
     },
     idb: {
-      list: () => send('idb.list', {}),
+      list: () => send('idb.list', { stores: csv(storesValue), nonEmpty: nonEmptyValue || undefined }),
       // where/fields/limit are now filtered/projected IN-PAGE (inject.js) -
       // this dispatches them as params instead of re-filtering a full dump
       // client-side, so a scoped dump of a huge store no longer pays full
@@ -955,7 +1004,7 @@ async function main() {
       // already scoped the call (no --where/--fields/--limit).
       dump: async () => {
         const store = subArgs[0];
-        if (store && !whereValue && !fieldsValue && !limitValue) {
+        if (store && !whereValue && !fieldsValue && !limitValue && !countOnlyValue) {
           try {
             const report = await request('GET', '/token-report');
             const hist = (report.byTarget || []).find((t) => t.type === 'idb.dump' && t.target === store);
@@ -969,9 +1018,10 @@ async function main() {
           where: whereValue ? JSON.parse(whereValue) : undefined,
           fields: fieldsValue ? fieldsValue.split(',').map((f) => f.trim()) : undefined,
           limit: limitValue !== undefined ? Number(limitValue) : undefined,
+          countOnly: countOnlyValue || undefined,
         });
       },
-      get: () => send('idb.get', { store: subArgs[0], key: JSON.parse(subArgs[1]) }),
+      get: () => send('idb.get', { store: subArgs[0], key: JSON.parse(subArgs[1]), fields: csv(fieldsValue) }),
       snapshot: async () => {
         const stores = storesValue ? storesValue.split(',').map((s) => s.trim()) : undefined;
         // --since <snapshotId>: sugar for "take a fresh snapshot scoped to
@@ -1005,6 +1055,14 @@ async function main() {
       },
       diff: () => request('POST', '/state/diff', { idA: Number(subArgs[0]), idB: Number(subArgs[1]) }),
       'diff-golden': () => request('POST', '/state/diff', { golden: subArgs[0], idB: Number(subArgs[1]) }),
+      // The verify half of baseline -> action -> verify in one call: re-snapshot the
+      // baseline's stores, diff, check --expect, print pass/fail plus rows only for
+      // what failed. Baseline = an id, a golden name, or the session's newest snapshot.
+      verify: () => request('POST', '/state/verify', {
+        agent: agentFlag, baseline: subArgs[0], stores: storesValue ? storesValue.split(',').map((s) => s.trim()) : undefined,
+        expect: expectFileValue ? fs.readFileSync(expectFileValue, 'utf8') : expectValue,
+        allowExtra: allowExtraValue || undefined, verbose: verboseValue || undefined, samples: samplesValue !== undefined ? Number(samplesValue) : undefined,
+      }),
       restore: () => request('POST', '/state/restore', { agent: agentFlag, snapshotId: subArgs[0] ? Number(subArgs[0]) : undefined, golden: goldenValue }),
       put: () => send('idb.put', { store: subArgs[0], row: JSON.parse(subArgs[1]), dryRun: dryRunValue || undefined }),
       // Batch write, one transaction - a single failed row (e.g. a unique-
@@ -1034,7 +1092,10 @@ async function main() {
       // 500-entry ring buffer never crosses the wire when you wanted three.
       // Before this, `net log --limit 3` silently ignored the flag and printed
       // all 236 entries (~55KB).
-      log: () => send('net.log', { limit: limitValue !== undefined ? Number(limitValue) : undefined, urlContains: extractFlag(rest, '--url').value }),
+      log: () => send('net.log', {
+        limit: limitValue !== undefined ? Number(limitValue) : undefined, urlContains: extractFlag(rest, '--url').value,
+        fields: csv(fieldsValue), failed: failedValue || undefined,
+      }),
       clear: () => send('net.clear', {}),
       // Attach to a specific request by URL substring instead of a
       // blind sleep+`net log`-poll loop - resolves as soon as a matching
@@ -1063,7 +1124,7 @@ async function main() {
       capture: () => send('net.setBodyCapture', offValue ? { off: true } : { filter: subArgs[0] }),
     },
     console: {
-      log: () => send('console.log', { limit: limitValue !== undefined ? Number(limitValue) : undefined }),
+      log: () => send('console.log', { limit: limitValue !== undefined ? Number(limitValue) : undefined, level: levelValue, contains: containsValue, fields: csv(fieldsValue) }),
       clear: () => send('console.clear', {}),
       // Attach-and-wait for a console entry containing a substring, instead
       // of a blind sleep+"console log"-poll loop - the same fix, same
@@ -1094,7 +1155,7 @@ async function main() {
   const fn = group[sub];
   if (!fn) {
     console.error(`Unknown '${command} ${sub || ''}'.\n`);
-    usage();
+    usage(command);
     process.exitCode = 1;
     return;
   }

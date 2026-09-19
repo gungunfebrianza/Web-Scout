@@ -42,16 +42,17 @@ import {
 } from './command-registry.mjs';
 import { RELAY_SOURCE_FILES, writePidfile, removePidfile, readPidfile, pidAlive, recordRelayEvent, readRelayEvents, summarizeRelayEvents } from './relay-control.mjs';
 import { currentInjectBuild } from './build-id.mjs';
-import { createReadPipeline, readTargetKey, SCOPING_PARAM_KEYS, FOLLOW_UP_WINDOW_MS, budgetLevel, BUDGET_TIGHTEN_PCT, BUDGET_STRICT_PCT } from './read-pipeline.mjs';
+import { createReadPipeline, readTargetKey, SCOPING_PARAM_KEYS, FOLLOW_UP_WINDOW_MS, budgetLevel, BUDGET_TIGHTEN_PCT, BUDGET_STRICT_PCT, LEAN_GUARD_TOKENS } from './read-pipeline.mjs';
 import { sizeOf } from './read-shape.mjs';
 import { estimatorInfo, baselineBand } from './token-estimate.mjs';
+import { parseExpect, buildVerifyReport } from './crv-verify.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
 // Bumped alongside docs/web-scout-roadmap.md's latest "## VN" entry - purely
 // informational (the dashboard's About panel), never read by any behavior.
-const WEBSCOUT_VERSION = '0.19.0'; // bumped alongside docs/web-scout-roadmap.md's V32 entry
+const WEBSCOUT_VERSION = '0.20.0'; // bumped alongside docs/web-scout-roadmap.md's V33 entry
 const COMMAND_TIMEOUT_MS = 15000; // interactive dom/net/eval round trips
 const SNAPSHOT_TIMEOUT_MS = 60000; // bulk idb.snapshot reads can be large
 // Short, independent budgets for two round trips that must never inherit
@@ -100,6 +101,8 @@ const readResultCache = new Map(); // sessionId -> Map(`${agent}::${type}::${JSO
 // response wrapper can add exactly the right session's share back in.
 const sessionCacheHitBytes = new Map(); // sessionId -> bytes
 const lastReportedSessionTokens = new Map(); // sessionId -> last running total sent in x-webscout-session-tokens
+const NOTABLE_CALL_TOKENS = 1000;
+const tokenMilestone = (tokens) => (tokens < 5000 ? 0 : Math.floor(Math.log2(tokens / 5000)) + 1);
 
 function getMutationCounter(sessionId) {
   return sessionMutationCounters.get(sessionId) || 0;
@@ -134,18 +137,15 @@ function noteCacheHit(sessionId, bytes, deliveredBytes = bytes) {
   t.cacheBytes += bytes;
 }
 
-// A logged action always records the FULL result; when a shaped reply (peek,
-// table, delta) sent the caller less, the difference is taken off the session's
-// running total so the header and the token budget follow what was delivered.
-const sessionDeliveryAdjust = new Map(); // sessionId -> bytes (<= 0)
-function noteWithheld(sessionId, bytes) {
-  if (bytes > 0) sessionDeliveryAdjust.set(sessionId, (sessionDeliveryAdjust.get(sessionId) || 0) - bytes);
-}
-
-// The session's running estimated-token total, as the client prints it: logged
-// results + cache-hit deliveries - what shaping withheld.
+// A logged action always records the FULL result; when a shaped reply (peek, table,
+// delta, pointer) sent the caller less, the action row also records what was
+// delivered (dbApi.setActionDelivered), and every token total reads that number.
+// Cache hits have no action row, so their delivered bytes are tallied here.
+//
+// The session's running estimated-token total, as the client prints it: what the
+// logged actions delivered + what cache hits delivered.
 function sessionRunningTokens(sessionId) {
-  const extraBytes = (sessionCacheHitBytes.get(sessionId) || 0) + (sessionDeliveryAdjust.get(sessionId) || 0);
+  const extraBytes = sessionCacheHitBytes.get(sessionId) || 0;
   return Math.max(0, dbApi.getSessionTokensSoFar(sessionId) + Math.round(extraBytes / dbApi.CHARS_PER_TOKEN_ESTIMATE));
 }
 
@@ -1253,6 +1253,7 @@ const routes = [
         strictCrvStores: Array.isArray(body.strict_crv_stores) ? body.strict_crv_stores : undefined,
         tags: Array.isArray(body.tags) ? body.tags : undefined,
         tokenBudget: Number.isFinite(body.token_budget) ? Number(body.token_budget) : undefined,
+        lean: !!body.lean,
       });
       broadcastUpdate('session', null);
       openDashboardInBrowser();
@@ -1260,7 +1261,10 @@ const routes = [
       const budget = session.token_budget
         ? { tokens: session.token_budget, tightenAtTokens: Math.round(session.token_budget * BUDGET_TIGHTEN_PCT / 100), strictAtTokens: Math.round(session.token_budget * BUDGET_STRICT_PCT / 100), note: 'past the first mark, reads over ~3000 tokens return their shape (--no-guard forces the body) and rows come back as {columns, rows}; past the second the guard drops to ~1000 tokens' }
         : undefined;
-      return { ...session, ...(briefing ? { briefing } : {}), ...(budget ? { budget } : {}) };
+      const leanNote = session.lean
+        ? { note: `lean session: reads come back as tables, a repeat of a result you already hold as a one-line pointer (or only what changed), and a body over ~${LEAN_GUARD_TOKENS} tokens as its shape (repeat the call to get it, from cache). --no-guard on a call gives the body as it is. Only rely on "unchanged"/deltas while the earlier result is still in your context.` }
+        : undefined;
+      return { ...session, ...(briefing ? { briefing } : {}), ...(budget ? { budget } : {}), ...(leanNote ? { leanProfile: leanNote } : {}) };
     },
   },
   {
@@ -1283,7 +1287,6 @@ const routes = [
       sessionMutationCounters.delete(sessionId);
       sessionCacheAwarenessNudged.delete(sessionId);
       sessionCacheHitBytes.delete(sessionId);
-      sessionDeliveryAdjust.delete(sessionId);
       readPipeline.endSession(sessionId);
       lastReportedSessionTokens.delete(sessionId);
       try { dbApi.snapshotSavings('storage', dbApi.getTokenSavingsReport().byKind.storage.bytesSaved); } catch { /* the receipt never depends on it */ }
@@ -1863,11 +1866,11 @@ const routes = [
       // decided by read-pipeline.mjs; the FULL result is what gets logged and cached.
       const deliverRead = ({ full, hit, entry, actionId }) => {
         const shaped = readPipeline.shape({
-          sessionId: session.id, type, agentName, params, cacheKey, full, hit, entry, actionId, opts: body.opts, budget,
+          sessionId: session.id, type, agentName, params, cacheKey, full, hit, entry, actionId, opts: body.opts, budget, lean: session.lean,
           envGuardTokens: Number.isFinite(READ_GUARD_ENV_TOKENS) && READ_GUARD_ENV_TOKENS > 0 ? READ_GUARD_ENV_TOKENS : null,
         });
         if (hit) noteCacheHit(session.id, sizeOf(full), shaped.outBytes);
-        else noteWithheld(session.id, shaped.fullBytes - shaped.outBytes);
+        else if (shaped.outBytes < shaped.fullBytes) dbApi.setActionDelivered(actionId, shaped.outBytes);
         if (shaped.mode !== 'full') { const t = tally(session.id); t.shapedCalls += 1; t.shapedBytes += shaped.spared; }
         const budgetNote = readPipeline.budgetNote(session.id, budget);
         if (budgetNote) res.setHeader('x-webscout-budget', budgetNote);
@@ -2002,6 +2005,52 @@ const routes = [
         return { ...saved, diff: undefined, fromCache: true, cachedFromDiffId: cached.id, note: `identical content to diff #${cached.id} - full diff omitted here (nothing changed since), not recomputed or re-sent. Fetch diff #${cached.id} (GET /diffs) for full detail if genuinely needed.` };
       }
       return saved;
+    },
+  },
+
+  {
+    // The verify half of baseline -> action -> verify in ONE call: re-snapshot the
+    // baseline's own stores, diff, check the expectations (crv-verify.mjs), and
+    // answer in a few lines - pass/fail, what else changed, and rows only for the
+    // parts that failed. The fresh snapshot and the full diff are persisted like
+    // any other, so the evidence trail is as complete as with snapshot + diff by hand.
+    // Baseline: an id, a golden name, or (default) the session's newest snapshot,
+    // so consecutive verifies each baseline the step before.
+    method: 'POST',
+    pattern: /^\/state\/verify$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      const agentName = body.agent || DEFAULT_AGENT;
+      const session = requireActiveSession();
+      let expectations;
+      try { expectations = parseExpect(body.expect); } catch (err) { throw new HttpError(400, err.message); }
+      let baseline;
+      if (body.baseline !== undefined && body.baseline !== null && String(body.baseline) !== '') {
+        const ref = String(body.baseline);
+        baseline = /^\d+$/.test(ref) ? dbApi.getSnapshot(Number(ref)) : dbApi.getGoldenSnapshot(ref);
+      } else {
+        const newest = dbApi.listSnapshots(session.id)[0];
+        if (!newest) throw new HttpError(409, 'no baseline to verify against - take one first ("idb snapshot --stores a,b"), or pass a snapshot id / golden name as the baseline');
+        baseline = dbApi.getSnapshot(newest.id);
+      }
+      const stores = Array.isArray(body.stores) && body.stores.length ? body.stores : Object.keys(baseline.stores || {});
+      const where = baseline.where && typeof baseline.where === 'object' ? baseline.where : undefined;
+      const { result: fresh, actionId: freshActionId } = await withLoggedAction(session.id, 'idb.snapshot', { stores, where, for: 'idb.verify', baselineId: baseline.id }, () => dispatchCommand('idb.snapshot', { stores, where }, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
+      const freshSnap = dbApi.saveSnapshot({ sessionId: session.id, actionId: freshActionId, stores: fresh.stores, agentName, where });
+      const baselineStores = Object.fromEntries(Object.entries(baseline.stores || {}).filter(([name]) => stores.includes(name)));
+      const diff = computeDiff(baselineStores, fresh.stores);
+      const summary = summarizeDiff(diff);
+      const { result: report } = await withLoggedAction(session.id, 'idb.verify', { baselineId: baseline.id, afterId: freshSnap.id, expect: body.expect ?? null, allowExtra: !!body.allowExtra }, async () => {
+        const savedDiff = dbApi.saveDiff({ sessionId: session.id, actionId: null, fromId: baseline.id, toId: freshSnap.id, summary, diff });
+        return buildVerifyReport({
+          baselineId: baseline.id, afterId: freshSnap.id, diffId: savedDiff.id, summary, diff, expectations,
+          allowExtra: !!body.allowExtra, samples: Number.isFinite(Number(body.samples)) && Number(body.samples) > 0 ? Math.min(Number(body.samples), 50) : 3, verbose: !!body.verbose,
+        });
+      }, agentName);
+      broadcastUpdate('action', session.id);
+      broadcastUpdate('snapshot', session.id);
+      broadcastUpdate('diff', session.id);
+      return report;
     },
   },
 
@@ -2210,7 +2259,13 @@ const server = http.createServer(async (req, res) => {
         // mid-session has no baseline, so it sends nothing rather than
         // reporting the whole prior total as one call's cost).
         const prevTotal = lastReportedSessionTokens.get(activeSession.id);
-        if (prevTotal !== undefined) res.setHeader('x-webscout-call-tokens', String(Math.max(0, totalTokens - prevTotal)));
+        if (prevTotal !== undefined) {
+          const callTokens = Math.max(0, totalTokens - prevTotal);
+          res.setHeader('x-webscout-call-tokens', String(callTokens));
+          // A running total after every call is noise: only a call that added a lot, or a total
+          // that crossed its next doubling (5k, 10k, 20k, ...), is worth the caller's tokens.
+          if (callTokens < NOTABLE_CALL_TOKENS && tokenMilestone(totalTokens) === tokenMilestone(prevTotal)) res.setHeader('x-webscout-tokens-quiet', '1');
+        }
         lastReportedSessionTokens.set(activeSession.id, totalTokens);
       }
     } catch { /* best-effort only */ }

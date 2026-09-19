@@ -170,6 +170,86 @@ test('scoped reads report what they left out, and the ledger counts it', { skip 
   assert.ok(trend.at(-1).avoidedBytes >= afterWhere - before);
 });
 
+test('dom.query pick returns only the named parts, and says what it left out', { skip }, async () => {
+  await page.evaluate(`document.getElementById('content').insertAdjacentHTML('beforeend', '<a id="lnk" href="/somewhere" class="nav big">link text <b>' + 'y'.repeat(900) + '</b></a>')`);
+  const before = (await ledger('scopedReads')).bytesSaved;
+  const picked = (await command('dom.query', { selector: '#lnk', pick: ['attr:href', 'tag'] })).json.result;
+  assert.deepEqual(picked, { found: true, matchCount: 1, tag: 'A', attrs: { href: '/somewhere' } });
+  assert.ok((await ledger('scopedReads')).bytesSaved > before, 'the markup a pick left out counts as avoided');
+  const text = (await command('dom.query', { selector: '#lnk', pick: ['text', 'class'] })).json.result;
+  assert.match(text.text, /^link text /);
+  assert.equal(text.className, 'nav big');
+  assert.equal(text.outerHTML, undefined);
+  const bad = await command('dom.query', { selector: '#lnk', pick: ['nope'] });
+  assert.equal(bad.json.ok, false);
+  assert.match(bad.json.error, /unknown item 'nope'/);
+});
+
+test('idb reads can be narrowed to counts, named stores, non-empty stores and a few fields', { skip }, async () => {
+  const counted = (await command('idb.dump', { store: 'kv', countOnly: true })).json.result;
+  assert.equal(counted.countOnly, true);
+  assert.deepEqual(counted.rows, []);
+  assert.equal(counted.totalCount, 2);
+  assert.equal(counted.matchedCount, 2);
+
+  await page.evaluate(`new Promise((resolve, reject) => {
+    const req = indexedDB.open('AgentCapitalOS');
+    req.onsuccess = () => { const db = req.result; const v = db.version + 1; db.close();
+      const up = indexedDB.open('AgentCapitalOS', v);
+      up.onupgradeneeded = () => { up.result.createObjectStore('empty_one', { keyPath: 'id' }); };
+      up.onsuccess = () => { const tx = up.result.transaction('kv', 'readwrite'); tx.objectStore('kv').put({ id: 9, title: 'nine', body: 'b'.repeat(500), tag: 't' }); tx.oncomplete = () => { up.result.close(); resolve(true); }; };
+      up.onerror = () => reject(up.error); };
+    req.onerror = () => reject(req.error);
+  })`);
+  const all = (await command('idb.list', {})).json.result;
+  assert.ok(all.stores.includes('empty_one') && all.stores.includes('kv'));
+  const nonEmpty = (await command('idb.list', { nonEmpty: true })).json.result;
+  assert.ok(!nonEmpty.stores.includes('empty_one'));
+  assert.equal(nonEmpty.emptyStores, 1);
+  const named = (await command('idb.list', { stores: ['kv', 'ghost'] })).json.result;
+  assert.deepEqual(named.stores, ['kv']);
+  assert.deepEqual(named.missing, ['ghost']);
+
+  const row = (await command('idb.get', { store: 'kv', key: 9, fields: ['title', 'tag'] })).json.result;
+  assert.deepEqual(row.row, { title: 'nine', tag: 't' });
+  assert.deepEqual(row.fields, ['title', 'tag']);
+  const whole = (await command('idb.get', { store: 'kv', key: 9 })).json.result;
+  assert.equal(whole.row.body.length, 500);
+});
+
+test('net.log and console.log filter by failure, level, text and field in the page', { skip }, async () => {
+  await page.evaluate(`fetch('http://127.0.0.1:1/unreachable').catch(() => true)`);
+  await page.evaluate(`fetch('/inject.js?ok=1').then((r) => r.text())`);
+  const failed = (await command('net.log', { failed: true, fields: ['url', 'error'] })).json.result;
+  assert.ok(failed.count >= 1 && failed.total > failed.count, 'only the failing request, out of a larger log');
+  assert.ok(failed.entries.every((e) => Object.keys(e).every((k) => ['url', 'error'].includes(k))));
+  assert.match(failed.entries.at(-1).url, /unreachable/);
+
+  await page.evaluate(`console.warn('careful-1'); console.error('boom-2'); console.warn('careful-3')`);
+  const warns = (await command('console.log', { level: 'warn', fields: ['level', 'message'] })).json.result;
+  assert.deepEqual(warns.entries.map((e) => e.message), ['careful-1', 'careful-3']);
+  assert.ok(warns.entries.every((e) => e.stack === undefined && e.at === undefined));
+  const both = (await command('console.log', { level: 'warn,error' })).json.result;
+  assert.equal(both.count, 3);
+  const text = (await command('console.log', { contains: 'boom' })).json.result;
+  assert.equal(text.count, 1);
+  assert.equal(text.total, 3);
+  page.errors.length = 0; // the console.error above is this test's own doing
+});
+
+test('react.inspect pick returns one path instead of the whole component', { skip }, async () => {
+  await page.evaluate(`(function () {
+    function Widget() {}
+    const el = document.getElementById('lnk');
+    el['__reactFiber$test'] = { type: Widget, key: null, memoizedProps: { user: { id: 7, name: 'ann' }, big: 'z'.repeat(400) }, memoizedState: { memoizedState: 'open', next: { memoizedState: 5, next: null } }, return: null };
+  })()`);
+  const picked = (await command('react.inspect', { selector: '#lnk', pick: ['props.user.id', 'hooks.1.value'] })).json.result;
+  assert.deepEqual(picked, { componentName: 'Widget', picked: { 'props.user.id': 7, 'hooks.1.value': 5 } });
+  const whole = (await command('react.inspect', { selector: '#lnk' })).json.result;
+  assert.equal(whole.props.big.length, 400);
+  assert.deepEqual((await command('react.inspect', { selector: '#lnk', pick: ['state'] })).json.result, { componentName: 'Widget' }, 'a function component has no state to pick');
+});
+
 test('the page produced no errors', { skip }, () => {
   assert.deepEqual(page.errors, []);
 });

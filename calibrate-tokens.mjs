@@ -6,6 +6,9 @@
 // part of the test run.
 //
 //   node tools/web-scout/calibrate-tokens.mjs [--write] [--samples 20] [--model <id>]
+//   node tools/web-scout/calibrate-tokens.mjs --check     offline: is token-calibration.json present,
+//                                                          complete and fresh? exit 1 with the reason if not
+//                                                          (WEBSCOUT_REQUIRE_CALIBRATION=1 makes CI fail on it)
 //
 // Samples are drawn from the relay's own recorded sessions (JSON = action
 // results, HTML = dom.query outerHTML) and from README.md (prose). Without
@@ -14,6 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { estimatorInfo } from './token-estimate.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
@@ -95,8 +99,19 @@ export async function gatherSamples({ get, maxPerKind = 20, readmePath = path.jo
   return samples;
 }
 
+// Offline: does the estimator have a complete, fresh, measured calibration?
+export function checkCalibration(info = estimatorInfo()) {
+  return { ok: info.status === 'calibrated', status: info.status, message: `token estimator: ${info.status} - ${info.note}` };
+}
+
 async function main() {
   const args = process.argv.slice(2);
+  if (args.includes('--check')) {
+    const r = checkCalibration();
+    console.log(r.message);
+    process.exitCode = r.ok ? 0 : 1;
+    return;
+  }
   const flag = (name) => { const i = args.indexOf(name); return i === -1 ? undefined : args[i + 1]; };
   const write = args.includes('--write');
   const model = flag('--model') || DEFAULT_MODEL;

@@ -20,7 +20,7 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { startRelay, recordRelayEvent } from './relay-control.mjs';
+import { startRelay, restartRelay, recordRelayEvent } from './relay-control.mjs';
 
 export const HOST = process.env.WEBSCOUT_HOST || '127.0.0.1';
 export const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
@@ -92,6 +92,50 @@ async function autostartRelay() {
   return null;
 }
 
+// A relay runs the code it booted with: an edit to relay.mjs, db.mjs or the reply pipeline is
+// invisible until it restarts, and V32's behaviour was not live for exactly that reason. A session
+// boundary is the one moment nothing is in flight (no active session, no cached reads or shaping
+// state worth keeping, open tabs reconnect by themselves), so `session start` restarts a stale relay
+// there instead of only warning about it. Mid-session it never restarts - it would drop the read
+// cache and what each caller holds - and a warning is all it gets. WEBSCOUT_NO_AUTORESTART=1 opts out.
+const RECONNECT_WAIT_MS = 8000;
+
+// What /health says about the relay's code. A relay too old to have a `relay` block predates stale
+// reporting altogether, so it cannot say it is stale - and is by definition running old code.
+export function staleFilesFromHealth(health) {
+  if (!health) return [];
+  if (!health.relay) return ['(this relay predates stale-code reporting)'];
+  return Array.isArray(health.relay.stale_source_files) ? health.relay.stale_source_files : [];
+}
+
+export async function ensureFreshRelayForNewSession() {
+  if (process.env.WEBSCOUT_NO_AUTORESTART === '1' || !AUTOSTART_HOSTS.has(HOST)) return { checked: false };
+  let health;
+  try { health = await request('GET', '/health'); } catch { return { checked: false }; }
+  const stale = staleFilesFromHealth(health);
+  if (!stale.length) return { checked: true, restarted: false };
+  if (health.active_session) return { checked: true, restarted: false, stale, reason: 'a session is active - restarting now would drop its read cache' };
+  const tabs = health.agents_connected ?? [];
+  const result = await restartRelay({ port: PORT, host: HOST });
+  if (!result.restarted) {
+    emitNote(`WARNING: the relay is running code older than what is on disk (${stale.join(', ')}) and restarting it failed (${result.start?.reason ?? result.stop?.reason ?? 'unknown'}). Run: node tools/web-scout/cli.mjs relay restart`, 'relay-autorestart');
+    return { checked: true, restarted: false, stale };
+  }
+  recordRelayEvent(PORT, { kind: 'auto-restart', files: stale, pid: result.start?.pid ?? null });
+  // the tabs that were connected reconnect on their own; give them a moment so the briefing finds them
+  const deadline = Date.now() + RECONNECT_WAIT_MS;
+  while (tabs.length && Date.now() < deadline) {
+    try {
+      const now = await request('GET', '/agents', undefined, { autostart: false });
+      const names = Array.isArray(now) ? now.map((a) => a.name ?? a) : Object.keys(now ?? {});
+      if (tabs.every((t) => names.includes(t))) break;
+    } catch { /* the relay is still coming up */ }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  emitNote(`the relay was running code older than what is on disk (${stale.join(', ')}) - restarted it before this session (pid ${result.start?.pid}). Set WEBSCOUT_NO_AUTORESTART=1 to disable this.`, 'relay-autorestart');
+  return { checked: true, restarted: true, stale, pid: result.start?.pid };
+}
+
 export async function request(method, pathName, body, { autostart = true } = {}) {
   const opts = { method };
   if (body !== undefined) {
@@ -153,7 +197,10 @@ export async function request(method, pathName, body, { autostart = true } = {})
   // "idb list"/"ping" call would be pure noise; it matters once a session's
   // real spend is getting large enough to think about.
   const tokensSoFar = Number(res.headers.get('x-webscout-session-tokens'));
-  if (Number.isFinite(tokensSoFar) && tokensSoFar > SESSION_TOKENS_SOFAR_PRINT_THRESHOLD) {
+  // The relay marks a total not worth printing (this call added little and no milestone was
+  // crossed) with x-webscout-tokens-quiet; a relay that predates it sends no mark and is printed as before.
+  const quiet = res.headers.get('x-webscout-tokens-quiet') === '1';
+  if (Number.isFinite(tokensSoFar) && tokensSoFar > SESSION_TOKENS_SOFAR_PRINT_THRESHOLD && !quiet) {
     // Header is absent (not "0") when the relay has no baseline yet for this
     // session, e.g. right after a relay restart - so no bogus per-call delta.
     const callHeader = res.headers.get('x-webscout-call-tokens');

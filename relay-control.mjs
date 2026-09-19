@@ -19,7 +19,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Files the relay process loads once at boot. An edit to any of them is
 // invisible to a running relay until it restarts.
-export const RELAY_SOURCE_FILES = ['relay.mjs', 'db.mjs', 'ai.mjs', 'report.mjs', 'command-registry.mjs', 'build-id.mjs', 'relay-control.mjs', 'read-pipeline.mjs', 'read-shape.mjs', 'token-estimate.mjs'];
+export const RELAY_SOURCE_FILES = ['relay.mjs', 'db.mjs', 'ai.mjs', 'report.mjs', 'command-registry.mjs', 'build-id.mjs', 'relay-control.mjs', 'read-pipeline.mjs', 'read-shape.mjs', 'token-estimate.mjs', 'crv-verify.mjs'];
 
 export function pidfilePath(port) {
   return process.env.WEBSCOUT_PID_PATH || path.join(os.tmpdir(), `webscout-relay-${port}.pid`);
@@ -51,6 +51,7 @@ export function pidAlive(pid) {
 // exists because the client's autostart recovers from a kill so quietly that a
 // process blanket-killing `relay.mjs` (another session did, twice) went unnoticed.
 //   autostart    - a CLI/MCP call found the relay down and started one
+//   auto-restart - `session start` found the relay running older code than disk and restarted it
 //   unclean-exit - a relay booted and found the previous one's pidfile still there
 //                  with a dead pid: it never ran its clean shutdown, i.e. it was
 //                  killed (`relay stop` removes the pidfile, so it never counts)
@@ -82,6 +83,7 @@ export function readRelayEvents(port, sinceMs = 24 * 3600 * 1000) {
 export function summarizeRelayEvents(events) {
   return {
     autostarts: events.filter((e) => e.kind === 'autostart').length,
+    autoRestarts: events.filter((e) => e.kind === 'auto-restart').length,
     uncleanExits: events.filter((e) => e.kind === 'unclean-exit').length,
     recent: events.slice(-5),
   };

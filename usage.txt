@@ -1,5 +1,8 @@
 Usage: node tools/web-scout/cli.mjs <command> [args...]
 
+  help [<topic> [<sub>]]          print the help index, one group ("help idb"), one command ("help idb dump"
+                                   or "idb dump --help"), or - "help all" - this whole text (~16k tokens). A bare cli.mjs and
+                                   an unknown command print just the index, so a mistyped flag no longer costs a screenful.
   status                          relay health, connected agents, and active session. The reply's
                                    `relay` block carries the relay's pid, start time, and
                                    stale_source_files - non-empty means the running relay process
@@ -37,7 +40,7 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    blocked RIGHT NOW (another tab - web-scout-connected or not -
                                    holding a connection at the older version), and by what, instead
                                    of only reporting THAT a version-bump "page reload" hasn't taken.
-  session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--token-budget N] [--no-briefing] [--agent <name>]
+  session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--token-budget N] [--lean] [--no-briefing] [--agent <name>]
                                    declare context/goal - REQUIRED before any action.
                                    --strict-crv auto-snapshots+diffs before/after every
                                    dom.click/dom.fill/eval/idb.put/idb.delete in this session.
@@ -68,6 +71,12 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    show"/dashboard's Token cost panel also warn once the DELIVERED
                                    estTokens total crosses it. --no-briefing skips the warm-start
                                    briefing (store counts, DB version, tab freshness) in the reply.
+                                   --lean makes read shaping the DEFAULT for the whole session instead of a flag on every
+                                   call: rows come back as tables, a repeat of a result you already hold as a one-line pointer
+                                   (or only what changed), and a body over ~4000 tokens as its shape (repeat the call for the
+                                   body, served from the relay cache). --no-guard on a call gives the body as it is. Rely on
+                                   "unchanged"/deltas only while the earlier result is still in your context. "token-report"'s
+                                   readStrategy.adoption shows how many reads were shaped by the caller, by --lean, or by nobody.
   session assert <id> '<checks-json>' [--agent <name>]
                                    declarative regression checks against LIVE state - a single
                                    check object or a JSON array of them, each:
@@ -134,7 +143,10 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    {"__crv":true}' to enumerate exact ids and 'idb delete-many' by
                                    id - safe regardless of how much real traffic interleaves.
 
-  dom query <selector> [--full] [--meta] [--peek] [--table] [--if-changed] [--delta] [--no-guard]
+  dom query <selector> [--full] [--meta] [--pick a,b] [--peek] [--table] [--if-changed] [--delta] [--no-guard]
+                                   --pick returns only the named parts of the element - tag, id, class, text, html,
+                                   value, attr:<name> (e.g. --pick attr:href,text) - so "where does this link point" costs
+                                   the href, not the markup around it. Filtered in the page.
                                    a whole-page/root container (body/html/#app/#root/main/#main/*)
                                    returns a depth-limited outline (tag#id.class [children, text
                                    chars]) instead of markup - query a listed child to drill in;
@@ -222,7 +234,9 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    Whole page if selector omitted. --out saves a PNG file;
                                    without it, prints dimensions only (the data URL is large).
 
-  react inspect <selector> [--nth N]
+  react inspect <selector> [--nth N] [--pick a,b]
+                                   --pick keeps props, state or hooks whole, or a dotted path into them
+                                   (--pick props.user.id,hooks.0) - the answer to one question, not the whole component.
                                    props (+ state for a class component, or positional hooks for
                                    a function component) of the nearest enclosing React component
                                    walking up from selector. Throws if selector isn't inside
@@ -232,10 +246,13 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    maxDepth 20) - orient first, then "react inspect" a more
                                    specific selector.
 
-  idb list                        list IndexedDB object store names + a per-store row count
+  idb list [--stores a,b] [--non-empty]  list IndexedDB object store names + a per-store row count
+                                   --stores counts only those stores (unknown names come back as "missing"); --non-empty
+                                   leaves out empty stores (emptyStores says how many). Both narrow in the page.
                                    (cheap store.count(), not a full dump) - check this before
                                    an unscoped "idb snapshot" on a store you suspect is large
-  idb dump <store> [--where '<json-field-map>'] [--fields a,b,c] [--limit N] [--peek] [--table] [--if-changed] [--delta]
+  idb dump <store> [--where '<json-field-map>'] [--fields a,b,c] [--limit N] [--count] [--peek] [--table] [--if-changed] [--delta]
+                                   --count returns totalCount/matchedCount and no rows - "did 3 rows land" without paying for them.
                                    dump rows (+ real keyPath) in one store - --where filters by
                                    exact-equality field match (same semantics as "session
                                    assert"'s own where), e.g. --where '{"__synthetic_tag":"MY-TAG"}'.
@@ -250,7 +267,8 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    "idb get" instead when you know the key on a large store).
                                    Response's "count" is rows actually returned; "matchedCount" is
                                    the real filtered total; "totalCount" is the whole store's count.
-  idb get <store> <json-key>      real indexed lookup of ONE row by key (store.get, not a
+  idb get <store> <json-key> [--fields a,b]   real indexed lookup of ONE row by key (store.get, not a
+                                   --fields keeps only those keys of the row (projected in the page).
                                    getAll()+filter) - use this instead of "idb dump" when you
                                    already know the key and the store is large (a full dump of
                                    a large real store can be slow/time out)
@@ -277,6 +295,25 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    instead of the full dump - idb.snapshot is the #2 all-time
                                    token-cost offender (see "token-report") precisely because a
                                    full dump prints every unchanged row too.
+  idb verify [<baseline>] [--expect "notes:+1,tags:same"] [--expect-file <path>] [--stores a,b,c]
+             [--allow-extra] [--samples N] [--verbose]
+                                   the verify step of baseline -> action -> verify in ONE call:
+                                   re-snapshots the baseline's stores (persisted like any snapshot),
+                                   diffs, checks the expectations and prints pass/fail - a few lines
+                                   when it passed. <baseline> is a snapshot id, a golden name, or
+                                   (omitted) the session's newest snapshot, so consecutive verifies
+                                   each baseline the step before. --expect terms: +N rows added,
+                                   +N+ at least N added, -N removed, ~N changed, "same" no change
+                                   (notes:+1-0~0 = exactly one added, none removed or changed;
+                                   unspecified counts are unconstrained), or a JSON array of
+                                   {store, added|addedGte|addedLte|removed|changed|unchanged}. A
+                                   store you did not name that changed is reported "unexpected" and
+                                   fails the check unless --allow-extra; with no --expect at all,
+                                   NOTHING may have changed (a regression guard). Rows appear only
+                                   for the stores that failed or changed unexpectedly - changed rows
+                                   as {field: [before, after]} - --samples N (default 3) rows per
+                                   bucket, --verbose every changed store. The full diff stays
+                                   saved (see "diffId" in the reply).
   idb diff <idA> <idB>            compute + PERSIST the diff between two persisted snapshots.
   idb diff-golden <name> <idB>    Both cache-aware: if <idB>'s own CONTENT (not id - a fresh
                                    snapshot always gets a new id even when nothing changed) matches
@@ -336,7 +373,9 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    printing a line per change. Stops at --count-gte (if given) or
                                    --timeout (default 30000ms), whichever first, or Ctrl+C.
 
-  net log [--limit <n>] [--url <substr>] [--peek] [--table] [--if-changed] [--delta]
+  net log [--limit <n>] [--url <substr>] [--failed] [--fields a,b] [--peek] [--table] [--if-changed] [--delta]
+                                   --failed keeps only errored requests and 4xx/5xx responses; --fields keeps only those keys
+                                   of each entry (e.g. --fields method,url,status). Both filter in the page.
                                    captured fetch/XHR request/response entries since last clear -
                                    LIVE in-page ring buffer, capped at 500, evicted by background
                                    traffic (e.g. sync polling) within minutes in a busy session.
@@ -372,7 +411,10 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    once (off by default; captures nothing until armed)
   net clear                       clear the captured (live) network log
 
-  console log [--limit <n>] [--peek] [--table] [--if-changed] [--delta]   captured console.error/warn + uncaught error entries; --limit
+  console log [--limit <n>] [--level error,warn] [--contains <substr>] [--fields a,b] [--peek] [--table] [--if-changed] [--delta]
+                                   --level keeps those levels (error, warn, uncaught, unhandledrejection), --contains only
+                                   messages containing the text, --fields only those keys per entry (drop "stack").
+                                   captured console.error/warn + uncaught error entries; --limit
                                    keeps the N most recent (filtered in the page)
   console wait "<substr>" [--timeout <ms>] [--grace <ms>]
                                    attach-and-wait for a console entry whose message contains
@@ -657,7 +699,8 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   (after a context compaction, repeat the call without them). The relay tracks what you were
   actually handed: a pointer or delta is never offered against a result you only saw a --peek
   of. The session's running total, its --token-budget and the end-of-session receipt count
-  bytes DELIVERED (after shaping), not bytes logged.
+  bytes DELIVERED (after shaping), not bytes logged - the per-type "token-report" figures too
+  (deliveredBytes / withheldBytes next to the logged resultBytes; a peeked read costs the peek).
   Token budget guard: with `session start --token-budget N`, once the running total passes
   60% of N a read over ~3000 estimated tokens returns its shape (--peek form, guarded:true)
   and rows come back as {columns, rows}; past 85% the limit drops to ~1000. A one-time stderr
@@ -668,7 +711,32 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   earlier"), repeated full reads after scoping ("use --delta or --table"), and an identical read
   re-delivered in full from cache twice ("add --if-changed"). Each is said once per target per
   session, and "token-report" counts whether you then did what it suggested
-  (savings.readStrategy.hints.adopted).
+  (savings.readStrategy.hints.adopted). Advice nobody follows is noise you pay for, so a
+  session gets at most 4 hints and a kind you ignored twice goes quiet; readStrategy.hints also
+  books the bytes the hints cost (sentBytes) against what the calls that followed one kept off
+  the screen (adoptedBytesSaved, netBytes - first-order: later calls that keep using the flag
+  are not attributed). The running-total stderr note prints only when a call added 1000+ tokens
+  or the total crossed its next doubling (5k, 10k, 20k, ...).
+  Lean sessions: "session start --lean" makes shaping the DEFAULT for the whole session instead
+  of a flag on every call - rows as tables, a repeat of a result you hold as a pointer or delta,
+  a body over ~4000 tokens as its shape (repeat the call for the body, from cache). --no-guard on
+  a call gives the body as it is. readStrategy.adoption counts cacheable reads by who chose the
+  shaping (a flag, --lean, or nobody) and the bytes that flowed unshaped. Measured on four real
+  CRV sessions (`node tools/web-scout/trace.mjs replay traces/*.json.gz --sweep`): a lean
+  session delivered 0.40-0.58 of the default's read bytes on three of the four if every shape
+  sufficed (0.05 on one dominated by a few huge reads), and 0.52-0.75 if callers always re-asked
+  for the body - far less flattering than the scripted CI benchmark,
+  which is a best case. The 4000-token guard came from that sweep (2500 was a judgement).
+  Reading less in the page (filtered in inject.js, so what they cut never crosses the wire and
+  is counted as avoided by the scoped-reads ledger): dom query --pick tag,id,class,text,html,
+  value,attr:<name>; react inspect --pick props|state|hooks or a dotted path (props.user.id);
+  idb list --stores a,b --non-empty; idb dump --count (no rows) and --where/--fields/--limit;
+  idb get --fields; net log --failed --fields method,url,status; console log --level error,warn
+  --contains <text> --fields level,message.
+  idb verify replaces "snapshot, act, snapshot, diff, eyeball": one call re-snapshots, diffs
+  and checks --expect "store:+1,other:same", answering in a few lines when it passed.
+  "help" prints an index instead of this whole text (~16k tokens): "help idb", "help idb dump",
+  "idb dump --help", "help tokens", "help all".
   session start also returns a `briefing` (store row counts, DB version, whether the tab and the
   relay are current) unless you pass --no-briefing - it replaces the idb list / db version-check
   calls that open most sessions. Output is compact JSON when piped (the indentation is tokens
@@ -678,6 +746,12 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   brackets the total. The band is a rule of thumb until you run
   `node tools/web-scout/calibrate-tokens.mjs --write` (needs ANTHROPIC_API_KEY; counts real
   tokens for samples of your own sessions and stores them in token-calibration.json).
+  `savings.estimator.status` says which it is: uncalibrated, partial, stale (older than 90 days)
+  or calibrated; `calibrate-tokens.mjs --check` exits 1 unless it is calibrated, offline, and
+  WEBSCOUT_REQUIRE_CALIBRATION=1 makes the test suite fail on the same condition.
+  A relay running older code than disk is restarted at "session start" (nothing is in flight
+  then; open tabs reconnect by themselves) - never mid-session, where it only warns.
+  WEBSCOUT_NO_AUTORESTART=1 turns that off.
 
   Every command reply also carries a running session token TOTAL (a
   cumulative estimate) in the x-webscout-session-tokens response header,
