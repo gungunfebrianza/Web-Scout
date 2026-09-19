@@ -1,0 +1,684 @@
+{
+  "model": "session-transcripts (mixed)",
+  "sampledAt": "2026-09-19T09:03:29.677Z",
+  "method": "transcripts",
+  "kinds": {
+    "json": {
+      "ratio": 2.37,
+      "low": 2.03,
+      "high": 2.93
+    },
+    "html": {
+      "ratio": 2.19,
+      "low": 2.01,
+      "high": 2.54
+    }
+  },
+  "detail": {
+    "json": {
+      "samples": 434,
+      "fitted": 350,
+      "perReplyConstantTokens": 69.38,
+      "chars": 711249
+    },
+    "html": {
+      "samples": 116,
+      "fitted": 94,
+      "perReplyConstantTokens": 49.02,
+      "chars": 239562
+    },
+    "prose": {
+      "samples": 3,
+      "skipped": "fewer than 8 usable samples"
+    }
+  },
+  "perReplyConstantTokens": 59.2,
+  "transcripts": [
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os-tools-web-scout\\962d4294-0857-4ade-995e-0533d33b3402.jsonl",
+      "lines": 1809,
+      "assistantMessages": 274,
+      "gaps": 273,
+      "used": 2,
+      "skipped": {
+        "multiTool": 63,
+        "interloper": 69,
+        "userText": 0,
+        "image": 5,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 134,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\a3d2e387-6698-4929-b6ea-b0313d82dfa2.jsonl",
+      "lines": 66031,
+      "assistantMessages": 9593,
+      "gaps": 9592,
+      "used": 511,
+      "skipped": {
+        "multiTool": 799,
+        "interloper": 1209,
+        "userText": 0,
+        "image": 43,
+        "noResult": 1,
+        "negative": 1,
+        "notScout": 6324,
+        "small": 704
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\b4a90d57-94e3-4e58-89f0-3c6e0953b59d.jsonl",
+      "lines": 579,
+      "assistantMessages": 107,
+      "gaps": 106,
+      "used": 0,
+      "skipped": {
+        "multiTool": 2,
+        "interloper": 48,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 56,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-vademikum\\0ea819bd-a00b-443d-b256-03c23abad7af.jsonl",
+      "lines": 18321,
+      "assistantMessages": 2579,
+      "gaps": 2578,
+      "used": 38,
+      "skipped": {
+        "multiTool": 351,
+        "interloper": 595,
+        "userText": 0,
+        "image": 22,
+        "noResult": 1,
+        "negative": 0,
+        "notScout": 1524,
+        "small": 47
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-vademikum\\af6f67cc-2eb4-4f46-beaf-bad18d538007.jsonl",
+      "lines": 6603,
+      "assistantMessages": 985,
+      "gaps": 984,
+      "used": 0,
+      "skipped": {
+        "multiTool": 82,
+        "interloper": 255,
+        "userText": 0,
+        "image": 6,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 641,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\3f7372e4-5c63-490b-b832-ddc401fdeac1.jsonl",
+      "lines": 346,
+      "assistantMessages": 43,
+      "gaps": 42,
+      "used": 0,
+      "skipped": {
+        "multiTool": 17,
+        "interloper": 8,
+        "userText": 0,
+        "image": 0,
+        "noResult": 1,
+        "negative": 0,
+        "notScout": 16,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\7e38204a-6d61-4b99-ba78-9f1fa0c92d8c.jsonl",
+      "lines": 9,
+      "assistantMessages": 0,
+      "gaps": 0,
+      "used": 0,
+      "skipped": {
+        "multiTool": 0,
+        "interloper": 0,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 0,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\699a78e0-9506-447e-b8c2-9ba7b1a9b322.jsonl",
+      "lines": 1208,
+      "assistantMessages": 232,
+      "gaps": 231,
+      "used": 0,
+      "skipped": {
+        "multiTool": 24,
+        "interloper": 27,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 180,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\2721a38d-aea5-4323-b335-1370746fe212.jsonl",
+      "lines": 255,
+      "assistantMessages": 45,
+      "gaps": 44,
+      "used": 0,
+      "skipped": {
+        "multiTool": 1,
+        "interloper": 8,
+        "userText": 0,
+        "image": 1,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 34,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os-tools-web-scout\\4157e683-3d7f-47ad-b11f-6786f6a44700.jsonl",
+      "lines": 9,
+      "assistantMessages": 0,
+      "gaps": 0,
+      "used": 0,
+      "skipped": {
+        "multiTool": 0,
+        "interloper": 0,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 0,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os-tools-web-scout\\1033334b-a6b0-4bbe-b313-41ba6cf21a43.jsonl",
+      "lines": 95,
+      "assistantMessages": 10,
+      "gaps": 9,
+      "used": 0,
+      "skipped": {
+        "multiTool": 3,
+        "interloper": 6,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 0,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\8197cd32-be16-4891-b210-c0eee006d23d.jsonl",
+      "lines": 9,
+      "assistantMessages": 0,
+      "gaps": 0,
+      "used": 0,
+      "skipped": {
+        "multiTool": 0,
+        "interloper": 0,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 0,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\7bdf8711-ca82-45db-97fd-e80253460378.jsonl",
+      "lines": 278,
+      "assistantMessages": 43,
+      "gaps": 42,
+      "used": 0,
+      "skipped": {
+        "multiTool": 4,
+        "interloper": 11,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 27,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\7266754d-d21d-4f77-8f50-a49143872f05.jsonl",
+      "lines": 900,
+      "assistantMessages": 132,
+      "gaps": 131,
+      "used": 0,
+      "skipped": {
+        "multiTool": 49,
+        "interloper": 34,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 48,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\c3f90a24-7fbb-468c-b097-b4a7ed606230.jsonl",
+      "lines": 3077,
+      "assistantMessages": 405,
+      "gaps": 404,
+      "used": 0,
+      "skipped": {
+        "multiTool": 123,
+        "interloper": 39,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 242,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-vademikum-tools-web-scout\\8348a96c-d228-4182-94ed-b7510d09ecd6.jsonl",
+      "lines": 9,
+      "assistantMessages": 0,
+      "gaps": 0,
+      "used": 0,
+      "skipped": {
+        "multiTool": 0,
+        "interloper": 0,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 0,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-vademikum-tools-web-scout\\d0bdd9de-7f37-4d6b-9fe4-8c2cec40c451.jsonl",
+      "lines": 192,
+      "assistantMessages": 20,
+      "gaps": 19,
+      "used": 0,
+      "skipped": {
+        "multiTool": 12,
+        "interloper": 2,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 5,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-vademikum-tools-web-scout\\4c346edc-9e49-48f2-8965-2a2c10627735.jsonl",
+      "lines": 9,
+      "assistantMessages": 0,
+      "gaps": 0,
+      "used": 0,
+      "skipped": {
+        "multiTool": 0,
+        "interloper": 0,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 0,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-vademikum-tools-web-scout\\cafe55d9-8bdc-428b-852c-c56f879933e3.jsonl",
+      "lines": 1240,
+      "assistantMessages": 162,
+      "gaps": 161,
+      "used": 1,
+      "skipped": {
+        "multiTool": 47,
+        "interloper": 36,
+        "userText": 0,
+        "image": 2,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 74,
+        "small": 1
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\6cd93399-10e0-463e-b767-9b4ecd97f8bc.jsonl",
+      "lines": 73,
+      "assistantMessages": 10,
+      "gaps": 9,
+      "used": 0,
+      "skipped": {
+        "multiTool": 1,
+        "interloper": 3,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 5,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-vademikum\\6ce284e6-18dd-4540-a2d1-8f18802b9ba8.jsonl",
+      "lines": 9,
+      "assistantMessages": 0,
+      "gaps": 0,
+      "used": 0,
+      "skipped": {
+        "multiTool": 0,
+        "interloper": 0,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 0,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-vademikum\\7305f885-813a-4feb-b0ce-f7023a161c98.jsonl",
+      "lines": 46,
+      "assistantMessages": 3,
+      "gaps": 2,
+      "used": 0,
+      "skipped": {
+        "multiTool": 1,
+        "interloper": 0,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 1,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\e932e66f-a60c-493b-8b1e-98c2d13cb083.jsonl",
+      "lines": 9519,
+      "assistantMessages": 1664,
+      "gaps": 1663,
+      "used": 0,
+      "skipped": {
+        "multiTool": 169,
+        "interloper": 73,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 1421,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\451225b4-221c-4070-b24f-5c1304783bd2.jsonl",
+      "lines": 1118,
+      "assistantMessages": 199,
+      "gaps": 198,
+      "used": 0,
+      "skipped": {
+        "multiTool": 12,
+        "interloper": 14,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 172,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\03372b43-2040-4c4d-b3e0-7ad4f26ae3ef.jsonl",
+      "lines": 6,
+      "assistantMessages": 0,
+      "gaps": 0,
+      "used": 0,
+      "skipped": {
+        "multiTool": 0,
+        "interloper": 0,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 0,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os-tools-web-scout\\abf4ad39-7650-47cb-a39d-5ca4a32577d5.jsonl",
+      "lines": 692,
+      "assistantMessages": 133,
+      "gaps": 132,
+      "used": 0,
+      "skipped": {
+        "multiTool": 10,
+        "interloper": 12,
+        "userText": 0,
+        "image": 1,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 109,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\3fba2a6b-4dbc-40fc-8ecd-1812c67e4a91.jsonl",
+      "lines": 43,
+      "assistantMessages": 2,
+      "gaps": 1,
+      "used": 0,
+      "skipped": {
+        "multiTool": 0,
+        "interloper": 1,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 0,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\5a9c90f2-dbaa-4192-88e0-fcc6bc0d63a3.jsonl",
+      "lines": 1427,
+      "assistantMessages": 249,
+      "gaps": 248,
+      "used": 0,
+      "skipped": {
+        "multiTool": 12,
+        "interloper": 15,
+        "userText": 0,
+        "image": 2,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 219,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os-tools-web-scout\\372d1222-666f-497a-9ae6-f1c2d00b7f33.jsonl",
+      "lines": 1070,
+      "assistantMessages": 187,
+      "gaps": 186,
+      "used": 1,
+      "skipped": {
+        "multiTool": 3,
+        "interloper": 15,
+        "userText": 0,
+        "image": 4,
+        "noResult": 1,
+        "negative": 0,
+        "notScout": 160,
+        "small": 2
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\776812b1-2c3d-4897-b12f-527952dae813.jsonl",
+      "lines": 563,
+      "assistantMessages": 84,
+      "gaps": 83,
+      "used": 0,
+      "skipped": {
+        "multiTool": 9,
+        "interloper": 1,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 73,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\175bcc1b-cca7-4a73-8dc7-90f1c9b7d8c0.jsonl",
+      "lines": 1071,
+      "assistantMessages": 193,
+      "gaps": 192,
+      "used": 0,
+      "skipped": {
+        "multiTool": 19,
+        "interloper": 8,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 165,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\802c47b6-c37a-440f-95f6-52701fc73bad.jsonl",
+      "lines": 334,
+      "assistantMessages": 59,
+      "gaps": 58,
+      "used": 0,
+      "skipped": {
+        "multiTool": 1,
+        "interloper": 6,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 51,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\ae4e0d61-38fd-4c73-9f72-2f1a06633864.jsonl",
+      "lines": 154,
+      "assistantMessages": 26,
+      "gaps": 25,
+      "used": 0,
+      "skipped": {
+        "multiTool": 0,
+        "interloper": 2,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 23,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\95984c24-9ed0-402f-ad36-8e6b151c4c50.jsonl",
+      "lines": 144,
+      "assistantMessages": 19,
+      "gaps": 18,
+      "used": 0,
+      "skipped": {
+        "multiTool": 2,
+        "interloper": 3,
+        "userText": 0,
+        "image": 0,
+        "noResult": 1,
+        "negative": 0,
+        "notScout": 12,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\5eb88ffd-9e85-42d8-92e4-1ba4508b9f86.jsonl",
+      "lines": 1200,
+      "assistantMessages": 194,
+      "gaps": 193,
+      "used": 0,
+      "skipped": {
+        "multiTool": 31,
+        "interloper": 29,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 133,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\1aeb1a7c-6c83-4c25-a6c6-92123e4967c7.jsonl",
+      "lines": 4020,
+      "assistantMessages": 701,
+      "gaps": 700,
+      "used": 0,
+      "skipped": {
+        "multiTool": 70,
+        "interloper": 20,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 610,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\742855bb-c2ea-4bd6-a758-c5742e53b657.jsonl",
+      "lines": 2219,
+      "assistantMessages": 407,
+      "gaps": 406,
+      "used": 0,
+      "skipped": {
+        "multiTool": 23,
+        "interloper": 10,
+        "userText": 0,
+        "image": 0,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 373,
+        "small": 0
+      }
+    },
+    {
+      "file": "C:\\Users\\user\\.claude\\projects\\D--Day-One-Claude-Code-agent-os\\fff8d7e6-2f3c-4c92-92ad-d40b8b54684a.jsonl",
+      "lines": 948,
+      "assistantMessages": 139,
+      "gaps": 138,
+      "used": 0,
+      "skipped": {
+        "multiTool": 22,
+        "interloper": 17,
+        "userText": 0,
+        "image": 1,
+        "noResult": 0,
+        "negative": 0,
+        "notScout": 98,
+        "small": 0
+      }
+    }
+  ]
+}
