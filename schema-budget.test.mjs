@@ -15,8 +15,10 @@ import { parseUsage, helpIndex, helpTopic } from './help.mjs';
 const dir = path.dirname(fileURLToPath(import.meta.url));
 
 // Measured 16,296 bytes (~4,070 tokens) when V33 added verify/pick/lean and compressed the rest;
-// the V32 list was 17,973. The cap leaves ~1% headroom.
-const MCP_TOTAL_MAX_BYTES = 16500;
+// the V32 list was 17,973. Measured 16,613 when V34 added crv_run (one-call baseline -> action ->
+// verify; see [[web-scout-v34-round]]) - raised deliberately, same commit as the text. The cap
+// leaves ~1% headroom.
+const MCP_TOTAL_MAX_BYTES = 16750;
 const MCP_TOOL_MAX_BYTES = 3200;
 // The biggest slice of help (a whole group) and the index a bare `cli.mjs` prints.
 const HELP_GROUP_MAX_CHARS = 14000;

@@ -16,7 +16,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-events-'));
 const port = await freePort();
 process.env.WEBSCOUT_PID_PATH = path.join(tmp, 'relay.pid'); // this process reads the same event log the relay writes
-const env = { ...process.env, WEBSCOUT_PORT: String(port), WEBSCOUT_DB_PATH: path.join(tmp, 'test.db'), WEBSCOUT_NO_AUTOOPEN: '1' };
+const env = { ...process.env, WEBSCOUT_PORT: String(port), WEBSCOUT_DB_PATH: path.join(tmp, 'test.db'), WEBSCOUT_NO_AUTOOPEN: '1', WEBSCOUT_TOKEN_CALIBRATION: path.join(tmp, 'token-calibration.json') };
 delete env.NODE_TEST_CONTEXT;
 const children = [];
 

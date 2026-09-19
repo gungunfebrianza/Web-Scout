@@ -40,7 +40,7 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    blocked RIGHT NOW (another tab - web-scout-connected or not -
                                    holding a connection at the older version), and by what, instead
                                    of only reporting THAT a version-bump "page reload" hasn't taken.
-  session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--token-budget N] [--lean] [--no-briefing] [--agent <name>]
+  session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--crv-compact] [--tags a,b,c] [--token-budget N] [--lean] [--no-briefing] [--agent <name>]
                                    declare context/goal - REQUIRED before any action.
                                    --strict-crv auto-snapshots+diffs before/after every
                                    dom.click/dom.fill/eval/idb.put/idb.delete in this session.
@@ -51,6 +51,13 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    just the stores this session actually touches - strongly
                                    recommended for --strict-crv against a real app db; ignored
                                    without --strict-crv.
+                                   --crv-compact (needs --strict-crv) adds a sampled preview of
+                                   what changed (same shape "idb verify"'s pass branch returns)
+                                   to every triggering call's own reply, instead of only counts -
+                                   sparing the separate "idb diff <idA> <idB>" full-body fetch a
+                                   caller otherwise makes by hand to see what a count did not
+                                   explain. Off by default: an existing --strict-crv session's
+                                   reply shape never changes underneath it.
                                    Best-effort: if js/db.js is readable and a tab is already
                                    connected, warns (does not block) when the tab's LIVE
                                    IndexedDB version != js/db.js's own DB_VERSION - the tab
@@ -95,7 +102,7 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    already wrote it down. No --transcript = every transcript written since the session
                                    started. Re-running is safe. Actions with no matching narration keep an inferred why,
                                    shown in the dashboard as inferred, never as the agent's words.
-  session end [id]                 end the given session, or the active one if omitted -
+  session end [id] [--trace]        end the given session, or the active one if omitted -
                                    prints a one-line token-cost receipt (calls, estTokens, top
                                    offender type; also a --token-budget warning if declared and
                                    exceeded), a savings line (scoped reads and cache hits this
@@ -105,6 +112,12 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    was never saved as one - real repeatable shapes (seed/verify/
                                    cleanup) were confirmed hand-rolled from scratch every later
                                    phase despite "macro record" already existing for this.
+                                   --trace also exports the session (anonymised, same as
+                                   "trace.mjs export") into traces/auto/ (gitignored) - grows the
+                                   replay benchmark's corpus of real sessions past the four
+                                   committed traces without a separate offline step. Nothing here
+                                   is auto-promoted into traces/*.json.gz (a human choice); a
+                                   top-3-by-distrust-rate export gets a "rank-auto" nudge too.
   session current                  show the active session (if any)
   session list                     list every session, newest first
   session show <id>                session detail + actions + snapshots + diffs + qa
@@ -322,6 +335,19 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    as {field: [before, after]} - --samples N (default 3) rows per
                                    bucket, --verbose every changed store. The full diff stays
                                    saved (see "diffId" in the reply).
+  crv run --stores a,b,c --type dom.click --params '{"selector":"#save"}' [--expect "notes:+1"]
+          [--expect-file <path>] [--allow-extra] [--samples N] [--verbose]
+                                   baseline -> action -> verify in ONE call: snapshot --stores,
+                                   dispatch --type/--params (any real action - dom.click,
+                                   idb.put, eval, ... - not idb.snapshot itself), re-snapshot,
+                                   diff, check --expect - what "idb snapshot" then the action then
+                                   "idb verify" would otherwise be as three separate round trips
+                                   (three full-body replies to read) becomes one, few-line reply.
+                                   --params is a JSON object, same shape /command takes for --type.
+                                   --expect/--expect-file/--allow-extra/--samples/--verbose are
+                                   exactly "idb verify"'s own (see above). If the ACTION itself
+                                   fails the whole call fails - no baseline was consumed by a
+                                   verify that then couldn't mean anything.
   idb diff <idA> <idB>            compute + PERSIST the diff between two persisted snapshots.
   idb diff-golden <name> <idB>    Both cache-aware: if <idB>'s own CONTENT (not id - a fresh
                                    snapshot always gets a new id even when nothing changed) matches
@@ -650,7 +676,11 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    store/selector is the real hotspot - and byMacro, grouped by
                                    params.macroId (non-macro calls bucket under macroId: null), to
                                    pinpoint WHICH replayed macro/CRV phase actually cost the tokens
-                                   instead of only the command type. The all-time form (no
+                                   instead of only the command type. byType/byTarget/byMacro all
+                                   rank WHAT was called; byIntent ranks WHY, grouped by the agent's
+                                   own narrated reason (imported from its transcript - see "session
+                                   intents"; actions with none bucket under a null intent). The
+                                   all-time form (no
                                    --session) ALSO carries a "savings" block - a "trend" of the
                                    last 14 days (per day: tokens delivered to callers, tokens
                                    scoped reads left out, avoidedPct, cache hits) that shows
@@ -666,6 +696,15 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    in the DB so they survive a relay restart). Check this after a
                                    long CRV session to see whether the waste-prevention machinery
                                    below is actually earning its keep, not just running.
+                                   Also carries "neverCalled": dispatchable action types this relay
+                                   has never logged a single call for, all-time (excludes the
+                                   internal ping/page.epoch types) - real usage evidence for which
+                                   MCP tool actions are candidates to trim from the always-sent tool
+                                   list (see schema-budget.test.mjs) or move behind a secondary
+                                   tool, once totalCalls is large enough to trust "never" (the note
+                                   says so when it is not yet). Also "helpUsage": {all, sliced,
+                                   allRatePct} - does "help all" (~16k tokens) still get called,
+                                   against the sliced forms above it exists to replace.
                                    `savings.ledgers` lists every mechanism with its `kind` -
                                    storage (bytes never stored twice on DISK), delivery (bytes never
                                    sent to the caller), roundtrip (a page round trip skipped; the
@@ -732,9 +771,16 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   shaping (a flag, --lean, or nobody) and the bytes that flowed unshaped. Measured on four real
   CRV sessions (`node tools/web-scout/trace.mjs replay traces/*.json.gz --sweep`): a lean
   session delivered 0.40-0.58 of the default's read bytes on three of the four if every shape
-  sufficed (0.05 on one dominated by a few huge reads), and 0.52-0.75 if callers always re-asked
-  for the body - far less flattering than the scripted CI benchmark,
-  which is a best case. The 4000-token guard came from that sweep (2500 was a judgement).
+  sufficed (0.05 on one dominated by a few huge reads) - far less flattering than the scripted
+  CI benchmark, which is a best case. If callers instead distrust every shaped reply (pointer,
+  delta, peek or guard) and re-ask for the raw body, it costs 1.01-1.08 of the default: a small
+  premium, not a saving, since the shape is a paid round trip before the retry. This is measured
+  live too, not just in replay: readStrategy.shaping.pointer/delta.followedByFull/followedByNarrowed
+  count a distrusted pointer/delta the same way peekThenFull already did. The 4000-token guard
+  came from that sweep (2500 was a judgement).
+  `node tools/web-scout/trace.mjs rank-auto` ranks the "session end --trace" pile in traces/auto/
+  by leanWorst distrust rate (highest first), so promoting one into the committed set is picking
+  off a short list instead of eyeballing a folder.
   Reading less in the page (filtered in inject.js, so what they cut never crosses the wire and
   is counted as avoided by the scoped-reads ledger): dom query --pick tag,id,class,text,html,
   value,attr:<name>; react inspect --pick props|state|hooks or a dotted path (props.user.id);
@@ -751,14 +797,21 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   you pay for); a terminal, --pretty, or WEBSCOUT_PRETTY=1 gets the indented form.
   Token counts everywhere are chars/4. That is one ratio for very different text: token-report's
   `savings.estimator` gives a low..high band per kind (json / html / prose) and `spend.estTokensBand`
-  brackets the total. The band is a rule of thumb until you run
-  `node tools/web-scout/calibrate-tokens.mjs --write` (needs ANTHROPIC_API_KEY; counts real
-  tokens for samples of your own sessions and stores them in token-calibration.json).
+  brackets the total. The band is a rule of thumb until you run either
+  `node tools/web-scout/transcript-tokens.mjs --write` (no API key - measures real token counts
+  from your own Claude Code transcript's `usage` deltas, an estimate) or
+  `node tools/web-scout/calibrate-tokens.mjs --write` (needs ANTHROPIC_API_KEY; counts exact
+  tokens via the count_tokens endpoint for samples of your own sessions). Both store the same
+  shape in token-calibration.json; `estimatorInfo().method` says which one measured it.
   `savings.estimator.status` says which it is: uncalibrated, partial, stale (older than 90 days)
   or calibrated; `calibrate-tokens.mjs --check` exits 1 unless it is calibrated, offline, and
   WEBSCOUT_REQUIRE_CALIBRATION=1 makes the test suite fail on the same condition.
-  This repository is still uncalibrated (run pending; needs an ANTHROPIC key - another provider's
-  tokenizer would measure the wrong model).
+  A relay with nothing calibrated yet tries the no-key transcript method itself, once, the first
+  time a session starts (WEBSCOUT_AUTO_CALIBRATE=1, set automatically by "relay start"/"restart"
+  and autostart) - never overwriting an existing calibration, even a stale one.
+  `savings.estimator.note` says WHY it is still uncalibrated: flag off, set but not run yet,
+  still running, or already ran and found nothing (with the reason).
+  This repository is still uncalibrated (run pending).
   A relay running older code than disk is restarted at "session start" (nothing is in flight
   then; open tabs reconnect by themselves) - never mid-session, where it only warns.
   WEBSCOUT_NO_AUTORESTART=1 turns that off.

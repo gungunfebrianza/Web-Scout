@@ -13,11 +13,16 @@ import { stopRelay } from './relay-control.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-autostart-'));
 const port = await freePort();
+// This test exercises the REAL client.mjs autostartRelay() path, the other call site that
+// unconditionally sets WEBSCOUT_AUTO_CALIBRATE=1 on the relay it spawns - isolated the same way
+// auto-restart.test.mjs is (see its own comment on why this is load-bearing, not just tidy).
 const env = {
   WEBSCOUT_PORT: String(port),
   WEBSCOUT_DB_PATH: path.join(tmp, 'test.db'),
   WEBSCOUT_PID_PATH: path.join(tmp, 'relay.pid'),
   WEBSCOUT_NO_AUTOOPEN: '1',
+  WEBSCOUT_TOKEN_CALIBRATION: path.join(tmp, 'token-calibration.json'),
+  WEBSCOUT_TRANSCRIPT_HOME: tmp,
 };
 const cli = (extraEnv, ...args) => spawnClean([path.join(__dirname, 'cli.mjs'), ...args], { env: { ...env, ...extraEnv } });
 const alive = () => isUp(port);

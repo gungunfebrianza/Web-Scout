@@ -2366,11 +2366,20 @@ string becomes a same-length, same-equality stand-in; only `keyPath` values are 
 replays it through the reply pipeline under `default`, `leanBest` (every shape sufficed)
 and `leanWorst` (callers always re-asked for the body). Four committed traces of real CRV
 sessions gave read-byte ratios of 0.40-0.58 best case on three and 0.05 on one dominated by
-a few huge reads, and 0.52-0.75 worst case - against 0.046 for the scripted fixture, which
-is a best case by construction. The guard sweep moved the lean guard from 2500 (judgement)
-to 4000 tokens: lower worst case on three of four traces for a small best-case cost. Four
-traces from one project are a small sample; `trace-replay.test.mjs` holds each band with a
-margin so a regression fails, and says so.
+a few huge reads - against 0.046 for the scripted fixture, which is a best case by
+construction. The guard sweep moved the lean guard from 2500 (judgement) to 4000 tokens.
+Four traces from one project are a small sample; `trace-replay.test.mjs` holds each band
+with a margin so a regression fails, and says so.
+**Corrected in V34** ([[web-scout-v34-round]]): the original worst-case figure here (0.52-0.75)
+undercounted, because `leanWorst` only ever retried a `peek`/`guard` reply - a `pointer` or
+`delta` reply (the default lean shape for a repeat/changed read) was never retried even though
+"callers always re-ask" is supposed to mean exactly that. Once `leanWorst` also retries a
+distrusted pointer/delta, the real worst case on these four traces is 1.01-1.08: a fully
+distrusted lean session costs a *little more* than never shaping at all (the shape itself is a
+paid round trip before the retry), not less. `read-pipeline.mjs` also now measures this live,
+not just in replay: a `pointer`/`delta` reply followed within the window by a raw full re-read
+of the same target bumps `pointerThenFull`/`deltaThenFull` (or `...ThenNarrowed`), the same way
+a distrusted peek already did - see `getReadStrategyStats().shaping.pointer/delta`.
 
 **A cheaper tool list and help (6).** `usage.txt` is ~16k tokens and every unknown command
 printed all of it; the MCP tool list is sent on every session. `help.mjs` slices `usage.txt`
@@ -2403,11 +2412,284 @@ is the offline exit-code form, and `WEBSCOUT_REQUIRE_CALIBRATION=1` makes CI enf
 available, and a measured file is not something to invent. The bands stay labelled
 uncalibrated until someone runs `calibrate-tokens.mjs --write` and commits the result.
 
+**OPEN - item 10 is not finished (waiting on Anthropic credits).** To close it:
+1. `ANTHROPIC_API_KEY=... node tools/web-scout/calibrate-tokens.mjs --write` (uses the free
+   `count_tokens` endpoint; sample sessions come from the local relay DB), then
+   `calibrate-tokens.mjs --check` must exit 0.
+2. Commit `tools/web-scout/token-calibration.json`; the last test in
+   `token-calibration.test.mjs` then stops skipping.
+3. Set `WEBSCOUT_REQUIRE_CALIBRATION=1` in `.github/workflows/web-scout-tests.yml`.
+4. Replace the "uncalibrated" wording in README, usage.txt and this entry with the measured
+   bands and date.
+
+Another provider's key does not substitute. The estimator predicts Claude tokens, and a
+DeepSeek (or any other) tokenizer counts differently, so its ratios would be filed under a
+`calibrated` status that describes the wrong model. If a proxy is ever wanted it needs its own
+status (recording the tokenizer used) that CI does not accept as `calibrated`.
+
 **Honest limits.** The lean numbers are a replay of four sessions from one project with a
 two-point model of caller behaviour (always satisfied / always re-asks); real callers sit
-between and the width of the band is the risk of turning lean on. The hint costing credits
+between and the width of the band is the risk of turning lean on (V34 also now measures this
+live, not just in replay - see below). The hint costing credits
 only the adopting call. Thresholds (60%/85%, 3000/1000, the 30% delta margin, the 1000-token
 and doubling note rule, 4 hints) are judgement except the lean guard, which the sweep chose.
+
+## V34 - a real worst case, a corpus that grows itself, and the whole CRV loop in one call (implemented)
+
+Asked the same question again ("what's the lesson on token-saving methodology") after V33
+shipped. The honest answer: V33's OWN worst-case number was wrong (measured, not estimated -
+`leanWorst` never actually retried a distrusted pointer/delta), the trace corpus was four
+sessions and stayed four sessions, a CRV step still cost three round trips even with `idb
+verify`, and calibration was blocked entirely on an API key nobody had yet. Eight changes.
+
+**Calibrate from the agent's own transcript, no API key (1).** `transcript-tokens.mjs`
+measures chars-per-token from Claude Code's OWN transcript `usage` deltas (input + cache-read +
+cache-creation tokens before and after a tool call, minus that call's output tokens) instead of
+the `count_tokens` endpoint - a line fit over many clean gaps (one tool call, one result, nothing
+else in between) separates the per-character cost from the constant every reply carries.
+`node tools/web-scout/transcript-tokens.mjs --write` (auto-discovers this machine's own
+transcripts) or `calibrate-tokens.mjs --write` (exact, needs `ANTHROPIC_API_KEY`) both write the
+same `token-calibration.json`; `estimatorInfo().method` and `source` say which one measured it.
+An estimate, not the exact count - labelled as such.
+
+**The lean worst case was undercounted, and is now measured live too (2).** `trace.mjs`'s
+`leanWorst` strategy only ever retried a distrusted `peek`/`guard` reply - a `pointer` or
+`delta` reply (the DEFAULT lean shape for a repeat/changed read) was never retried even though
+"callers always re-ask" is supposed to mean exactly that. Fixed: on these same four traces the
+real worst case is 1.01-1.08 (a small premium over the default, not the 0.52-0.75 saving
+previously reported), because the shape itself is a paid round trip before the retry.
+`read-pipeline.mjs` now measures the same thing live, per call, not just in replay:
+`pointerThenFull`/`deltaThenFull` (or `...ThenNarrowed`) bump the same way a distrusted peek
+already did, surfaced as `readStrategy.shaping.pointer/delta.followedByFull`.
+
+**The trace corpus grows on its own (3).** `session end --trace` (also `webscout_session.end
+{trace:true}`) exports the session that just ended, anonymised the same way `trace.mjs export`
+already was, into `traces/auto/` (gitignored - `WEBSCOUT_TRACE_DIR` overrides it, used by the
+test harness so a test run never writes into the real project tree). Nothing here is
+auto-promoted into the committed, benchmarked `traces/*.json.gz` - that stays a human choosing
+a good session and adding a `MEASURED` entry in `trace-replay.test.mjs`.
+
+**Byte budgets on real replies, not just the static tool list (4).** `schema-budget.test.mjs`
+only ever capped what is sent before anything happens (the MCP tool list, help slices).
+`reply-budget.test.mjs` caps actual RUNTIME replies against fixed, deterministic fixtures: an
+`idb verify` PASS, a `session start` briefing at its own `BRIEFING_MAX_STORES` worst case, and a
+`--table` dump - so a field quietly added to a default reply fails the build.
+
+**The whole CRV loop in one call (5).** `crv run --stores a,b --type dom.click --params
+'{"selector":"#x"}' --expect "notes:+1"` (relay: `POST /crv/run`; MCP:
+`webscout_idb.crv_run`) takes its own baseline snapshot, dispatches the action, then runs the
+same `verifyAgainstBaseline` `idb verify` already uses (now a shared helper) - baseline -> action
+-> verify in one reply instead of three round trips, each its own full-body reply, done by hand.
+`idb.snapshot` is refused as the action (take the baseline with `idb snapshot` instead); the
+action failing fails the whole call, same as a bare action would. Scoped deliberately: strict-CRV
+sessions' own reply shape (full diff, not a verify report) was left alone - a larger, separate
+change with its own blast radius across existing tests and docs, not folded into this one.
+Found and fixed while building this: `saveSnapshot`'s own return value carries no store content
+(a summary only, same as `/state/snapshot`'s reply) - the first draft of `/crv/run` passed that
+straight to the verify step, silently comparing against an empty baseline every time.
+`crv-run.test.mjs`'s pass/fail-expectation/action-fails cases caught it immediately.
+
+**Real usage evidence for the tool list (6, scoped down).** The lesson asked for splitting the
+MCP tool list into a small core plus a secondary `webscout_more`-style tool, chosen by real
+usage. That split was NOT done - there is no usage history yet to base it on, and guessing which
+actions to hide would be exactly the kind of unmeasured claim this whole series argues against.
+What shipped instead: `token-report`'s `neverCalled` - every dispatchable action type this relay
+has never logged a single call for, all-time (excludes the internal `ping`/`page.epoch`), with a
+`sampleSizeCalls` and a note when the sample is still too small to trust "never". The evidence a
+future round would need before touching the schema.
+
+**Does `help all` still get called (7)?** `help` is served locally from `usage.txt` and never
+otherwise reaches the relay, so there was no way to know. `cli.mjs`'s `noteHelpUsage` now fires a
+best-effort, un-awaited `POST /help-used` on every `help` call (never blocks, never affects the
+exit code even with no relay reachable); `token-report.helpUsage` totals `all` against `sliced`.
+
+**A reaper for leaked test relays (8, not token-related, but the same round's own housekeeping
+cost).** A hard-killed test run (Ctrl-C twice, a crashed CI runner) leaves an orphaned relay
+process and its temp dir behind - confirmed real again this round: 15 orphaned relays and 48 temp
+dirs found and cleaned by hand. `startTestRelay()` now registers every relay it starts in a small
+JSONL registry and runs `reapLeakedRelays()` once automatically per run (only entries older than
+30 minutes, never port 8973); `node tools/web-scout/reap-test-relays.mjs` runs it on demand.
+Found and fixed while building this: a CLI test using `spawnClean` (synchronous `spawnSync`) to
+run a command that needed a same-process `connectFakeAgent()` tab to answer deadlocked outright -
+`spawnSync` blocks the caller's whole event loop, which is exactly what the fake agent's
+WebSocket `onmessage` needs to fire. `spawnAsync` (non-blocking) is the fix, and the trap is now
+documented on `spawnClean` itself. Separately: the reaper CLI could not live as a block inside
+`test-relay.mjs` - Node's test runner's default file discovery also matches `test-*.mjs`, so a
+bare `node --test` (no explicit glob) started picking up `test-relay.mjs` itself as a pseudo test
+file and failing on it; it is its own file, `reap-test-relays.mjs`, instead.
+
+Versions: relay 0.21.0, MCP server 0.22.0. Full suite: 332 pass, 3 skipped (2 need a live tab,
+1 - `token-calibration.test.mjs`'s committed-file check - waits on a measured calibration, still
+true this round; `transcript-tokens.mjs --write` closes that without a key whenever someone runs
+it, but nobody has yet).
+
+## V35 - the estimator calibrates itself, a real reply gets smaller, and two repeat incidents get closed for good (implemented)
+
+User re-asked the "lesson to improve token saving" question again (same ask as V32/V33/V34), got a
+fresh 6-item list scanned against the CURRENT tree (V34 and the session-viz round both already
+shipped by then), said "implement all". All six done in `tools/web-scout`.
+
+**`relay.mjs` no longer binds a port on a bare import (1).** `server.listen()` (and the
+pidfile/registry/signal-handler setup around it) now only runs when this file is the actual
+process entry point (`isMainModule`, checked with `import.meta.url` against
+`pathToFileURL(path.resolve(process.argv[1])).href` - the same technique `transcript-tokens.mjs`
+and `trace.mjs` already used for their own CLI guards). This is a direct fix for a repeat incident:
+V34's own roadmap entry already recorded a `node -e "import('./relay.mjs')..."` syntax-check
+accidentally binding the real port with no env override, and the exact same mistake happened AGAIN
+in this round before the fix landed - confirmed via `relay-import-safety.test.mjs` (a plain import
+never binds a port and the process exits on its own; the real entry point still does).
+
+**A relay with nothing calibrated tries to fix that itself (2).** `transcript-tokens.mjs` gained
+`autoCalibrateIfMissing()`: on a relay with `estimatorInfo().status === 'uncalibrated'`, discover
+this machine's own Claude Code transcripts, calibrate from them (no API key), and write
+`token-calibration.json` - never touching a calibration that already exists, even a stale one.
+Wired into `POST /sessions` (`session start`), deferred past the response with `setImmediate` so
+the scan never delays the caller. Gated behind `WEBSCOUT_AUTO_CALIBRATE=1`, **opt-in, not
+opt-out**, and that flip is itself the story: the first version defaulted this ON and skipped it
+only via an opt-out env var the test harness was supposed to set - and a test run immediately wrote
+a REAL `token-calibration.json` from this machine's real transcripts into the project tree, because
+four other test files (`relay-control.test.mjs`, `auto-restart.test.mjs`, `autostart.test.mjs`,
+`relay-events.test.mjs`) spawn a genuine `node relay.mjs` for their own reasons and none of them
+knew about the new flag. Fixed by inverting it: off by default, and set to `1` only at the two real
+call sites that start a relay for actual use (`client.mjs`'s `autostartRelay`/
+`ensureFreshRelayForNewSession`, `cli.mjs`'s `relay start`/`restart`) - every test-spawned relay,
+by construction, never sets it. The four sibling test files also got `WEBSCOUT_TOKEN_CALIBRATION`
+(and, for the two that exercise the real restart/autostart path and therefore DO get the flag,
+`WEBSCOUT_TRANSCRIPT_HOME` pointed at an empty fixture dir) as defense in depth. The accidentally
+written file was deleted, untracked, before it ever reached git status.
+
+**`--crv-compact` (3).** `session start --strict-crv --crv-compact` adds a sampled preview of what
+changed (the same shape `idb verify`'s pass branch already returns) to the strict-crv auto-block's
+own reply, alongside the existing counts - sparing the separate `idb diff <idA> <idB>` full-body
+fetch a caller otherwise makes by hand once a bare count is not enough to tell whether the right
+rows changed. New `sessions.strict_crv_compact` column, off by default (NULL): an ordinary
+`--strict-crv` session's reply is provably byte-shape-identical to before this round
+(`crv-compact.test.mjs`'s first test). Deliberately scoped smaller than V34's punted "make
+strict-crv use the compact verify shape" idea - this ADDS a field, it does not change the existing
+`diff_summary`/`diff_id` shape at all, so nothing that depends on the current reply breaks.
+
+**Real usage evidence gets somewhere to be seen (4).** V34 shipped `token-report.neverCalled` and
+`.helpUsage` as measurement; nothing ever rendered either one - `dashboard.html` had zero
+references to both fields. `renderUsageEvidence()` now shows them in the savings panel (a new
+`#usageEvidenceNote` block): which action types this relay has never logged a call for (with the
+small-sample caveat), and what fraction of `help` calls were `help all` vs a sliced command.
+Verified in a real headless browser (`dashboard.test.mjs`'s new browser test), not just unit-tested
+against the JSON.
+
+**The `traces/auto/` pile gets ranked, not just grown (5).** `trace.mjs rank-auto [dir] [--top N]`
+replays every trace in the auto-export pile and ranks it by the same leanWorst distrust-rate signal
+`read-pipeline.mjs`/the dashboard already surface - the trace where shaped replies got re-asked for
+most often is the one that would actually stress-test the committed benchmark, not an arbitrary
+recent session. Promoting one into `traces/*.json.gz` is still a human's call, unchanged from V34's
+own decision on this - `rank-auto` only turns a folder into a short list.
+
+**The leaked-relay reaper covers real relays too, not just test ones (6).** The registry +
+`reapLeakedRelays()` (previously private to `test-relay.mjs`) moved to `relay-control.mjs`, the
+shared module both `relay.mjs` and `test-relay.mjs` already import from. `relay.mjs`'s own
+`isMainModule` startup block now registers itself (`dir: null`, since a real relay has no
+throwaway temp dir of its own) and runs the reaper once, so a hand-started or autostarted relay
+that gets killed outside any test run is found and cleaned up the next time ANYONE starts a relay,
+not only the next `node --test`. `WEBSCOUT_RELAY_REGISTRY` (read fresh per call, same convention as
+`pidfilePath()`) lets a test isolate this without ever touching the real, shared default -
+`relay-self-register.test.mjs` proves a real spawned relay registers itself and that a hard-killed
+one is still reaped, never against port 8973 regardless.
+
+**Why:** V33/V34 both attacked read shape and round-trip cost; this round closes what was left
+unattended around the edges - a calibration nobody ever produces, a repeat process-safety incident
+(twice now, same mistake), measurement with no viewer, and a benchmark corpus that grows but is
+never curated. **How to apply:** `WEBSCOUT_AUTO_CALIBRATE=1` is the flag to know about if
+calibration still is not appearing after several real sessions - check it is actually set (autostart
+and `relay start`/`restart` set it; a hand-run `node relay.mjs` does not, on purpose).
+`node tools/web-scout/trace.mjs rank-auto` before manually picking through `traces/auto/`. Never
+`node -e "import('./relay.mjs')..."` for a syntax check, even now that it is safe to do so by
+accident - `node --check relay.mjs` is still the right tool and does not run the module at all.
+
+Versions: relay 0.22.0, MCP server 0.23.0. Full suite: 350 pass, 3 skipped (2 need a live tab, 1 -
+the committed-calibration check - same as every prior round, still open pending either a real
+`transcript-tokens.mjs --write`/`calibrate-tokens.mjs --write` run or enough real sessions for
+`WEBSCOUT_AUTO_CALIBRATE` to produce one on its own).
+
+## V36 - ranking by WHY instead of just WHAT, a nudge instead of a silent pile, an honest "still uncalibrated" reason, and a test-runner bug that was silently eating tests (implemented)
+
+User re-asked the "lesson to improve token saving, especially methodology/mechanism" question again
+(same ask as V32-V35), got a fresh 4-item list scanned against the CURRENT tree (V35 already
+shipped by then), said "implement all". All four done, plus one unplanned but load-bearing fix
+found mid-implementation, in `tools/web-scout`.
+
+**`token-report` ranks by intent, not just by command (1).** `byType`/`byTarget`/`byMacro` all
+answer "what was called"; nothing answered "why". `intent-import.mjs` already recovers the agent's
+own narrated reason from its transcript and writes it onto every action a narrated call produced
+(`actions.intent`) - unused for cost ranking until now. `db.mjs`'s new `getActionCostByIntent`
+groups by the exact intent text (one narrated call's window can cover several logged actions - a
+strict-CRV click logs four - so this collapses them to one row, and collapses a repeated
+verification narration back to one line too), bucketing anything with no intent under a labelled
+null row, same shape as `byMacro`'s null-macroId bucket. Session-scoped only, wired into
+`GET /sessions/:id/token-report` as `byIntent`. `viz-endpoint.test.mjs`'s existing narrated-session
+fixture proved the grouping directly: the 4 actions one narration produced land in one row, the
+rest bucket separately.
+
+**`--crv-compact`'s new `samples` field had zero byte-cap coverage (2).** V35 added a `samples`
+block to the strict-crv reply; `reply-budget.test.mjs` (the file whose whole job is catching an
+unbounded field before it ships) never got a case for it. Added one at a fixture near the field's
+own worst case (3 stores, each hitting `sampleStoreDiff`'s 3-rows-per-bucket cap on all 3 buckets
+at once - measured 3697 bytes, capped at 4400).
+
+**A top-ranked auto-exported trace gets a nudge, not silence (3).** `trace.mjs rank-auto` (V35)
+was fully manual - the `traces/auto/` pile could grow indefinitely with nobody ever told a good
+promotion candidate was sitting in it. `session end --trace` now runs the same ranking against the
+trace it just wrote; if that trace lands in the top 3 by distrust rate, an extra stderr line names
+its rank and points at `rank-auto` - quiet otherwise, so an ordinary export does not get a nudge
+every time. Same "consider macro record" pattern `session end` already uses for a different signal.
+
+**`estimatorInfo()` now says WHY a relay is still uncalibrated, not just THAT it is (4).**
+"no usable token-calibration.json" read identically whether `WEBSCOUT_AUTO_CALIBRATE` was never set
+on this relay, was set but had not run yet, was still running, or had already run and found
+nothing - four different situations an operator would act on differently, reported as one generic
+line. `token-estimate.mjs` gained an optional `autoCalibrate` param (`{enabled, scheduled,
+outcome}`) - passed in by `relay.mjs` only, since a pure estimator module has no way to know a
+relay's own runtime state by itself - and appends the specific reason to `savings.estimator.note`
+while `status === 'uncalibrated'`. `relay.mjs`'s `maybeAutoCalibrate()` now records its own outcome
+in a module-level variable instead of discarding it after logging.
+
+**Unplanned: a test-runner ordering bug was silently dropping tests from three files, in CI's own
+invocation (5, found verifying item 2, not proposed).** While measuring item 2's fixture,
+`reply-budget.test.mjs` ran its FULL 4 tests under a plain `node file.mjs` but only 1 under
+`node --test --test-force-exit file.mjs` - the exact command `CONTRIBUTING.md`'s "Testing" section
+and CI both use - with no failure or skip reported anywhere, just tests missing from the run's own
+count. Root cause: the file declared one `test()` synchronously, THEN did
+`const relay = await startTestRelay()` at module top level, THEN declared three more `test()`
+calls once that await resolved - `--test-force-exit` was found to exit as soon as the pre-await
+test finished, before the post-await ones ever registered. A repo-wide scan for the same shape
+(a `test()` before a top-level `= await start...`) found two MORE files already shipped with it:
+`crv-verify.test.mjs` (silently running 6 of 10) and `trace-replay.test.mjs` (silently running 2
+of 11 - losing its four `replay:`/guard-sweep tests AND all four of the committed real-trace band
+checks). All three fixed by moving the relay-startup await (and everything it gates - `BASE`,
+`before`/`after`, fixtures) above the file's first `test()` call; verified by diffing plain-node
+vs `--test-force-exit` counts per file (now identical everywhere). This was never on the proposed
+list - it surfaced because measuring item 2's actual worst-case byte count meant literally running
+the file both ways and noticing the counts disagreed.
+
+**Why:** V33-V35 each closed a specific token-cost or process-safety gap; this round is aimed at
+the tooling built to CATCH the next one - a cost ranking that answered "what" but never "why", a
+corpus-growth signal nobody was nudged to look at, a diagnostic message that collapsed four
+different root causes into one line, and (found along the way, not proposed) three test files
+whose own byte-budget and replay-correctness guarantees were not actually running in CI at all,
+silently. The V35 auto-calibrate incident was caught BECAUSE the full suite was run as a matter of
+course; this round is a reminder that "the suite passed" and "the suite ran everything it claims
+to" are not the same fact, and are worth checking directly once in a while, not assumed.
+**How to apply:** run a new or edited relay-touching test file BOTH plain (`node file.test.mjs`)
+and with `--test-force-exit` at least once and diff the test counts if anything about its
+top-level structure looks unusual (a `test()` before an `await`, in particular) - `CONTRIBUTING.md`
+now says this explicitly. `token-report --session <id>`'s new `byIntent` is only informative once
+`session intents`/transcript import has actually run for that session - an unnarrated session still
+gets exactly one row, the null-intent bucket.
+
+Versions: relay 0.23.0, MCP server 0.24.0. Full suite: 373 tests (up from 350 - the 3 recovered
+files plus new coverage), 3 skipped (2 need a live tab, 1 - committed calibration - still open,
+same as every prior round). One pre-existing, documented Windows-only flake remains
+(`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` at process exit, landing on whichever
+file happens to finish near the full run's end - not new this round, not caused by anything here,
+and already named in `CONTRIBUTING.md`'s own `spawnClean`/`isUp` paragraph).
 
 ## Explicit non-goals
 

@@ -84,6 +84,27 @@ test('the API counter posts the text to count_tokens and returns input_tokens; i
   await assert.rejects(failing('x'), /count_tokens failed \(401\)/);
 });
 
+test('estimatorInfo names WHY auto-calibrate has not filled the gap yet, when told', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-cal-')), 'cal.json');
+  const script = `const m = await import(${JSON.stringify(new URL('./token-estimate.mjs', import.meta.url).href)});
+    console.log(JSON.stringify({
+      off: m.estimatorInfo({ autoCalibrate: { enabled: false, scheduled: false, outcome: null } }).note,
+      notYetRun: m.estimatorInfo({ autoCalibrate: { enabled: true, scheduled: false, outcome: null } }).note,
+      pending: m.estimatorInfo({ autoCalibrate: { enabled: true, scheduled: true, outcome: null } }).note,
+      failed: m.estimatorInfo({ autoCalibrate: { enabled: true, scheduled: true, outcome: { written: false, reason: 'no Claude Code transcripts found' } } }).note,
+      bare: m.estimatorInfo().note,
+    }));`;
+  const r = spawnClean(['--input-type=module', '-e', script], { env: { WEBSCOUT_TOKEN_CALIBRATION: file } });
+  fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  assert.equal(r.status, 0, r.stderr);
+  const notes = JSON.parse(r.stdout);
+  assert.match(notes.off, /WEBSCOUT_AUTO_CALIBRATE is not set on this relay/);
+  assert.match(notes.notYetRun, /has not run yet on this relay/);
+  assert.match(notes.pending, /already started; still finishing/);
+  assert.match(notes.failed, /already tried once on this relay and did not write one: no Claude Code transcripts found/);
+  assert.doesNotMatch(notes.bare, /AUTO_CALIBRATE/, 'no autoCalibrate arg (e.g. calibrate-tokens.mjs, transcript-tokens.mjs callers) adds nothing');
+});
+
 test('gatherSamples draws JSON and HTML from recorded actions and prose from the README', async () => {
   const get = async (_m, route) => {
     if (route === '/sessions') return [{ id: 1 }];

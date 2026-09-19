@@ -123,6 +123,58 @@ test('a peek follow-up is forgotten after the window', () => {
   assert.ok(!h.keys().includes('peekThenFull'));
 });
 
+test('a pointer distrusted (re-asked for the raw body afterwards) is measured, same as a peek', () => {
+  const h = harness();
+  const full = dump(30);
+  const entry = { cachedAt: 't0', actionId: 10 };
+  h.call({ full, actionId: 10, opts: { ifChanged: true } }); // establishes what the caller holds
+  h.call({ full, hit: true, entry, opts: { ifChanged: true } }); // pointer: "unchanged, you already have it"
+  const again = h.call({ full, hit: true, entry: { cachedAt: 't1', actionId: 10 } }); // dropped --if-changed: wanted the body anyway
+  assert.equal(again.mode, 'full');
+  assert.ok(h.keys().includes('pointerThenFull'));
+});
+
+test('a pointer followed by a narrower read on the same target is measured as narrowed, not full', () => {
+  const h = harness();
+  const full = dump(30);
+  const entry = { cachedAt: 't0', actionId: 10 };
+  h.call({ full, actionId: 10, opts: { ifChanged: true } });
+  h.call({ full, hit: true, entry, opts: { ifChanged: true } });
+  const narrower = h.call({ full: dump(3), params: { store: 'orders', where: { id: 1 } }, cacheKey: 'k-where', actionId: 11 });
+  assert.equal(narrower.mode, 'full');
+  assert.ok(h.keys().includes('pointerThenNarrowed'));
+  assert.ok(!h.keys().includes('pointerThenFull'));
+});
+
+test('a pointer followed by another pointer is still trust, not a re-ask', () => {
+  const h = harness();
+  const full = dump(30);
+  const entry = { cachedAt: 't0', actionId: 10 };
+  h.call({ full, actionId: 10, opts: { ifChanged: true } });
+  h.call({ full, hit: true, entry, opts: { ifChanged: true } });
+  h.call({ full, hit: true, entry: { cachedAt: 't1', actionId: 10 }, opts: { ifChanged: true } });
+  assert.ok(!h.keys().includes('pointerThenFull'));
+  assert.ok(!h.keys().includes('pointerThenNarrowed'));
+});
+
+test('a distrusted delta is measured under its own name, and forgotten after the window', () => {
+  const h = harness();
+  const v1 = dump(60);
+  h.call({ full: v1, actionId: 10 });
+  const v2 = { ...v1, rows: v1.rows.map((r) => (r.id === 7 ? { ...r, status: 'shipped' } : r)) };
+  h.call({ full: v2, actionId: 11, opts: { delta: true } });
+  const full = h.call({ full: v2, hit: true, entry: { cachedAt: 't', actionId: 11 } });
+  assert.equal(full.mode, 'full');
+  assert.ok(h.keys().includes('deltaThenFull'));
+
+  const h2 = harness();
+  h2.call({ full: v1, actionId: 10 });
+  h2.call({ full: v2, actionId: 11, opts: { delta: true } });
+  h2.tick(91000);
+  h2.call({ full: v2, hit: true, entry: { cachedAt: 't', actionId: 11 } });
+  assert.ok(!h2.keys().includes('deltaThenFull'));
+});
+
 test('--table lists rows as columns + rows, and only when it is smaller', () => {
   const h = harness();
   const r = h.call({ full: dump(25), opts: { table: true } });

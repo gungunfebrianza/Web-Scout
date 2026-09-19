@@ -17,6 +17,7 @@ import {
 import { validateArgs, findMsysMangledArgs, findSpec } from './cli-spec.mjs';
 import { parseUsage, helpTopic, helpMissing } from './help.mjs';
 import { resolveRelayPid, stopRelay, startRelay, restartRelay, RELAY_SOURCE_FILES } from './relay-control.mjs';
+import { rankAutoTraces } from './trace.mjs';
 
 // Set once near the top of main() from a `--agent <name>` flag found
 // anywhere in the subcommand's own arguments; every dom/idb(snapshot)/eval
@@ -65,6 +66,13 @@ function extractBooleanFlag(args, name) {
   return { args: [...args.slice(0, idx), ...args.slice(idx + 1)], value: true };
 }
 
+// Fire-and-forget: does "help all" still get called, against the sliced forms it exists to
+// replace? Never awaited (a "help" command must stay instant) and never lets a down/slow relay
+// affect the exit code - see token-report's helpUsage.
+function noteHelpUsage(kind) {
+  request('POST', '/help-used', { kind }, { autostart: false }).catch(() => {});
+}
+
 // The help text lives in usage.txt, not a template literal here - a single
 // stray backtick or ${ in ~600 lines of prose used to be a syntax-error trap
 // every time a new flag was documented.
@@ -72,11 +80,12 @@ function extractBooleanFlag(args, name) {
 // command (help.mjs); "help all" prints the whole file. Returns false when nothing matched.
 function usage(topic, sub) {
   const text = fs.readFileSync(new URL('./usage.txt', import.meta.url), 'utf8').trimEnd();
-  if (topic === 'all') { console.log(text); return true; }
+  if (topic === 'all') { console.log(text); noteHelpUsage('all'); return true; }
   const parsed = parseUsage(text);
   const out = helpTopic(parsed, topic, sub);
-  if (out === null) { console.error(helpMissing(parsed, topic, sub)); return false; }
+  if (out === null) { console.error(helpMissing(parsed, topic, sub)); noteHelpUsage('sliced'); return false; }
   console.log(out);
+  noteHelpUsage('sliced');
   return true;
 }
 
@@ -106,7 +115,7 @@ async function warnOnDbVersionDrift(hint) {
 // killing it by hand on Windows meant netstat + taskkill (pkill silently fails
 // against a native node.exe). `relay status` works even when the relay is down.
 async function handleRelay(sub) {
-  const opts = { port: PORT, host: HOST };
+  const opts = { port: PORT, host: HOST, env: { WEBSCOUT_AUTO_CALIBRATE: '1' } };
   if (sub === 'status') {
     const found = resolveRelayPid(PORT);
     let health = null;
@@ -150,10 +159,12 @@ async function handleSession(sub, rawArgs) {
     let tokenBudgetValue;
     let noBriefing;
     let leanValue;
+    let crvCompactValue;
     ({ args, value: noBriefing } = extractBooleanFlag(args, '--no-briefing'));
     ({ args, value: leanValue } = extractBooleanFlag(args, '--lean'));
     ({ args, value: tagsValue } = extractFlag(args, '--tags'));
     ({ args, value: strictCrv } = extractBooleanFlag(args, '--strict-crv'));
+    ({ args, value: crvCompactValue } = extractBooleanFlag(args, '--crv-compact'));
     ({ args, value: storesValue } = extractFlag(args, '--stores'));
     ({ args, value: autoSnapshot } = extractBooleanFlag(args, '--auto-snapshot'));
     ({ args, value: tokenBudgetValue } = extractFlag(args, '--token-budget'));
@@ -161,7 +172,7 @@ async function handleSession(sub, rawArgs) {
     const tags = tagsValue ? tagsValue.split(',').map((t) => t.trim()).filter(Boolean) : [];
     const strictCrvStores = storesValue ? storesValue.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
     await ensureFreshRelayForNewSession();
-    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, tags, token_budget: tokenBudgetValue !== undefined ? Number(tokenBudgetValue) : undefined, briefing: noBriefing ? false : undefined, lean: leanValue || undefined, agent: agentFlag });
+    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, crv_compact: crvCompactValue || undefined, tags, token_budget: tokenBudgetValue !== undefined ? Number(tokenBudgetValue) : undefined, briefing: noBriefing ? false : undefined, lean: leanValue || undefined, agent: agentFlag });
     if (strictCrv && !storesValue) {
       console.error('WARNING: --strict-crv with no --stores auto-snapshots the WHOLE db on every dom.click/fill/eval/idb.put/idb.delete - this WILL time out (60s) against a real-size production IndexedDB. Pass --stores a,b,c to scope it.');
     }
@@ -186,13 +197,35 @@ async function handleSession(sub, rawArgs) {
     return;
   }
   if (sub === 'end') {
-    let id = rawArgs[0];
+    let args = rawArgs;
+    let traceFlag;
+    ({ args, value: traceFlag } = extractBooleanFlag(args, '--trace'));
+    let id = args[0];
     if (!id) {
       const health = await request('GET', '/health');
       if (!health.active_session) throw new Error('no active session to end');
       id = health.active_session.id;
     }
     const ended = await request('POST', `/sessions/${id}/end`);
+    if (traceFlag) {
+      try {
+        const trace = await request('POST', `/sessions/${ended.id}/trace`);
+        console.error(`session #${ended.id} exported to ${trace.file} (${trace.events} events, ${trace.reads} shapeable reads) - grows the trace.mjs corpus (traces/auto/, gitignored); "trace.mjs replay traces/auto/*.json.gz" to see its own numbers, or promote a good one into the committed traces/ directory by hand.`);
+        // The corpus otherwise just grows with nobody nudged to look at it - rank it against every
+        // OTHER auto-exported trace right now, and only speak up if THIS one is actually near the
+        // top (a real candidate), not for every export.
+        try {
+          const { candidates } = rankAutoTraces();
+          const name = path.basename(trace.file);
+          const rank = candidates.findIndex((c) => c.file === name);
+          if (rank !== -1 && rank < 3) {
+            console.error(`this trace ranks #${rank + 1} of ${candidates.length} in traces/auto/ by distrust rate (${candidates[rank].distrustRatePct}%) - a candidate worth promoting into the committed benchmark; "trace.mjs rank-auto" for the full list.`);
+          }
+        } catch { /* best-effort nudge only - never fail "session end" over it */ }
+      } catch (err) {
+        console.error(`WARNING: --trace export failed: ${err.message}`);
+      }
+    }
     if (ended.replayableActionCount >= 5) {
       console.error(`${ended.replayableActionCount} replayable action(s) this session - consider "macro record \\"<name>\\" ${ended.id}" if this shape (seed/verify/cleanup, etc.) will repeat.`);
     }
@@ -747,7 +780,8 @@ async function main() {
   // consecutive same-type+same-params calls within 5s of each other, 3+ in
   // a row - the confirmed real "eval 1+1 while waiting for boot" poll
   // shape, a waste class byType alone can't distinguish from one-off heavy
-  // calls.
+  // calls. byIntent (session-scoped only) ranks the agent's own narrated
+  // WHY (from "session intents") instead of WHAT was called.
   if (command === 'token-report') {
     // NOT rest.slice(1) - rest here IS the flag list itself (no leading
     // subcommand token to skip), so slicing dropped "--session" outright
@@ -850,6 +884,11 @@ async function main() {
   ({ args, value: samplesValue } = extractFlag(args, '--samples'));
   ({ args, value: allowExtraValue } = extractBooleanFlag(args, '--allow-extra'));
   ({ args, value: verboseValue } = extractBooleanFlag(args, '--verbose'));
+  // "crv run": the action between the two snapshots, given the same way /command takes it.
+  let typeValue;
+  let paramsValue;
+  ({ args, value: typeValue } = extractFlag(args, '--type'));
+  ({ args, value: paramsValue } = extractFlag(args, '--params'));
 
   if (command === 'page' && args[0] === 'reload') {
     let a = args.slice(1);
@@ -1098,6 +1137,17 @@ async function main() {
       clear: () => send('idb.clear', { store: subArgs[0] }),
       wait: () => send('idb.wait', { store: subArgs[0], countGte: countGteValue !== undefined ? Number(countGteValue) : undefined, timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined }),
       watch: () => watchIdbStore(subArgs[0], countGteValue, timeoutValue),
+    },
+    crv: {
+      // Baseline -> action -> verify in ONE call: snapshot --stores, dispatch --type/--params,
+      // re-snapshot, diff, check --expect - what would otherwise be "idb snapshot", the action
+      // itself, then "idb verify" as three separate round trips (three full-body replies to read)
+      // becomes one, few-line reply. See relay.mjs's POST /crv/run.
+      run: () => request('POST', '/crv/run', {
+        agent: agentFlag, stores: csv(storesValue), type: typeValue, params: paramsValue ? JSON.parse(paramsValue) : {},
+        expect: expectFileValue ? fs.readFileSync(expectFileValue, 'utf8') : expectValue,
+        allowExtra: allowExtraValue || undefined, verbose: verboseValue || undefined, samples: samplesValue !== undefined ? Number(samplesValue) : undefined,
+      }),
     },
     net: {
       // --limit N keeps only the N most recent entries and --url <substr> only

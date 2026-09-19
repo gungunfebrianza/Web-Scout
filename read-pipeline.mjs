@@ -88,7 +88,7 @@ export function createReadPipeline({ bump, now = () => Date.now(), leanGuardToke
 
   const deliveredFor = (sid) => { if (!delivered.has(sid)) delivered.set(sid, new Map()); return delivered.get(sid); };
   const trailFor = (sid) => {
-    if (!trails.has(sid)) trails.set(sid, { scopedAt: new Map(), lastScope: new Map(), reReads: new Map(), fullHits: new Map(), hinted: new Set(), pendingScope: new Set(), pendingReuse: new Map(), peeks: new Map(), hintsSent: 0, kinds: new Map() });
+    if (!trails.has(sid)) trails.set(sid, { scopedAt: new Map(), lastScope: new Map(), reReads: new Map(), fullHits: new Map(), hinted: new Set(), pendingScope: new Set(), pendingReuse: new Map(), peeks: new Map(), leanWithheld: new Map(), hintsSent: 0, kinds: new Map() });
     return trails.get(sid);
   };
 
@@ -208,6 +208,20 @@ export function createReadPipeline({ bump, now = () => Date.now(), leanGuardToke
     } else if (trail.peeks.has(target) && now() - trail.peeks.get(target) <= FOLLOW_UP_WINDOW_MS) {
       trail.peeks.delete(target);
       bump(isNarrowed(type, params) ? 'peekThenNarrowed' : 'peekThenFull', outBytes);
+    }
+
+    // pointer/delta follow-up: "trust what you already hold" only pays off if the caller then
+    // actually relies on it - a raw FULL re-read of the same target afterwards (not another
+    // pointer/delta, not a table - only the unshaped body) means it did not, and the bytes it
+    // looked like this call saved were spent after all. This is what "leanWorst" in trace.mjs
+    // simulates as a whole-session policy; this is the same thing measured live, per call.
+    if (mode === 'pointer' || mode === 'delta') {
+      trail.leanWithheld.set(target, { at: now(), mode });
+      if (trail.leanWithheld.size > 200) for (const [k, w] of trail.leanWithheld) if (now() - w.at > FOLLOW_UP_WINDOW_MS) trail.leanWithheld.delete(k);
+    } else if (mode === 'full' && trail.leanWithheld.has(target) && now() - trail.leanWithheld.get(target).at <= FOLLOW_UP_WINDOW_MS) {
+      const origin = trail.leanWithheld.get(target).mode;
+      trail.leanWithheld.delete(target);
+      bump(isNarrowed(type, params) ? `${origin}ThenNarrowed` : `${origin}ThenFull`, outBytes);
     }
 
     // who chose the shaping: the caller (explicit flags), the session (lean), or nobody (plain)

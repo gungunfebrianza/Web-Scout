@@ -85,6 +85,27 @@ test('an outline followed by --full on the same selector counts against the outl
   }
 });
 
+const queryOpts = (type, params, opts) => api('POST', '/command', { type, params, agent: 'strategy-tab', opts });
+
+test('a distrusted pointer (re-read raw after "unchanged") is measured, live', { skip: skipLive }, async () => {
+  const before = await stats();
+  await queryOpts('idb.dump', { store: 'ptr-target' }, {});
+  await queryOpts('idb.dump', { store: 'ptr-target' }, { ifChanged: true }); // unchanged: a pointer
+  await queryOpts('idb.dump', { store: 'ptr-target' }, {}); // dropped --if-changed: wanted the body anyway
+  const after = await stats();
+  assert.equal(after.shaping.pointer.followedByFull - before.shaping.pointer.followedByFull, 1);
+  assert.ok(after.shaping.pointer.bytesSpentAfterwards > before.shaping.pointer.bytesSpentAfterwards);
+});
+
+test('a pointer followed by another pointer is trust holding, not a re-ask', { skip: skipLive }, async () => {
+  const before = await stats();
+  await queryOpts('idb.dump', { store: 'ptr-trusted' }, {});
+  await queryOpts('idb.dump', { store: 'ptr-trusted' }, { ifChanged: true });
+  await queryOpts('idb.dump', { store: 'ptr-trusted' }, { ifChanged: true });
+  const after = await stats();
+  assert.equal(after.shaping.pointer.followedByFull, before.shaping.pointer.followedByFull);
+});
+
 test('the storage-dedup total is sampled into the trend', { skip: skipLive }, async () => {
   const report = await api('GET', '/token-report');
   const today = report.savings.trend.find((t) => t.day === new Date().toISOString().slice(0, 10));

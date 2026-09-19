@@ -36,7 +36,13 @@ async function makeStale() {
 before(async () => {
   for (const f of [...RELAY_SOURCE_FILES, 'dashboard.html']) fs.copyFileSync(path.join(realDir, f), path.join(tmp, f));
   port = await freePort();
-  env = { WEBSCOUT_PORT: String(port), WEBSCOUT_DB_PATH: path.join(tmp, 'test.db'), WEBSCOUT_PID_PATH: pidPath, WEBSCOUT_NO_AUTOOPEN: '1' };
+  // This test exercises the REAL `ensureFreshRelayForNewSession` restart path (client.mjs), the
+  // one call site that unconditionally sets WEBSCOUT_AUTO_CALIBRATE=1 on the relay it spawns - so
+  // this env must isolate calibration itself, the same as the db/pid/trace paths already are:
+  // WEBSCOUT_TOKEN_CALIBRATION keeps any write inside `tmp`, WEBSCOUT_TRANSCRIPT_HOME points
+  // discoverTranscripts at an empty dir so it finds nothing and returns immediately instead of
+  // scanning this machine's real Claude Code history.
+  env = { WEBSCOUT_PORT: String(port), WEBSCOUT_DB_PATH: path.join(tmp, 'test.db'), WEBSCOUT_PID_PATH: pidPath, WEBSCOUT_NO_AUTOOPEN: '1', WEBSCOUT_TOKEN_CALIBRATION: path.join(tmp, 'token-calibration.json'), WEBSCOUT_TRANSCRIPT_HOME: tmp };
   const started = await startRelay({ port, script: path.join(tmp, 'relay.mjs'), logPath: path.join(tmp, 'relay.log'), env });
   assert.equal(started.started, true, JSON.stringify(started));
 });

@@ -5,6 +5,34 @@ import assert from 'node:assert/strict';
 import { parseExpect, evaluateExpectations, buildVerifyReport, changedFields, sampleStoreDiff } from './crv-verify.mjs';
 import { startTestRelay, connectFakeAgent } from './test-relay.mjs';
 
+// ---------- through a real relay ----------
+//
+// This setup runs FIRST, before any test() call below, even the pure ones that never touch it: a
+// test() declared before this top-level await, followed by more test() calls once the await
+// resolves, was found to silently run only the pre-await tests under `--test-force-exit` (the
+// exact CI invocation, CONTRIBUTING.md) - no failure, no skip, just tests missing from the count.
+const relay = await startTestRelay();
+const BASE = `http://127.0.0.1:${relay.port}`;
+const skipLive = relay.live ? 'skipped under WEBSCOUT_TEST_LIVE=1' : false;
+let tab;
+const db = { notes: [{ id: 1, body: 'one' }], tags: [{ id: 1, label: 'a' }] };
+
+async function api(method, route, body) {
+  const res = await fetch(`${BASE}${route}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
+  const json = await res.json();
+  return json.ok ? json.result : Object.assign(new Error(json.error), { status: res.status });
+}
+const verify = (body) => api('POST', '/state/verify', { agent: 'verify-tab', ...body });
+
+before(async () => {
+  if (relay.live) return;
+  tab = await connectFakeAgent(relay.port, {
+    'idb.snapshot': (p) => ({ stores: Object.fromEntries((p.stores ?? Object.keys(db)).map((s) => [s, { keyPath: 'id', rows: structuredClone(db[s]) }])) }),
+  }, { name: 'verify-tab', epoch: 0 });
+  await api('POST', '/sessions', { goal: 'crv-verify.test.mjs', context: 'automated', agent: 'verify-tab', briefing: false });
+});
+after(async () => { tab?.close(); await relay.stop(); });
+
 test('the expectation syntax parses to constraints, and rejects what it cannot read', () => {
   assert.deepEqual(parseExpect('notes:+1'), [{ store: 'notes', added: 1 }]);
   assert.deepEqual(parseExpect('notes:+1+'), [{ store: 'notes', addedGte: 1 }]);
@@ -70,30 +98,6 @@ test('sampling cuts each bucket to the limit and says how many more there are', 
   assert.equal(s.added.more, 3);
   assert.deepEqual(changedFields({ a: 1, b: 2 }, { a: 1, b: 3 }), { b: [2, 3] });
 });
-
-// ---------- through a real relay ----------
-
-const relay = await startTestRelay();
-const BASE = `http://127.0.0.1:${relay.port}`;
-const skipLive = relay.live ? 'skipped under WEBSCOUT_TEST_LIVE=1' : false;
-let tab;
-const db = { notes: [{ id: 1, body: 'one' }], tags: [{ id: 1, label: 'a' }] };
-
-async function api(method, route, body) {
-  const res = await fetch(`${BASE}${route}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
-  const json = await res.json();
-  return json.ok ? json.result : Object.assign(new Error(json.error), { status: res.status });
-}
-const verify = (body) => api('POST', '/state/verify', { agent: 'verify-tab', ...body });
-
-before(async () => {
-  if (relay.live) return;
-  tab = await connectFakeAgent(relay.port, {
-    'idb.snapshot': (p) => ({ stores: Object.fromEntries((p.stores ?? Object.keys(db)).map((s) => [s, { keyPath: 'id', rows: structuredClone(db[s]) }])) }),
-  }, { name: 'verify-tab', epoch: 0 });
-  await api('POST', '/sessions', { goal: 'crv-verify.test.mjs', context: 'automated', agent: 'verify-tab', briefing: false });
-});
-after(async () => { tab?.close(); await relay.stop(); });
 
 test('verify without any snapshot to compare against says so', { skip: skipLive }, async () => {
   const err = await verify({ expect: 'notes:+1' });

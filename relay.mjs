@@ -28,7 +28,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { exec, execSync } from 'node:child_process';
 import * as dbApi from './db.mjs';
 import { buildPrompt, askAI, DEFAULT_BACKEND_URL } from './ai.mjs';
@@ -40,21 +40,29 @@ import {
   STRICT_CRV_TYPES, LONG_POLL_TYPES, DEFAULT_MACRO_TYPES, TIMEOUT_VERIFIABLE_TYPES,
   AUTO_SCREENSHOT_ON_FAILURE_TYPES, READ_CACHEABLE_TYPES, MUTATING_TYPES, COMMAND_TYPES,
 } from './command-registry.mjs';
-import { RELAY_SOURCE_FILES, writePidfile, removePidfile, readPidfile, pidAlive, recordRelayEvent, readRelayEvents, summarizeRelayEvents } from './relay-control.mjs';
+import { RELAY_SOURCE_FILES, writePidfile, removePidfile, readPidfile, pidAlive, recordRelayEvent, readRelayEvents, summarizeRelayEvents, registerRelay, unregisterRelay, reapLeakedRelays } from './relay-control.mjs';
 import { currentInjectBuild } from './build-id.mjs';
 import { createReadPipeline, readTargetKey, SCOPING_PARAM_KEYS, FOLLOW_UP_WINDOW_MS, budgetLevel, BUDGET_TIGHTEN_PCT, BUDGET_STRICT_PCT, LEAN_GUARD_TOKENS } from './read-pipeline.mjs';
 import { sizeOf } from './read-shape.mjs';
 import { estimatorInfo, baselineBand } from './token-estimate.mjs';
-import { parseExpect, buildVerifyReport } from './crv-verify.mjs';
+import { parseExpect, buildVerifyReport, sampleStoreDiff } from './crv-verify.mjs';
 import { buildSessionViz } from './session-viz.mjs';
 import { discoverTranscripts, readTranscriptFile, importIntents } from './intent-import.mjs';
+import { exportTrace, writeTrace } from './trace.mjs';
+import { autoCalibrateIfMissing } from './transcript-tokens.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
+// True only when this file is the actual process entry point (`node relay.mjs`, or a subprocess
+// spawned that way - startTestRelay/startRelay both do this). False for a plain `import('./relay.mjs')`
+// - a syntax check, or any other programmatic import - so that alone can never bind a port.
+// Confirmed real, twice: a `node -e "import('./relay.mjs')..."` syntax-check attempt actually ran
+// the whole module, including the unconditional server.listen() this guard now wraps.
+const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 // Bumped alongside docs/web-scout-roadmap.md's latest "## VN" entry - purely
 // informational (the dashboard's About panel), never read by any behavior.
-const WEBSCOUT_VERSION = '0.20.0'; // bumped alongside docs/web-scout-roadmap.md's V33 entry
+const WEBSCOUT_VERSION = '0.23.0'; // bumped alongside docs/web-scout-roadmap.md's V36 entry
 const COMMAND_TIMEOUT_MS = 15000; // interactive dom/net/eval round trips
 const SNAPSHOT_TIMEOUT_MS = 60000; // bulk idb.snapshot reads can be large
 // Short, independent budgets for two round trips that must never inherit
@@ -551,6 +559,49 @@ function summarizeByStore(list) {
 // {available:false, reason}, never a failed session start. Not a logged action.
 const BRIEFING_MAX_STORES = 60;
 const BRIEFING_TIMEOUT_MS = PING_TIMEOUT_MS * 2;
+
+// Best-effort, fire-and-forget, at most once per relay process: the estimator's bands stay
+// rule-of-thumb defaults until someone remembers to run transcript-tokens.mjs by hand, and nobody
+// does (confirmed: token-calibration.json still does not exist after several rounds of this tool
+// being built). Since that method needs no API key, try it once, the first time a session starts
+// with nothing calibrated yet - never awaited, so a first session of the day is never slowed down
+// by scanning this machine's transcript history.
+//
+// Opt-IN (WEBSCOUT_AUTO_CALIBRATE=1), not opt-out, and deliberately so: a relay this file's own
+// isMainModule guard lets run is not necessarily a REAL, interactive one - several test files
+// (relay-control.test.mjs, auto-restart.test.mjs, autostart.test.mjs, relay-events.test.mjs) spawn
+// a genuine `node relay.mjs` to test relay-control.mjs's own start/stop/restart behavior, each with
+// its own hand-built env that predates this flag and has no reason to know about it. An opt-out
+// flag those files would all need to remember to set was tried first and confirmed to fail exactly
+// this way: a test run wrote a REAL token-calibration.json from this machine's REAL transcripts
+// into the project tree. client.mjs's two real relay-(re)start call sites (autostartRelay,
+// ensureFreshRelayForNewSession) and cli.mjs's `relay start`/`relay restart` are the only places
+// that set this env var - every test-spawned relay, by construction, does not.
+let autoCalibrateAttempted = false;
+// Set once the deferred scan actually finishes (success, no-op, or error) - see
+// token-estimate.mjs's estimatorInfo({ autoCalibrate }), which reports this distinctly from
+// "never tried" (flag off) or "tried, still running" (attempted but this is still null).
+let autoCalibrateOutcome = null;
+function currentAutoCalibrateState() {
+  return { enabled: process.env.WEBSCOUT_AUTO_CALIBRATE === '1', scheduled: autoCalibrateAttempted, outcome: autoCalibrateOutcome };
+}
+function maybeAutoCalibrate() {
+  if (autoCalibrateAttempted || process.env.WEBSCOUT_AUTO_CALIBRATE !== '1') return;
+  autoCalibrateAttempted = true;
+  // Deferred past this tick so it runs AFTER the /sessions response has already been sent - the
+  // scan (discoverTranscripts + readTranscripts over up to 40 files) is synchronous and must never
+  // be what a caller's "session start" round trip is waiting on.
+  setImmediate(() => {
+    try {
+      const outcome = autoCalibrateIfMissing();
+      autoCalibrateOutcome = outcome;
+      if (outcome.written) log(`auto-calibrated from ${outcome.transcriptCount} transcript(s): ${outcome.kinds.join(', ')}`);
+    } catch (err) {
+      autoCalibrateOutcome = { attempted: true, written: false, reason: err.message };
+      log(`auto-calibrate skipped: ${err.message}`);
+    }
+  });
+}
 
 async function buildBriefing(agentName) {
   const entry = agents.get(agentName);
@@ -1151,6 +1202,32 @@ function getRepoInfo() {
   return data;
 }
 
+// The verify half of baseline -> action -> verify: re-snapshot `baseline`'s own stores, diff,
+// check `expect` (crv-verify.mjs), persist the fresh snapshot and full diff like any other. Shared
+// by POST /state/verify (an explicit baseline reference) and POST /crv/run (a baseline it just took
+// itself, one call earlier in the same request).
+async function verifyAgainstBaseline(session, agentName, { baseline, stores, expect, allowExtra, samples, verbose }) {
+  let expectations;
+  try { expectations = parseExpect(expect); } catch (err) { throw new HttpError(400, err.message); }
+  const where = baseline.where && typeof baseline.where === 'object' ? baseline.where : undefined;
+  const { result: fresh, actionId: freshActionId } = await withLoggedAction(session.id, 'idb.snapshot', { stores, where, for: 'idb.verify', baselineId: baseline.id }, () => dispatchCommand('idb.snapshot', { stores, where }, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
+  const freshSnap = dbApi.saveSnapshot({ sessionId: session.id, actionId: freshActionId, stores: fresh.stores, agentName, where });
+  const baselineStores = Object.fromEntries(Object.entries(baseline.stores || {}).filter(([name]) => stores.includes(name)));
+  const diff = computeDiff(baselineStores, fresh.stores);
+  const summary = summarizeDiff(diff);
+  const { result: report } = await withLoggedAction(session.id, 'idb.verify', { baselineId: baseline.id, afterId: freshSnap.id, expect: expect ?? null, allowExtra: !!allowExtra }, async () => {
+    const savedDiff = dbApi.saveDiff({ sessionId: session.id, actionId: null, fromId: baseline.id, toId: freshSnap.id, summary, diff });
+    return buildVerifyReport({
+      baselineId: baseline.id, afterId: freshSnap.id, diffId: savedDiff.id, summary, diff, expectations,
+      allowExtra: !!allowExtra, samples: Number.isFinite(Number(samples)) && Number(samples) > 0 ? Math.min(Number(samples), 50) : 3, verbose: !!verbose,
+    });
+  }, agentName);
+  broadcastUpdate('action', session.id);
+  broadcastUpdate('snapshot', session.id);
+  broadcastUpdate('diff', session.id);
+  return report;
+}
+
 const routes = [
   {
     // pending_command_count: how many dispatched commands are currently
@@ -1220,6 +1297,19 @@ const routes = [
   },
   { method: 'GET', pattern: /^\/agents$/, handler: async () => ({ agents: connectedAgentNames(), detail: agentsDetail() }) },
   {
+    // Fire-and-forget telemetry from the CLI's own "help" (see cli.mjs's noteHelpUsage): does
+    // "help all" (~16k tokens) still get called, against the sliced forms (index/group/one
+    // command) it exists to replace? No session required - help works before one is started.
+    method: 'POST',
+    pattern: /^\/help-used$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      if (body.kind !== 'all' && body.kind !== 'sliced') throw new HttpError(400, 'kind must be "all" or "sliced"');
+      dbApi.bumpSavingsDaily(body.kind === 'all' ? 'helpAll' : 'helpSliced', 0);
+      return { ok: true };
+    },
+  },
+  {
     // Cheap, dedicated liveness probe - see inject.js's 'ping' handler and
     // PING_TIMEOUT_MS above. Deliberately does NOT require an active
     // session (requireActiveSession() is skipped here on purpose): the
@@ -1256,9 +1346,11 @@ const routes = [
         tags: Array.isArray(body.tags) ? body.tags : undefined,
         tokenBudget: Number.isFinite(body.token_budget) ? Number(body.token_budget) : undefined,
         lean: !!body.lean,
+        strictCrvCompact: !!body.crv_compact,
       });
       broadcastUpdate('session', null);
       openDashboardInBrowser();
+      maybeAutoCalibrate();
       const briefing = body.briefing === false ? undefined : await buildBriefing(body.agent || DEFAULT_AGENT);
       const budget = session.token_budget
         ? { tokens: session.token_budget, tightenAtTokens: Math.round(session.token_budget * BUDGET_TIGHTEN_PCT / 100), strictAtTokens: Math.round(session.token_budget * BUDGET_STRICT_PCT / 100), note: 'past the first mark, reads over ~3000 tokens return their shape (--no-guard forces the body) and rows come back as {columns, rows}; past the second the guard drops to ~1000 tokens' }
@@ -1301,6 +1393,27 @@ const routes = [
   { method: 'GET', pattern: /^\/sessions$/, handler: async () => dbApi.listSessions() },
   { method: 'GET', pattern: /^\/sessions\/(\d+)$/, handler: async (_req, m) => dbApi.getSession(Number(m[1])) },
   {
+    // Grows the trace.mjs corpus without a separate offline step: "session end --trace" (or an
+    // MCP end with trace:true) calls this right after ending, so the lean/read-strategy numbers
+    // in trace-replay.test.mjs stop resting on four traces from one project. Anonymised the same
+    // way trace.mjs's own "export" CLI command is (only structure, sizes and equality survive -
+    // see trace.mjs), and written OUTSIDE the committed traces/ directory so nothing here is
+    // accidentally promoted into the benchmark's own held numbers without a human choosing it.
+    method: 'POST',
+    pattern: /^\/sessions\/(\d+)\/trace$/,
+    handler: async (_req, m) => {
+      const sessionId = Number(m[1]);
+      dbApi.getSession(sessionId); // throws 'no such session' -> 404 below if invalid
+      const dbPath = process.env.WEBSCOUT_DB_PATH || path.join(__dirname, 'webscout.db');
+      const trace = await exportTrace({ dbPath, sessionId });
+      const dir = process.env.WEBSCOUT_TRACE_DIR || path.join(__dirname, 'traces', 'auto');
+      const file = path.join(dir, `${sessionId}-${Date.now()}.json.gz`);
+      writeTrace(file, trace);
+      const reads = trace.events.filter((e) => e.result).length;
+      return { file, events: trace.events.length, reads };
+    },
+  },
+  {
     // Default response is redacted (see listActionsSummary in db.mjs - the
     // 3 known-heavy result shapes get their bulk stripped) since the
     // dashboard re-fetches this whole list on every refresh cycle and only
@@ -1337,7 +1450,8 @@ const routes = [
     // coding agent's own context window, plus flagged repeat-call loops
     // (e.g. a poll-while-booting eval sequence). Neither query touches
     // result_json content, so running this report never itself pays
-    // anything close to the bytes it measures.
+    // anything close to the bytes it measures. byType/byTarget/byMacro rank
+    // WHAT was called; byIntent ranks WHY (see db.mjs's getActionCostByIntent).
     method: 'GET',
     pattern: /^\/sessions\/(\d+)\/token-report$/,
     handler: async (_req, m) => ({
@@ -1353,6 +1467,10 @@ const routes = [
       // belongs to - byMacro answers "which replayed macro was actually
       // expensive" (ad-hoc, non-macro calls bucket under macroId: null).
       byMacro: dbApi.getActionCostByMacro(Number(m[1])),
+      // None of the above says WHY - byIntent groups by the agent's own narrated reason
+      // (imported from its transcript, see "session intents"), so a caller can see which
+      // GOAL was expensive, not just which command type. Empty until intents are imported.
+      byIntent: dbApi.getActionCostByIntent(Number(m[1])),
     }),
   },
   {
@@ -1386,9 +1504,25 @@ const routes = [
       } catch { /* db path unreadable - leave null */ }
       const storageSaved = dbSavings.byKind.storage.bytesSaved;
       dbApi.snapshotSavings('storage', storageSaved); // sampled so the trend can show day-to-day storage savings
+      // Which dispatchable actions this relay has NEVER logged a call for, all-time - a real
+      // usage count (not a guess) for the MCP tool list's own token cost: an action nobody has
+      // ever called is a candidate to trim from the always-sent schema (schema-budget.test.mjs)
+      // or move behind a secondary tool, once there is enough history to trust the answer.
+      // ping/page.epoch are internal (liveness probe, cache-invalidation check), never a real
+      // MCP action, so excluded rather than flagged as unused.
+      const calledTypes = new Set(cost.byType.map((r) => r.type));
+      const neverCalledTypes = Object.keys(COMMAND_TYPES).filter((t) => t !== 'ping' && t !== 'page.epoch' && !calledTypes.has(t)).sort();
       return {
         ...cost,
         byTarget: dbApi.getActionCostByTarget(),
+        neverCalled: {
+          types: neverCalledTypes,
+          sampleSizeCalls: cost.totalCalls,
+          note: cost.totalCalls < 50
+            ? `only ${cost.totalCalls} call(s) logged all-time - too small a sample to trust "never" yet`
+            : 'all-time across every session this relay has ever logged',
+        },
+        helpUsage: dbApi.getHelpUsage(),
         savings: {
           ...dbSavings,
           runtimeReadCache: runtimeCache,
@@ -1422,7 +1556,7 @@ const routes = [
           },
           readCache: { pageStaleMisses: readCachePageStaleMisses, note: 'hits the page-change probe turned into misses since this relay started' },
           readStrategy: strategy,
-          estimator: estimatorInfo(),
+          estimator: estimatorInfo({ autoCalibrate: currentAutoCalibrateState() }),
           trend: dbApi.getSavingsTrend(14),
           storageContext: {
             dbFileBytes,
@@ -1963,9 +2097,19 @@ const routes = [
         broadcastUpdate('diff', session.id);
         maybeMidSessionNudge(session.id, res);
 
+        // `--crv-compact` (session.strict_crv_compact): counts alone often are not enough to tell
+        // whether the right rows changed, and the only way to see more today is a second, full-body
+        // round trip to GET /state/diffs/:id. A sampled preview (same shape "idb verify"'s pass
+        // branch already returns) answers that in the SAME reply for the common case, without
+        // changing anything for a session that never asked for it - diff_summary/diff_id are
+        // unchanged either way, and the full diff is still saved and still fetchable by id.
+        const compactSamples = session.strict_crv_compact
+          ? Object.fromEntries(Object.entries(savedDiff.summary).map(([store]) => [store, sampleStoreDiff(diffOutcome.result.diff[store])]).filter(([, s]) => Object.keys(s).length))
+          : undefined;
+
         resultOut = {
           data: triggering.result,
-          crv: { before_snapshot_id: beforeSnap.id, after_snapshot_id: afterSnap.id, diff_id: savedDiff.id, diff_summary: savedDiff.summary },
+          crv: { before_snapshot_id: beforeSnap.id, after_snapshot_id: afterSnap.id, diff_id: savedDiff.id, diff_summary: savedDiff.summary, ...(compactSamples && Object.keys(compactSamples).length ? { samples: compactSamples } : {}) },
         };
       } else {
         const { result, actionId } = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
@@ -2068,8 +2212,6 @@ const routes = [
       const body = await readJsonBody(req);
       const agentName = body.agent || DEFAULT_AGENT;
       const session = requireActiveSession();
-      let expectations;
-      try { expectations = parseExpect(body.expect); } catch (err) { throw new HttpError(400, err.message); }
       let baseline;
       if (body.baseline !== undefined && body.baseline !== null && String(body.baseline) !== '') {
         const ref = String(body.baseline);
@@ -2080,23 +2222,44 @@ const routes = [
         baseline = dbApi.getSnapshot(newest.id);
       }
       const stores = Array.isArray(body.stores) && body.stores.length ? body.stores : Object.keys(baseline.stores || {});
-      const where = baseline.where && typeof baseline.where === 'object' ? baseline.where : undefined;
-      const { result: fresh, actionId: freshActionId } = await withLoggedAction(session.id, 'idb.snapshot', { stores, where, for: 'idb.verify', baselineId: baseline.id }, () => dispatchCommand('idb.snapshot', { stores, where }, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
-      const freshSnap = dbApi.saveSnapshot({ sessionId: session.id, actionId: freshActionId, stores: fresh.stores, agentName, where });
-      const baselineStores = Object.fromEntries(Object.entries(baseline.stores || {}).filter(([name]) => stores.includes(name)));
-      const diff = computeDiff(baselineStores, fresh.stores);
-      const summary = summarizeDiff(diff);
-      const { result: report } = await withLoggedAction(session.id, 'idb.verify', { baselineId: baseline.id, afterId: freshSnap.id, expect: body.expect ?? null, allowExtra: !!body.allowExtra }, async () => {
-        const savedDiff = dbApi.saveDiff({ sessionId: session.id, actionId: null, fromId: baseline.id, toId: freshSnap.id, summary, diff });
-        return buildVerifyReport({
-          baselineId: baseline.id, afterId: freshSnap.id, diffId: savedDiff.id, summary, diff, expectations,
-          allowExtra: !!body.allowExtra, samples: Number.isFinite(Number(body.samples)) && Number(body.samples) > 0 ? Math.min(Number(body.samples), 50) : 3, verbose: !!body.verbose,
-        });
-      }, agentName);
-      broadcastUpdate('action', session.id);
+      return verifyAgainstBaseline(session, agentName, { baseline, stores, expect: body.expect, allowExtra: body.allowExtra, samples: body.samples, verbose: body.verbose });
+    },
+  },
+  {
+    // The WHOLE baseline -> action -> verify loop in ONE call: snapshot `stores`, dispatch one
+    // action (`type`/`params`, the same shape /command takes), re-snapshot, diff, check `expect` -
+    // three round trips (and three full-body replies, if done by hand) become one, few-line reply.
+    // Declining `type: idb.snapshot` (dispatch it via a real snapshot instead), a mutating action
+    // is required (a read here would make baseline and after identical by construction, which is
+    // not a bug - it just means "verify" is the wrong tool for a read; use "dom query" directly).
+    // On the ACTION failing, the whole call fails (like /command does) - no baseline was consumed
+    // by a verify that then couldn't mean anything, and the caller's own error handling (retry,
+    // postTimeoutVerification, ...) applies exactly as it already does to a bare action.
+    method: 'POST',
+    pattern: /^\/crv\/run$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      const agentName = body.agent || DEFAULT_AGENT;
+      const session = requireActiveSession();
+      const stores = Array.isArray(body.stores) && body.stores.length ? body.stores : undefined;
+      if (!stores) throw new HttpError(400, 'stores (array) is required - "crv run" scopes its own before/after snapshots, same as "idb snapshot --stores a,b"');
+      const type = body.type;
+      if (!type) throw new HttpError(400, 'type is required (the action to run between the two snapshots, e.g. "dom.click")');
+      if (type === 'idb.snapshot') throw new HttpError(400, 'use "idb snapshot" for the baseline - "crv run" takes its own');
+      const params = body.params ?? {};
+      const before = await withLoggedAction(session.id, 'idb.snapshot', { stores, for: 'crv.run', phase: 'before' }, () => dispatchCommand('idb.snapshot', { stores }, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
+      const savedBaseline = dbApi.saveSnapshot({ sessionId: session.id, actionId: before.actionId, stores: before.result.stores, agentName });
+      // saveSnapshot's own return value is a SUMMARY (id/counts/byteSize, no store content - see
+      // /state/snapshot's own reply) - verifyAgainstBaseline needs the full row content, the same
+      // read-back /state/verify does for an explicit baseline id.
+      const baseline = dbApi.getSnapshot(savedBaseline.id);
       broadcastUpdate('snapshot', session.id);
-      broadcastUpdate('diff', session.id);
-      return report;
+      const dispatchTimeoutMs = LONG_POLL_TYPES.has(type) ? (Number(params?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS;
+      const { result: actionResult, actionId } = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
+      broadcastUpdate('action', session.id);
+      if (MUTATING_TYPES.has(type)) bumpMutationCounter(session.id);
+      const report = await verifyAgainstBaseline(session, agentName, { baseline, stores, expect: body.expect, allowExtra: body.allowExtra, samples: body.samples, verbose: body.verbose });
+      return { action: { type, ok: true, actionId, result: actionResult }, ...report };
     },
   },
 
@@ -2395,18 +2558,25 @@ server.on('upgrade', (req, socket) => {
   });
 });
 
-server.listen(PORT, HOST, () => {
-  // A pidfile left behind by a dead process means the previous relay never ran its
-  // clean shutdown - it was killed (`relay stop` removes the pidfile itself).
-  const previous = readPidfile(PORT);
-  if (previous && previous.pid !== process.pid && !pidAlive(previous.pid)) recordRelayEvent(PORT, { kind: 'unclean-exit', pid: previous.pid, startedAt: previous.startedAt ?? null });
-  writePidfile(PORT);
-  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { removePidfile(PORT); process.exit(0); });
-  process.on('exit', () => removePidfile(PORT));
-  // sample the storage-dedup total once a day-ish even if nobody asks for a report
-  setInterval(() => { try { dbApi.snapshotSavings('storage', dbApi.getTokenSavingsReport().byKind.storage.bytesSaved); } catch { /* best effort */ } }, 6 * 3600 * 1000).unref();
-  log(`listening on http://${HOST}:${PORT} (bound to localhost only)`);
-  log('waiting for the in-page agent to connect at /agent ...');
-  const current = dbApi.getCurrentSession();
-  log(current ? `active session: #${current.id} "${current.goal}"` : 'no active session - start one before dispatching any command');
-});
+if (isMainModule) {
+  server.listen(PORT, HOST, () => {
+    // A pidfile left behind by a dead process means the previous relay never ran its
+    // clean shutdown - it was killed (`relay stop` removes the pidfile itself).
+    const previous = readPidfile(PORT);
+    if (previous && previous.pid !== process.pid && !pidAlive(previous.pid)) recordRelayEvent(PORT, { kind: 'unclean-exit', pid: previous.pid, startedAt: previous.startedAt ?? null });
+    writePidfile(PORT);
+    // Tracked in the same leaked-relay registry the test harness uses, so a relay started outside
+    // any test run (a hand-run `node relay.mjs`, or one autostarted by the CLI) is also found and
+    // cleaned up if it is ever orphaned - see relay-control.mjs's own comment.
+    registerRelay({ pid: process.pid, port: PORT, dir: null, startedAt: new Date().toISOString() });
+    reapLeakedRelays();
+    for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { removePidfile(PORT); unregisterRelay(process.pid, null); process.exit(0); });
+    process.on('exit', () => { removePidfile(PORT); unregisterRelay(process.pid, null); });
+    // sample the storage-dedup total once a day-ish even if nobody asks for a report
+    setInterval(() => { try { dbApi.snapshotSavings('storage', dbApi.getTokenSavingsReport().byKind.storage.bytesSaved); } catch { /* best effort */ } }, 6 * 3600 * 1000).unref();
+    log(`listening on http://${HOST}:${PORT} (bound to localhost only)`);
+    log('waiting for the in-page agent to connect at /agent ...');
+    const current = dbApi.getCurrentSession();
+    log(current ? `active session: #${current.id} "${current.goal}"` : 'no active session - start one before dispatching any command');
+  });
+}

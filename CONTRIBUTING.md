@@ -141,8 +141,46 @@ run them against a relay that has one. CI sets `WEBSCOUT_REQUIRE_BROWSER=1`, so
 the headless-browser tests fail there instead of skipping. When you need a child
 process or a liveness probe in a test, use `spawnClean` and `isUp` from
 `test-relay.mjs` (they carry the two Windows/runner traps: nested `node --test` inheriting
-`NODE_TEST_CONTEXT`, and a pending `fetch` tripping a libuv assertion at exit). `docs-drift.test.mjs` requires your
+`NODE_TEST_CONTEXT`, and a pending `fetch` tripping a libuv assertion at exit) - and
+`spawnAsync` instead of `spawnClean` for a CLI command that needs a same-process
+`connectFakeAgent()` tab to answer anything: `spawnClean` blocks the event loop the
+fake agent's WebSocket callback needs to fire, which is a real deadlock, not just slow
+(confirmed live writing `crv run`'s own CLI test). `docs-drift.test.mjs` requires your
 new command and flags to appear in `usage.txt` (and the command in the README).
+
+**Put a file's top-level `await startTestRelay()` before every `test()` call in the
+file, never after one.** A `test()` declared, then a top-level `await` (relay startup),
+then more `test()` calls once that await resolves, was found to silently run only the
+pre-await test(s) under `node --test --test-force-exit` - the exact CI invocation -
+with no failure or skip reported, just tests missing from the run's own count.
+`reply-budget.test.mjs`, `crv-verify.test.mjs` and `trace-replay.test.mjs` all had this
+shape (a handful of pure tests first, `= await startTestRelay()` partway down, more
+tests after) and silently lost 3, 4 and 9 of their tests respectively before it was
+caught and fixed by moving the await (and everything it gates - `BASE`, `before`/`after`,
+fixtures) above the file's first `test()` call. Run a new or edited file both plain
+(`node file.test.mjs`) and with the flag (`node --test --test-force-exit file.test.mjs`)
+and diff the test counts if you are not sure.
+
+A hard-killed run (Ctrl-C twice, a crashed CI runner) can leave an orphaned relay
+process and its temp dir behind - confirmed real more than once, up to 15 orphaned
+relays and 48 temp dirs found and cleaned by hand in one session, then another 10
+relays and ~200 temp dirs predating the registry in a later one. `startTestRelay()`
+registers every relay it starts in a small registry file (`relay-control.mjs`'s
+`registerRelay`/`reapLeakedRelays`) and runs the reaper (only against entries older
+than 30 minutes, never against port 8973) once automatically the first time a test in
+the run calls it. **`relay.mjs` itself registers there too on real startup** (its
+`isMainModule` block, not just `startTestRelay()`), so a hand-started or autostarted
+relay that gets killed outside any test run is also found and cleaned up the next
+time anyone starts one - not only the next `node --test`. Run
+`node tools/web-scout/reap-test-relays.mjs` by hand for an immediate cleanup (e.g.
+right after a Ctrl-C) without waiting for the next run.
+
+`relay.mjs`'s own `server.listen()` only runs when the file is the actual process
+entry point (`isMainModule`, checked against `process.argv[1]`) - a plain
+`import('./relay.mjs')` never binds a port. This bit twice in the same round: a
+`node -e "import('./relay.mjs')..."` meant as a syntax check actually ran the whole
+relay and bound the real port with no env override. Use `node --check relay.mjs` for
+a syntax check instead - it never executes the module.
 
 ## PR expectations
 
