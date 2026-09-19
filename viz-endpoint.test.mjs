@@ -122,6 +122,56 @@ describe('GET /sessions/:id/viz', () => {
   test('an unknown session is a 404, not a crash', async () => {
     assert.equal((await api('GET', '/sessions/999999/viz')).status, 404);
   });
+
+  test('sequence, waste, cost breakdown, failure heatmap and causality are all present and consistent', async () => {
+    const { result: viz } = await api('GET', `/sessions/${sessionId}/viz`);
+    // Both filter out strict-CRV's own auto snapshot/diff rows and liveness probes - same count.
+    assert.equal(viz.sequence.messages.length, viz.costTree.calls);
+    assert.ok(viz.sequence.messages.length > 0 && viz.sequence.messages.length < actions.length);
+    assert.equal(viz.sequence.stats.failed, actions.filter((a) => !a.ok).length);
+    assert.ok(viz.waste.totals.wastedCalls >= 2, 'the #missing failure and the #noop no-op write are both waste');
+    assert.ok(viz.waste.noopMutations.some((n) => n.type === 'dom.click'));
+    assert.ok(viz.waste.retries.some((r) => !r.resolvedOk), 'the #missing click never got a retry');
+    assert.ok(viz.costTree.totalBytes > 0 && viz.costTree.calls > 0 && viz.costTree.calls <= actions.length);
+    assert.ok(viz.failureHeatmap.totals.failed >= 1);
+    assert.ok(viz.causality.stats.chains >= 1, 'the #missing failure starts at least one causal chain');
+    assert.deepEqual(viz.routeMachine.nodes, [], 'this session never clicked a link that changed the page');
+  });
+});
+
+describe('route / page FSM', () => {
+  let navRelay; let navTab; let navSessionId;
+  let href = 'http://x/#/home';
+  const navApi = async (method, route, body) => {
+    const res = await fetch(`http://127.0.0.1:${navRelay.port}${route}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
+    return res.json();
+  };
+  before(async () => {
+    navRelay = await startTestRelay();
+    navTab = await connectFakeAgent(navRelay.port, {
+      'dom.click': (p) => {
+        if (p.selector !== '#nav') return { clicked: true, hrefChanged: false };
+        const before = href;
+        href = href === 'http://x/#/home' ? 'http://x/#/list' : 'http://x/#/home';
+        return { clicked: true, hrefChanged: true, hrefBefore: before, href };
+      },
+    });
+    navSessionId = (await navApi('POST', '/sessions', { goal: 'walk between pages' })).result.id;
+    await navApi('POST', '/command', { type: 'dom.click', params: { selector: '#static' } }); // no href change
+    await navApi('POST', '/command', { type: 'dom.click', params: { selector: '#nav' } }); // home -> list
+    await navApi('POST', '/command', { type: 'dom.click', params: { selector: '#nav' } }); // list -> home: a revisit
+  });
+  after(async () => { navTab?.close(); await navRelay?.stop(); });
+
+  test('collapses to distinct pages and flags the return to one already visited', async () => {
+    const { result: viz } = await navApi('GET', `/sessions/${navSessionId}/viz`);
+    const m = viz.routeMachine;
+    assert.equal(m.nodes.length, 2, JSON.stringify(m.nodes.map((n) => n.route)));
+    assert.equal(m.stats.navigations, 2);
+    assert.equal(m.stats.nonNavClicks, 1);
+    assert.equal(m.stats.revisits, 1);
+    assert.ok(m.nodes.every((n) => n.route.includes('/#/')));
+  });
 });
 
 describe('transcript import', () => {
@@ -202,12 +252,19 @@ describe('dashboard', () => {
         transcriptWhy: [...document.querySelectorAll('#actionsTable .act-why:not(.inferred)')].map((n) => n.textContent),
         inferredWhy: document.querySelectorAll('#actionsTable .act-why.inferred').length,
         session: document.getElementById('sessionPicker')?.value,
+        causalityNodes: document.querySelectorAll('#causalityList .cz-node').length,
+        seqMessages: document.querySelectorAll('#sequenceBody .seq-msg').length,
+        seqFail: document.querySelectorAll('#sequenceBody .seq-msg.fail').length,
+        routeEmptyShown: !document.getElementById('routeMachineEmpty').hidden,
+        wasteRows: document.querySelectorAll('#wasteRetriesList .waste-row, #wasteNoopList .waste-row').length,
+        costRows: document.querySelectorAll('#costTreeByType .duration-bar-row').length,
+        heatCells: document.querySelectorAll('#failureHeatmapBody .heat-cell:not(.heat-empty)').length,
       }))()`;
       let seen;
       const deadline = Date.now() + 30000;
       while (Date.now() < deadline) {
         seen = await page.evaluate(probe);
-        if (seen && seen.bars >= actions.length && seen.nodes >= 3 && seen.episodes >= 1 && seen.whyCells > 0 && seen.transcriptWhy.length) break;
+        if (seen && seen.bars >= actions.length && seen.nodes >= 3 && seen.episodes >= 1 && seen.whyCells > 0 && seen.transcriptWhy.length && seen.causalityNodes > 0 && seen.costRows > 0) break;
         await sleep(300);
       }
       assert.equal(seen.bars, actions.length, `one bar per action: ${JSON.stringify(seen)}`);
@@ -218,6 +275,13 @@ describe('dashboard', () => {
       assert.ok(seen.episodes >= 1);
       assert.ok(seen.transcriptWhy.some((t) => /Adding a row to skills/.test(t)), `the transcript why is in the Action log: ${JSON.stringify(seen.transcriptWhy)}`);
       assert.ok(seen.inferredWhy > 0, 'un-narrated calls show a labelled guess');
+      assert.ok(seen.causalityNodes > 0, 'the failed #missing click and its recovery are drawn in the causality tree');
+      assert.ok(seen.seqMessages > 0, `sequence diagram draws a message row per call: ${JSON.stringify(seen)}`);
+      assert.equal(seen.seqFail, actions.filter((a) => !a.ok).length);
+      assert.equal(seen.routeEmptyShown, true, 'this session never navigated - the route FSM shows its empty state');
+      assert.ok(seen.wasteRows > 0, 'the failed click and the no-op click both show up in Waste');
+      assert.ok(seen.costRows > 0, 'the cost breakdown lists at least one call type');
+      assert.ok(seen.heatCells > 0, 'the failure heatmap colors at least one non-empty cell');
 
       // Clicking a state opens its detail; clicking a bar jumps to that action's row.
       const clicked = await page.evaluate(`(() => {

@@ -1585,7 +1585,7 @@ const routes = [
       const session = dbApi.getSession(id);
       const { searchParams } = new URL(req.url, `http://${HOST}`);
       const limit = Math.min(Math.max(Number(searchParams.get('limit')) || 1500, 50), 20000);
-      return buildSessionViz({ session, actions: dbApi.listActionsForViz(id, { limit }), snapshots: dbApi.listSnapshots(id), diffs: dbApi.listDiffs(id), limit });
+      return buildSessionViz({ session, actions: dbApi.listActionsForViz(id, { limit }), snapshots: dbApi.listSnapshots(id), diffs: dbApi.listDiffs(id), clicks: dbApi.listClickNavigations(id), limit });
     },
   },
   {

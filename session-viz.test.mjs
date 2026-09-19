@@ -3,16 +3,19 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSwimlane, buildEpisodes, buildStateMachine, buildSessionViz, targetOf } from './session-viz.mjs';
+import {
+  buildSwimlane, buildEpisodes, buildStateMachine, buildSessionViz, targetOf,
+  buildSequence, buildWaste, buildCostBreakdown, buildFailureHeatmap, buildCausality, buildRouteMachine,
+} from './session-viz.mjs';
 
 const BASE = Date.parse('2026-09-19T10:00:00.000Z');
 let nextId = 1;
 // `at` is seconds after BASE; ids ascend in the order rows are created, like the real table.
-function act(type, at, { dur = 200, ok = true, agent = 'default', params = null, id, resultHash = null, intent = null, intentSource = null, intentCall = null, error = null } = {}) {
+function act(type, at, { dur = 200, ok = true, agent = 'default', params = null, id, resultHash = null, intent = null, intentSource = null, intentCall = null, error = null, bytes = 0 } = {}) {
   return {
     id: id ?? nextId++, type, params, ok: ok ? 1 : 0, error: ok ? null : (error ?? 'boom'), agent_name: agent, result_hash: resultHash, params_hash: null,
     started_at: new Date(BASE + at * 1000).toISOString(), ended_at: new Date(BASE + at * 1000 + dur).toISOString(), duration_ms: dur,
-    intent, intent_source: intentSource, intent_call: intentCall,
+    intent, intent_source: intentSource, intent_call: intentCall, bytes,
   };
 }
 const reset = () => { nextId = 1; };
@@ -279,4 +282,166 @@ test('buildSessionViz assembles all three from one row set and flags a capped fe
   assert.equal(viz.swimlane.bars.length, 2);
   assert.equal(viz.stateMachine.nodes.length, 0);
   assert.equal(buildSessionViz({ actions: rows, limit: 100 }).truncated, false);
+  assert.ok(viz.sequence.messages.length === 2);
+  assert.ok(viz.waste);
+  assert.ok(viz.costTree);
+  assert.ok(viz.failureHeatmap);
+  assert.ok(viz.causality);
+  assert.deepEqual(viz.routeMachine.nodes, []);
+});
+
+describe('buildSequence', () => {
+  test('one message per call, in order, agents plus the page as participants', () => {
+    reset();
+    const rows = [act('dom.click', 0, { params: { selector: '#a' } }), act('idb.dump', 1, { agent: 'b', ok: false })];
+    const s = buildSequence(rows);
+    assert.deepEqual(s.participants, ['default', 'b', 'page']);
+    assert.equal(s.messages.length, 2);
+    assert.deepEqual(s.messages.map((m) => m.seq), [1, 2]);
+    assert.equal(s.messages[0].target, '#a');
+    assert.equal(s.messages[1].ok, false);
+    assert.equal(s.stats.failed, 1);
+  });
+
+  test('liveness probes and strict-CRV internals are not messages', () => {
+    reset();
+    const rows = [act('ping', 0), act('idb.snapshot', 1, { params: { auto: true, phase: 'before' } }), act('dom.click', 2)];
+    assert.equal(buildSequence(rows).messages.length, 1);
+  });
+});
+
+describe('buildWaste', () => {
+  test('a failed call with no retry is wasted on its own', () => {
+    reset();
+    const rows = [act('idb.put', 0, { ok: false, params: { store: 's' } })];
+    const w = buildWaste(rows);
+    assert.equal(w.retries.length, 1);
+    assert.deepEqual([w.retries[0].attempts.length, w.retries[0].resolvedOk], [1, false]);
+    assert.equal(w.totals.wastedCalls, 1);
+  });
+
+  test('a retry that succeeds counts only the failed attempt(s) as waste', () => {
+    reset();
+    const rows = [act('idb.put', 0, { ok: false, params: { store: 's' } }), act('idb.put', 1, { ok: true, params: { store: 's' } })];
+    const w = buildWaste(rows);
+    assert.equal(w.retries.length, 1);
+    assert.deepEqual([w.retries[0].attempts, w.retries[0].resolvedOk], [[1, 2], true]);
+    assert.equal(w.totals.wastedCalls, 1);
+  });
+
+  test('a re-read with an unchanged answer is a wasted duplicate; a changed one is not', () => {
+    reset();
+    const rows = [
+      act('idb.dump', 0, { params: { store: 's' }, resultHash: 'H1' }),
+      act('idb.dump', 1, { params: { store: 's' }, resultHash: 'H1' }),
+      act('idb.dump', 2, { params: { store: 's' }, resultHash: 'H2' }),
+    ];
+    const w = buildWaste(rows);
+    assert.equal(w.duplicateReads.length, 1);
+    assert.deepEqual(w.duplicateReads[0].ids, [2]);
+    assert.equal(w.duplicateReads[0].firstId, 1);
+    assert.equal(w.totals.wastedCalls, 1);
+  });
+
+  test('a no-op mutation from the state machine is counted too', () => {
+    reset();
+    const rows = [act('dom.click', 0)];
+    const w = buildWaste(rows, { stateMachine: { noopMutations: [{ id: 99, type: 'dom.click', target: '' }] } });
+    assert.equal(w.noopMutations.length, 1);
+    assert.equal(w.totals.wastedCalls, 1);
+  });
+});
+
+describe('buildCostBreakdown', () => {
+  test('groups delivered bytes by type and by agent, and ranks the worst offenders', () => {
+    reset();
+    const rows = [
+      act('idb.dump', 0, { bytes: 1000 }),
+      act('idb.dump', 1, { bytes: 100 }),
+      act('dom.query', 2, { agent: 'b', bytes: 4000 }),
+    ];
+    const c = buildCostBreakdown(rows);
+    assert.equal(c.totalBytes, 5100);
+    assert.equal(c.byType[0].type, 'dom.query');
+    assert.equal(c.byAgent[0].agent, 'b');
+    assert.ok(Math.abs(c.byAgent[0].share - 4000 / 5100) < 1e-9);
+    assert.equal(c.topCalls[0].bytes, 4000);
+    assert.equal(c.topCalls.length, 3);
+  });
+});
+
+describe('buildFailureHeatmap', () => {
+  test('buckets by time, ranks types, and finds the worst cell', () => {
+    reset();
+    const rows = [
+      ...[0, 0, 0, 0].map((_, i) => act('net.log', 0, { ok: i !== 3 })), // 1 of 4 fails
+      ...[0, 0, 0, 0].map((_, i) => act('net.log', 100, { ok: false })), // 4 of 4 fail
+    ];
+    const h = buildFailureHeatmap(rows, { buckets: 2 });
+    assert.equal(h.totals.calls, 8);
+    assert.equal(h.totals.failed, 5);
+    assert.equal(h.worst.bucket, 1);
+    assert.equal(h.worst.failRate, 1);
+  });
+
+  test('types past the cap are folded into "other"', () => {
+    reset();
+    const types = Array.from({ length: 10 }, (_, i) => `t${i}`);
+    const rows = types.map((t, i) => act(t, i));
+    const h = buildFailureHeatmap(rows, { topTypes: 8 });
+    assert.equal(h.rowTypes.length, 9);
+    assert.ok(h.rowTypes.includes('other'));
+  });
+
+  test('no actions is an empty, not a crashing, result', () => {
+    assert.deepEqual(buildFailureHeatmap([]).cells, []);
+  });
+});
+
+describe('buildCausality', () => {
+  test('a retry chains to its failure, and a verify chains to the write it checked', () => {
+    reset();
+    const rows = [
+      act('idb.put', 0, { ok: false, params: { store: 's' } }),
+      act('idb.put', 1, { ok: true, params: { store: 's' } }),
+      act('idb.dump', 2),
+      act('dom.query', 20), // unrelated, idle-split into its own episode, no cause - excluded
+    ];
+    const episodes = buildEpisodes(rows, { idleSplitMs: 5000 });
+    const c = buildCausality(episodes);
+    assert.deepEqual(c.roots, [1]);
+    assert.deepEqual(c.childrenOf['1'], [2]);
+    assert.deepEqual(c.childrenOf['2'], [3]);
+    assert.equal(c.edges.find((e) => e.to === 2).kind, 'recovered');
+    assert.equal(c.edges.find((e) => e.to === 3).kind, 'verifies');
+    assert.equal(c.nodes.some((n) => n.id === 4), false);
+    assert.equal(c.stats.chains, 1);
+  });
+
+  test('no episodes, no forest', () => {
+    assert.deepEqual(buildCausality({ episodes: [] }), { nodes: [], edges: [], roots: [], childrenOf: {}, stats: { linkedActions: 0, chains: 0, edges: 0 } });
+  });
+});
+
+describe('buildRouteMachine', () => {
+  const click = (id, hrefBefore, href, hrefChanged = true) => ({ id, hrefChanged, hrefBefore, href });
+
+  test('collapses to distinct routes and flags a return to one already visited', () => {
+    const clicks = [
+      click(1, 'https://app/#/home', 'https://app/#/list'),
+      click(2, 'https://app/#/list', 'https://app/#/list', false),
+      click(3, 'https://app/#/list', 'https://app/#/home'),
+    ];
+    const r = buildRouteMachine(clicks);
+    assert.equal(r.nodes.length, 2);
+    assert.deepEqual(r.path, ['r1', 'r2', 'r1']);
+    assert.equal(r.stats.navigations, 2);
+    assert.equal(r.stats.nonNavClicks, 1);
+    assert.equal(r.stats.revisits, 1);
+    assert.equal(r.current, 'r1');
+  });
+
+  test('no navigation, no graph', () => {
+    assert.deepEqual(buildRouteMachine([click(1, null, null, false)]), { nodes: [], edges: [], path: [], current: null, stats: { navigations: 0, routes: 0, transitions: 0, revisits: 0, nonNavClicks: 1 } });
+  });
 });

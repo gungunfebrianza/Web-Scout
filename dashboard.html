@@ -311,6 +311,45 @@
   .ep-step-ms { color: var(--ink-muted); font-size: 10px; }
   .ep-err { grid-column: 3 / -1; color: var(--accent-danger); font-size: 10px; }
 
+  /* ---- causality tree ---- */
+  .cz-chain { border-left: 3px solid var(--accent-info); background: var(--bg-panel-inset); border-radius: 2px; padding: 3px 8px; margin-bottom: 4px; }
+  .cz-node { display: flex; align-items: baseline; gap: 6px; padding: 2px 0; font-size: 11px; cursor: pointer; border-radius: 2px; }
+  .cz-node:hover { background: var(--bg-panel-raised); }
+  .cz-node.fail { color: var(--accent-danger); }
+  .cz-kind { font-size: 9px; text-transform: uppercase; letter-spacing: .05em; padding: 0 5px; border-radius: 7px; border: 1px solid var(--border-hud); color: var(--accent-predator); flex-shrink: 0; }
+  .cz-type { color: var(--ink-primary); }
+  .cz-why { color: var(--ink-muted); }
+  .cz-why.inferred { font-style: italic; }
+  .cz-children { padding-left: 18px; border-left: 1px dashed var(--border-hud); margin-left: 5px; }
+
+  /* ---- sequence diagram ---- */
+  .viz-svg .seq-life { stroke: var(--border-hud); stroke-dasharray: 2 3; }
+  .viz-svg .seq-head { fill: var(--ink-primary); font-size: 11px; font-weight: 600; }
+  .seq-msg { cursor: pointer; }
+  .seq-msg:hover .seq-arrow, .seq-msg:hover .seq-return { stroke-width: 2.2; }
+  .seq-msg .seq-arrow { stroke: var(--accent-info); stroke-width: 1.3; fill: none; }
+  .seq-msg.fail .seq-arrow { stroke: var(--accent-danger); }
+  .seq-msg .seq-return { stroke: var(--ink-muted); stroke-width: 1; stroke-dasharray: 3 2; fill: none; }
+  .seq-msg.fail .seq-return { stroke: var(--accent-danger); }
+  .viz-svg .seq-label { fill: var(--ink-muted); }
+  .viz-svg .seq-label.fail { fill: var(--accent-danger); }
+
+  /* ---- waste view ---- */
+  .waste-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--border-hud); font-size: 11px; }
+  .waste-row:last-child { border-bottom: none; }
+  .waste-row .waste-main { flex: 1; color: var(--ink-primary); }
+  .waste-row .waste-meta { color: var(--ink-muted); font-size: 10px; white-space: nowrap; }
+  .waste-row a { color: var(--accent-info); cursor: pointer; text-decoration: underline; }
+  .waste-row.unresolved { color: var(--accent-danger); }
+
+  /* ---- route / page FSM ---- */
+  .viz-svg .rm-title { fill: var(--ink-primary); font-size: 11px; font-weight: 600; }
+  .viz-svg .rm-sub { fill: var(--ink-muted); font-size: 9px; }
+  .rm-node rect.rm-box { fill: var(--bg-panel-raised); stroke: var(--accent-alien); stroke-width: 1.2; }
+  .rm-node.current rect.rm-box { stroke: var(--accent-predator); stroke-width: 2; }
+  .rm-edge path { fill: none; stroke: var(--accent-alien); stroke-width: 1.4; }
+  .rm-edge.selfloop path { stroke: var(--accent-predator); stroke-dasharray: 4 3; }
+
   /* ---- cross-session viz block ---- */
   .heatmap-table { border-collapse: collapse; font-size: 11px; }
   .heatmap-table th, .heatmap-table td { border: 1px solid var(--border-hud); padding: 3px 6px; white-space: nowrap; }
@@ -628,6 +667,7 @@
   <div class="muted">what each waste-prevention mechanism has saved across every session, split by what it actually measures - and where the spend still is</div>
   <div id="savingsStatStrip" class="hud-stat-strip" style="margin-top:8px;"></div>
   <div id="savingsNote" class="sv-note" hidden></div>
+  <div id="usageEvidenceNote" class="sv-note" hidden></div>
   <div id="savingsTrendWrap" hidden>
     <div class="sv-h3">Is it improving? Last 14 days (UTC)</div>
     <div id="savingsTrend"></div>
@@ -845,6 +885,70 @@
   <div id="episodesSummary" class="viz-stats" style="margin: 0 0 6px;"></div>
   <div id="episodesList" class="ep-list"></div>
   <div id="episodesEmpty" class="empty" hidden>No actions recorded yet.</div>
+  </section>
+
+  <section class="hud-section" id="causalitySection">
+  <h2>Causality tree</h2>
+  <div class="viz-note">why this ran: a retry chains to the failure it followed, a verify to the write it checked, a recovery to the failure it fixed. Only steps on one of those chains are shown - everything else is ordinary, uncaused work already in Episodes.</div>
+  <div id="causalityStats" class="viz-stats"></div>
+  <div id="causalityList" class="ep-list"></div>
+  <div id="causalityEmpty" class="empty" hidden>No causal chains found yet - nothing here has retried, verified, or recovered from anything.</div>
+  </section>
+
+  <section class="hud-section" id="sequenceSection">
+  <h2>Sequence diagram</h2>
+  <div class="viz-note">each agent against "the page", in strict call order (not time-scaled - see the swimlane for that). A solid arrow is the call, a dashed arrow is the return. Click a message to jump to its row.</div>
+  <div class="viz-scroll" id="sequenceBody" style="max-height: 480px; overflow-y: auto;"></div>
+  <div id="sequenceStats" class="viz-stats"></div>
+  <div id="sequenceEmpty" class="empty" hidden>No actions recorded yet.</div>
+  </section>
+
+  <section class="hud-section" id="routeMachineSection">
+  <h2>Route / page FSM</h2>
+  <div class="viz-note">each box is a distinct page/route (by pathname + hash); each arrow is a click that changed it. Built from dom.click's own before/after href - the only navigation signal this tool captures, so a page changed by anything else (a redirect, another tab) will not appear.</div>
+  <div class="viz-scroll" id="routeMachineBody"></div>
+  <div id="routeMachineStats" class="viz-stats"></div>
+  <div id="routeMachineEmpty" class="empty" hidden>No page navigation seen yet - either the session never clicked a link that changed the URL, or it hasn't clicked anything.</div>
+  </section>
+
+  <div class="hud-grid-2">
+  <section class="hud-section hud-scroll-col" id="wasteSection">
+  <h2>Waste and retries</h2>
+  <div class="viz-note">calls that bought nothing: a failure (retried or not), a re-read whose answer had not changed, a write that ran but changed nothing.</div>
+  <div id="wasteStats" class="viz-stats"></div>
+  <div class="hud-scroll-body">
+  <div class="sv-h3">Failures &amp; retries</div>
+  <div id="wasteRetriesList"></div>
+  <div class="sv-h3">Duplicate reads</div>
+  <div id="wasteDupList"></div>
+  <div class="sv-h3">No-op writes</div>
+  <div id="wasteNoopList"></div>
+  </div>
+  <div id="wasteEmpty" class="empty" hidden>Nothing wasted yet.</div>
+  </section>
+
+  <section class="hud-section hud-scroll-col" id="costTreeSection">
+  <h2>Token cost breakdown</h2>
+  <div class="viz-note">delivered bytes (chars/4 &asymp; tokens), by call type and by agent, plus the single most expensive calls.</div>
+  <div id="costTreeTotal" class="muted"></div>
+  <div class="hud-scroll-body">
+  <div class="sv-h3">By type</div>
+  <div id="costTreeByType"></div>
+  <div class="sv-h3">By agent</div>
+  <div id="costTreeByAgent"></div>
+  <div class="sv-h3">Most expensive calls</div>
+  <table id="costTreeTopTable"><thead><tr><th>#</th><th>Type</th><th>Target</th><th>Bytes</th><th>Tokens</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div id="costTreeEmpty" class="empty" hidden>No actions recorded yet.</div>
+  </section>
+  </div>
+
+  <section class="hud-section" id="failureHeatmapSection">
+  <h2>Failure heatmap (this session)</h2>
+  <div class="viz-note">call type &times; time bucket, within this session - where in the timeline failures clustered. (The other "Failure heatmap" panel below compares across the last 15 sessions instead.)</div>
+  <div class="hud-scroll-body" id="failureHeatmapBody"></div>
+  <div id="failureHeatmapStats" class="viz-stats"></div>
+  <div id="failureHeatmapEmpty" class="empty" hidden>No actions recorded yet.</div>
   </section>
 
   <div class="hud-grid-2">
@@ -2078,6 +2182,7 @@ function renderSavingsPanel(report) {
   const note = el('savingsNote');
   note.hidden = false;
   note.innerHTML = `<strong>How to read this.</strong> Callers read ~${svNum(spend.estTokens)} estimated tokens; dedup kept ~${svBytes(storage.bytesSaved)} off disk (${svNum(storage.estTokensSaved)} tokens-<em>equivalent</em>${ctx.reductionPct !== null && ctx.reductionPct !== undefined ? `, ${ctx.reductionPct}% of the database` : ''}). Those are different currencies: dedup makes the database smaller, it does not shrink what a call returns. The one delivery-side saving is <em>Scoped reads</em> (<code>--where</code>, <code>--fields</code>, <code>--limit</code>, <code>--meta</code>, whole-page outlines): measured in the page against the unscoped call, so it is an upper bound. <code>--since</code> and other server-side scoping are not measured.`;
+  renderUsageEvidence(report.neverCalled, report.helpUsage);
   renderSavingsTrend(sv.trend || [], sv.readStrategy, sv.estimator);
 
   const counted = sv.ledgers.filter((l) => l.countedInTotal);
@@ -2119,6 +2224,25 @@ function renderSavingsPanel(report) {
       <td class="sv-tip">${SV_CUT_HINTS[t.type] ? esc(SV_CUT_HINTS[t.type]) : '<span class="muted">-</span>'}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">no targets recorded yet</td></tr>';
 }
 
+// Real usage evidence (GET /token-report's neverCalled/helpUsage) - measurement that would
+// otherwise only ever live in raw JSON nobody looks at. neverCalled is what a future "trim the
+// tool list" round would need before touching the schema (see docs/web-scout-roadmap.md); this is
+// just the evidence, not a decision - nothing here hides or reorders anything.
+function renderUsageEvidence(neverCalled, helpUsage) {
+  const box = el('usageEvidenceNote');
+  const parts = [];
+  if (neverCalled && Number.isFinite(neverCalled.sampleSizeCalls)) {
+    parts.push(neverCalled.types?.length
+      ? `${neverCalled.types.length} action type(s) never called across ${svNum(neverCalled.sampleSizeCalls)} logged call(s): <code>${neverCalled.types.map(esc).join('</code>, <code>')}</code>${neverCalled.note ? ` <em>(${esc(neverCalled.note)})</em>` : ''}`
+      : `every dispatchable action type has been called at least once (${svNum(neverCalled.sampleSizeCalls)} calls logged)`);
+  }
+  if (helpUsage && (helpUsage.all + helpUsage.sliced) > 0) {
+    parts.push(`help: <strong>${helpUsage.allRatePct ?? 0}%</strong> of ${svNum(helpUsage.all + helpUsage.sliced)} help call(s) were "help all" rather than a sliced command`);
+  }
+  box.hidden = !parts.length;
+  box.innerHTML = parts.join('<br>');
+}
+
 // One row per active day: what callers were handed (orange) next to what scoped
 // reads left out (green). The percentage is left-out / (handed + left-out).
 function renderSavingsTrend(trend, strategy, estimator) {
@@ -2139,7 +2263,11 @@ function renderSavingsTrend(trend, strategy, estimator) {
   if (ol && ol.calls) parts.push(`${svNum(ol.calls)} whole-page outlines: ${ol.drillRatePct ?? 0}% drilled into a child, ${ol.fullRatePct ?? 0}% needed <code>--full</code>; ${ol.netBytesVsOldDefault >= 0 ? `${svBytes(ol.netBytesVsOldDefault)} smaller` : `${svBytes(-ol.netBytesVsOldDefault)} larger`} than the raw-markup reply they replaced`);
   const sh = strategy?.shaping;
   if (sh && (sh.pointer.calls + sh.delta.calls + sh.table.calls + sh.peek.calls)) {
-    parts.push(`${svNum(sh.pointer.calls)} pointers, ${svNum(sh.delta.calls)} deltas, ${svNum(sh.table.calls)} tables, ${svNum(sh.peek.calls)} peeks (${svNum(sh.peek.guardedCalls)} by the budget guard): <strong>${svBytes(sh.netBytesSaved)}</strong> kept off the caller's screen${sh.peek.calls ? `; peeks: ${sh.peek.narrowedRatePct ?? 0}% narrowed next, ${sh.peek.fullRatePct ?? 0}% read in full (${svBytes(sh.peek.bytesSpentAfterwards)} spent afterwards)` : ''}`);
+    const distrust = [];
+    if (sh.pointer.calls) distrust.push(`pointers: ${sh.pointer.fullRatePct ?? 0}% distrusted (re-read in full)`);
+    if (sh.delta.calls) distrust.push(`deltas: ${sh.delta.fullRatePct ?? 0}% distrusted`);
+    if (sh.peek.calls) distrust.push(`peeks: ${sh.peek.narrowedRatePct ?? 0}% narrowed next, ${sh.peek.fullRatePct ?? 0}% read in full (${svBytes(sh.peek.bytesSpentAfterwards)} spent afterwards)`);
+    parts.push(`${svNum(sh.pointer.calls)} pointers, ${svNum(sh.delta.calls)} deltas, ${svNum(sh.table.calls)} tables, ${svNum(sh.peek.calls)} peeks (${svNum(sh.peek.guardedCalls)} by the budget guard): <strong>${svBytes(sh.netBytesSaved)}</strong> kept off the caller's screen${distrust.length ? `; ${distrust.join('; ')}` : ''}`);
   }
   // who chose the shaping: the caller, a --lean session, or nobody (plain reads are the size of the opportunity)
   const ad = strategy?.adoption;
@@ -2710,7 +2838,7 @@ async function refreshVerityRuns() {
 let lastViz = null;
 let lastVizFp = null;
 let vizSeq = 0;
-const VIZ_PANELS = ['swimlaneSection', 'stateMachineSection', 'episodesSection'];
+const VIZ_PANELS = ['swimlaneSection', 'stateMachineSection', 'episodesSection', 'causalitySection', 'sequenceSection', 'routeMachineSection', 'wasteSection', 'costTreeSection', 'failureHeatmapSection'];
 
 async function refreshViz(force = false) {
   if (!currentSessionId) return false;
@@ -2727,6 +2855,12 @@ async function refreshViz(force = false) {
   renderSwimlane();
   renderStateMachine();
   renderEpisodes();
+  renderCausality();
+  renderSequence();
+  renderRouteMachine();
+  renderWaste();
+  renderCostTree();
+  renderFailureHeatmap();
   paintWhyCells();
   for (const id of VIZ_PANELS) panelTick(id, true);
   return true;
@@ -2743,6 +2877,7 @@ function resetViz() {
   epUser.clear();
   epRendered.clear();
   epHighlightId = null;
+  rmSel = null;
 }
 
 // Jump from any visualization to the Action log row it stands for.
@@ -3132,6 +3267,243 @@ el('episodesList').addEventListener('click', (e) => {
   if (step) jumpToAction(Number(step.dataset.reveal));
 });
 el('episodeFilter').addEventListener('change', renderEpisodes);
+
+// ---- causality tree ----
+const CZ_MAX_DEPTH = 12;
+const CZ_MAX_NODES = 300;
+
+function czWhyHtml(why) {
+  if (!why?.text) return '';
+  return `<span class="cz-why${why.source === 'inferred' ? ' inferred' : ''}">${why.source === 'inferred' ? '&asymp; ' : ''}${esc(clip(why.text, 70))}</span>`;
+}
+
+function czNodeHtml(data, id, depth, budget) {
+  if (depth > CZ_MAX_DEPTH || budget.n >= CZ_MAX_NODES) return '';
+  budget.n += 1;
+  const n = data.byId.get(id);
+  if (!n) return '';
+  const kids = (data.childrenOf[id] ?? []).filter((cid) => data.byId.has(cid));
+  const kindOf = data.edges.find((e) => e.to === id)?.kind;
+  const kindLabel = { retried: 'retried', recovered: 'recovered', verifies: 'verifies', 'follows-failure': 'follows failure' }[kindOf] ?? kindOf;
+  return `<div class="cz-node${n.ok ? '' : ' fail'}" data-reveal="${n.id}" title="jump to #${n.id} in the Action log">
+    ${kindOf ? `<span class="cz-kind">${esc(kindLabel)}</span>` : ''}
+    <span class="cz-type">#${n.id} ${esc(n.type)}${n.target ? ` ${esc(clip(n.target, 26))}` : ''}</span>
+    ${czWhyHtml(n.why)}
+    <span class="waste-meta">${esc(fmtDur(n.ms))}</span>
+  </div>${kids.length ? `<div class="cz-children">${kids.map((cid) => czNodeHtml(data, cid, depth + 1, budget)).join('')}</div>` : ''}`;
+}
+
+function renderCausality() {
+  const c = lastViz?.causality;
+  const has = !!c && c.roots.length > 0;
+  el('causalityEmpty').hidden = has;
+  if (!has) { el('causalityList').innerHTML = ''; el('causalityStats').innerHTML = ''; return; }
+  el('causalityStats').innerHTML = [
+    `<span><b>${c.stats.chains}</b> causal chain(s)</span>`, `<span><b>${c.stats.linkedActions}</b> of ${lastViz.swimlane.bars.length} actions linked</span>`, `<span><b>${c.stats.edges}</b> cause &rarr; effect link(s)</span>`,
+  ].join('');
+  const data = { byId: new Map(c.nodes.map((n) => [n.id, n])), childrenOf: c.childrenOf, edges: c.edges };
+  const budget = { n: 0 };
+  el('causalityList').innerHTML = c.roots.map((id) => `<div class="cz-chain">${czNodeHtml(data, id, 0, budget)}</div>`).join('');
+}
+el('causalityList').addEventListener('click', (e) => {
+  const n = e.target.closest('.cz-node[data-reveal]');
+  if (n) jumpToAction(Number(n.dataset.reveal));
+});
+
+// ---- sequence diagram ----
+const SEQ = { colW: 150, padX: 20, rowH: 32, headH: 26, maxRows: 250 };
+
+function seqMsgSvg(m, i, xOf) {
+  const y = SEQ.headH + i * SEQ.rowH;
+  const xa = xOf(m.agent);
+  const xp = xOf('page');
+  const forwardY = y + 12;
+  const returnY = y + 22;
+  const dir = xa < xp ? 1 : -1;
+  const label = `${m.type}${m.target ? ` ${clip(m.target, 22)}` : ''}`;
+  const ret = m.ok ? esc(fmtDur(m.ms)) : 'FAILED';
+  const tip = `#${m.id} ${m.agent} -> page: ${esc(label)} - ${m.ok ? `ok, ${esc(fmtDur(m.ms))}` : `FAILED${m.error ? `: ${esc(clip(m.error, 60))}` : ''}`}${m.why ? ` - why: ${esc(m.why)}` : ''}`;
+  return `<g class="seq-msg${m.ok ? '' : ' fail'}" data-id="${m.id}">
+    <line class="seq-arrow" x1="${xa}" y1="${forwardY}" x2="${xp - dir * 6}" y2="${forwardY}" marker-end="url(#seqArrow)"/>
+    <line class="seq-return" x1="${xp}" y1="${returnY}" x2="${xa + dir * 6}" y2="${returnY}" marker-end="url(#seqArrowMuted)"/>
+    <text class="seq-label${m.ok ? '' : ' fail'}" x="${Math.min(xa, xp) + 4}" y="${forwardY - 3}">${esc(clip(label, 30))}</text>
+    <text class="seq-label${m.ok ? '' : ' fail'}" x="${Math.min(xa, xp) + 4}" y="${returnY + 11}">${ret}</text>
+    <title>${tip}</title>
+  </g>`;
+}
+
+function renderSequence() {
+  const s = lastViz?.sequence;
+  const body = el('sequenceBody');
+  const has = !!s && s.messages.length > 0;
+  el('sequenceEmpty').hidden = has;
+  if (!has) { body.innerHTML = ''; el('sequenceStats').innerHTML = ''; return; }
+  const shown = s.messages.slice(-SEQ.maxRows);
+  const xOf = (name) => SEQ.padX + s.participants.indexOf(name) * SEQ.colW + SEQ.colW / 2;
+  const width = SEQ.padX * 2 + s.participants.length * SEQ.colW;
+  const height = SEQ.headH + shown.length * SEQ.rowH + 8;
+  const parts = [`<svg class="viz-svg seq-svg" width="${width}" height="${height}" role="img" aria-label="Sequence diagram: ${shown.length} message(s) across ${s.participants.length} participant(s)">`];
+  parts.push('<defs><marker id="seqArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--accent-info)"/></marker><marker id="seqArrowMuted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--ink-muted)"/></marker></defs>');
+  s.participants.forEach((p) => {
+    const x = xOf(p);
+    parts.push(`<text class="seq-head" x="${x}" y="16" text-anchor="middle">${esc(p === s.page ? 'the page' : clip(p, 16))}</text><line class="seq-life" x1="${x}" y1="${SEQ.headH}" x2="${x}" y2="${height}"/>`);
+  });
+  shown.forEach((m, i) => parts.push(seqMsgSvg(m, i, xOf)));
+  parts.push('</svg>');
+  body.innerHTML = parts.join('');
+  el('sequenceStats').innerHTML = [
+    `<span><b>${s.messages.length}</b> message(s), <b>${s.stats.participants}</b> agent(s)</span>`,
+    `<span><b>${s.stats.failed}</b> failed</span>`,
+    s.messages.length > shown.length ? `<span>showing the newest ${shown.length}</span>` : '',
+  ].filter(Boolean).join('');
+}
+el('sequenceBody').addEventListener('click', (e) => {
+  const m = e.target.closest('.seq-msg');
+  if (m) jumpToAction(Number(m.dataset.id));
+});
+
+// ---- route / page FSM ----
+const RM = { nodeW: 140, nodeH: 46, gap: 90, padX: 20 };
+let rmSel = null;
+
+function rmGeometry(m) {
+  const idx = new Map(m.nodes.map((n, i) => [n.id, i]));
+  const X = (i) => RM.padX + i * (RM.nodeW + RM.gap);
+  const topH = m.edges.some((e) => e.from === e.to) ? 44 : 18;
+  const T = topH;
+  const B = T + RM.nodeH;
+  let botH = 18;
+  for (const e of m.edges) { const span = idx.get(e.to) - idx.get(e.from); if (span < -1 || span > 1) botH = Math.max(botH, 40); }
+  const edges = m.edges.map((e) => {
+    const i = idx.get(e.from); const j = idx.get(e.to);
+    const ax = X(i); const bx = X(j);
+    let d; let lx; let ly;
+    if (i === j) {
+      const x1 = ax + RM.nodeW * 0.3; const x2 = ax + RM.nodeW * 0.7;
+      d = `M${x1},${T} C${x1 - 8},${T - 26} ${x2 + 8},${T - 26} ${x2},${T - 1}`;
+      lx = ax + RM.nodeW / 2; ly = T - 30;
+    } else if (j === i + 1) {
+      const y = T + RM.nodeH / 2;
+      d = `M${ax + RM.nodeW},${y} L${bx - 3},${y}`;
+      lx = (ax + RM.nodeW + bx) / 2; ly = y - 6;
+    } else if (j < i) {
+      const x1 = ax + RM.nodeW / 2; const x2 = bx + RM.nodeW / 2;
+      d = `M${x1},${T} Q${(x1 + x2) / 2},${T - 40} ${x2},${T - 2}`;
+      lx = (x1 + x2) / 2; ly = T - 36;
+    } else {
+      const x1 = ax + RM.nodeW / 2; const x2 = bx + RM.nodeW / 2;
+      d = `M${x1},${B} Q${(x1 + x2) / 2},${B + 34} ${x2},${B + 2}`;
+      lx = (x1 + x2) / 2; ly = B + 32;
+    }
+    return { e, d, lx, ly };
+  });
+  return { X, T, width: X(m.nodes.length - 1) + RM.nodeW + RM.padX, height: B + botH, edges };
+}
+
+function renderRouteMachine() {
+  const m = lastViz?.routeMachine;
+  const body = el('routeMachineBody');
+  const has = !!m && m.nodes.length > 0;
+  el('routeMachineEmpty').hidden = has;
+  if (!has) { body.innerHTML = ''; el('routeMachineStats').innerHTML = ''; return; }
+  const g = rmGeometry(m);
+  const parts = [`<svg class="viz-svg" width="${g.width}" height="${g.height}" role="img" aria-label="Route FSM: ${m.nodes.length} page(s), ${m.edges.length} transition(s)">`];
+  parts.push('<defs><marker id="rmArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--accent-alien)"/></marker></defs>');
+  for (const { e, d, lx, ly } of g.edges) {
+    const tip = `${e.from} -> ${e.to} - ${e.count} navigation(s)`;
+    parts.push(`<g class="rm-edge${e.from === e.to ? ' selfloop' : ''}"><path d="${d}" marker-end="url(#rmArrow)"/><text class="seq-label" x="${lx}" y="${ly}" text-anchor="middle">${e.count > 1 ? `&times;${e.count}` : ''}</text><title>${esc(tip)}</title></g>`);
+  }
+  m.nodes.forEach((n, i) => {
+    const x = g.X(i);
+    const cls = ['rm-node', n.id === m.current ? 'current' : ''].filter(Boolean).join(' ');
+    const tip = `${n.route} - visited ${n.visits}x - e.g. ${n.sample}`;
+    parts.push(`<g class="${cls}" transform="translate(${x},${g.T})"><rect class="rm-box" width="${RM.nodeW}" height="${RM.nodeH}" rx="3"/><text class="rm-title" x="8" y="18">${esc(clip(n.route, 20))}</text><text class="rm-sub" x="8" y="33">visited ${n.visits}&times;</text>${n.id === m.current ? `<text class="rm-sub" x="${RM.nodeW - 8}" y="18" text-anchor="end" style="fill:var(--accent-predator)">NOW</text>` : ''}<title>${esc(tip)}</title></g>`);
+  });
+  body.innerHTML = parts.join('');
+  el('routeMachineStats').innerHTML = [
+    `<span><b>${m.stats.routes}</b> distinct page(s)</span>`, `<span><b>${m.stats.navigations}</b> navigation(s)</span>`,
+    `<span><b>${m.stats.revisits}</b> return(s) to a page already seen</span>`,
+    m.stats.nonNavClicks ? `<span>${m.stats.nonNavClicks} other click(s) did not change the page</span>` : '',
+  ].filter(Boolean).join('');
+}
+
+// ---- waste and retries ----
+function renderWaste() {
+  const w = lastViz?.waste;
+  const has = !!w && w.totals.calls > 0;
+  el('wasteEmpty').hidden = has;
+  if (!has) { for (const id of ['wasteStats', 'wasteRetriesList', 'wasteDupList', 'wasteNoopList']) el(id).innerHTML = ''; return; }
+  const t = w.totals;
+  el('wasteStats').innerHTML = [
+    `<span><b>${t.wastedCalls}</b> of ${t.calls} calls wasted (${Math.round(t.wastePct * 100)}%)</span>`,
+    `<span><b>${esc(fmtDur(t.wastedMs))}</b> spent on failed attempts</span>`,
+  ].join('');
+  el('wasteRetriesList').innerHTML = w.retries.length ? w.retries.map((r) => `<div class="waste-row${r.resolvedOk ? '' : ' unresolved'}">
+    <span class="waste-main">${esc(r.type)}${r.target ? ` ${esc(clip(r.target, 30))}` : ''}${r.error ? ` - ${esc(clip(r.error, 60))}` : ''}</span>
+    <span class="waste-meta">${r.attempts.map((id) => `<a data-reveal="${id}">#${id}</a>`).join(' ')} - ${r.resolvedOk ? 'recovered' : 'never recovered'}</span>
+  </div>`).join('') : '<div class="muted">none</div>';
+  el('wasteDupList').innerHTML = w.duplicateReads.length ? w.duplicateReads.map((d) => `<div class="waste-row">
+    <span class="waste-main">${esc(d.type)}${d.target ? ` ${esc(clip(d.target, 30))}` : ''} - read ${d.count}&times;, unchanged</span>
+    <span class="waste-meta"><a data-reveal="${d.firstId}">#${d.firstId}</a> then ${d.ids.map((id) => `<a data-reveal="${id}">#${id}</a>`).join(' ')}</span>
+  </div>`).join('') : '<div class="muted">none</div>';
+  el('wasteNoopList').innerHTML = w.noopMutations.length ? w.noopMutations.map((n) => `<div class="waste-row">
+    <span class="waste-main"><a data-reveal="${n.id}">#${n.id}</a> ${esc(n.type)}${n.target ? ` ${esc(clip(n.target, 30))}` : ''} ran and changed nothing</span>
+  </div>`).join('') : '<div class="muted">none</div>';
+}
+el('wasteSection').addEventListener('click', (e) => {
+  const a = e.target.closest('[data-reveal]');
+  if (a) { e.preventDefault(); jumpToAction(Number(a.dataset.reveal)); }
+});
+
+// ---- token cost breakdown ----
+function costBarRow(label, bytes, tokensEst, share, maxBytes) {
+  const pct = maxBytes ? Math.max(2, (bytes / maxBytes) * 100) : 0;
+  return `<div class="duration-bar-row"><span class="duration-bar-label" title="${esc(label)}">${esc(clip(label, 14))}</span><div class="duration-bar-track"><div class="duration-bar-max" style="width:${pct}%; background: var(--accent-info);"></div></div><span class="duration-bar-value">${bytes.toLocaleString()}B &asymp; ${tokensEst}tok (${Math.round(share * 100)}%)</span></div>`;
+}
+function renderCostTree() {
+  const c = lastViz?.costTree;
+  const has = !!c && c.calls > 0;
+  el('costTreeEmpty').hidden = has;
+  if (!has) { el('costTreeTotal').innerHTML = ''; el('costTreeByType').innerHTML = ''; el('costTreeByAgent').innerHTML = ''; el('costTreeTopTable').querySelector('tbody').innerHTML = ''; return; }
+  el('costTreeTotal').textContent = `${c.totalBytes.toLocaleString()} bytes delivered across ${c.calls} calls (≈ ${c.totalTokensEst} tokens)`;
+  const maxType = c.byType[0]?.bytes || 1;
+  el('costTreeByType').innerHTML = c.byType.map((t) => costBarRow(t.type, t.bytes, t.tokensEst, t.share, maxType)).join('');
+  const maxAgent = c.byAgent[0]?.bytes || 1;
+  el('costTreeByAgent').innerHTML = c.byAgent.length > 1 ? c.byAgent.map((a) => costBarRow(a.agent, a.bytes, a.tokensEst, a.share, maxAgent)).join('') : '<div class="muted">one agent - see "By type" instead</div>';
+  el('costTreeTopTable').querySelector('tbody').innerHTML = c.topCalls.map((t, i) => `<tr class="linklike" data-reveal="${t.id}" style="cursor:pointer;"><td>${i + 1}</td><td>${esc(t.type)}</td><td>${esc(clip(t.target, 30))}</td><td>${t.bytes.toLocaleString()}</td><td>${t.tokensEst}</td></tr>`).join('');
+}
+el('costTreeSection').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-reveal]');
+  if (tr) jumpToAction(Number(tr.dataset.reveal));
+});
+
+// ---- failure heatmap (this session) ----
+function renderFailureHeatmap() {
+  const h = lastViz?.failureHeatmap;
+  const has = !!h && h.cells.length > 0;
+  el('failureHeatmapEmpty').hidden = has;
+  const body = el('failureHeatmapBody');
+  if (!has) { body.innerHTML = ''; el('failureHeatmapStats').innerHTML = ''; return; }
+  const byKey = new Map(h.cells.map((c) => [`${c.type}|${c.bucket}`, c]));
+  const maxCalls = Math.max(1, ...h.cells.map((c) => c.calls));
+  const bucketLabel = (b) => fmtDur(b * h.bucketMs);
+  const header = Array.from({ length: h.buckets }, (_, b) => `<th title="+${esc(bucketLabel(b))}">+${esc(bucketLabel(b))}</th>`).join('');
+  const rows = h.rowTypes.map((type) => {
+    const cells = Array.from({ length: h.buckets }, (_, b) => {
+      const c = byKey.get(`${type}|${b}`);
+      if (!c || c.calls === 0) return `<td class="heat-cell heat-empty" title="${esc(type)} / +${esc(bucketLabel(b))}: no calls">&middot;</td>`;
+      const hue = 130 - 130 * c.failRate;
+      const alpha = 0.15 + 0.65 * (c.calls / maxCalls);
+      return `<td class="heat-cell" style="background: hsla(${hue.toFixed(0)},70%,40%,${alpha.toFixed(2)})" title="${esc(type)} / +${esc(bucketLabel(b))}: ${c.failed}/${c.calls} failed (${Math.round(c.failRate * 100)}%)">${c.failed || ''}</td>`;
+    }).join('');
+    return `<tr><th style="text-align:left;">${esc(type)}</th>${cells}</tr>`;
+  }).join('');
+  body.innerHTML = `<table class="heatmap-table"><thead><tr><th></th>${header}</tr></thead><tbody>${rows}</tbody></table>`;
+  el('failureHeatmapStats').innerHTML = [
+    `<span><b>${h.totals.failed}</b> of ${h.totals.calls} calls failed (${Math.round(h.totals.failRate * 100)}%)</span>`,
+    h.worst ? `<span>worst: <b>${esc(h.worst.type)}</b> around +${esc(bucketLabel(h.worst.bucket))} - ${h.worst.failed}/${h.worst.calls} failed</span>` : '',
+  ].filter(Boolean).join('');
+}
 
 // refreshSessionDetail() is called both on an actual session switch AND by
 // the routine 3s poll (refreshAll) for the SAME still-active session - only
@@ -3842,6 +4214,12 @@ const PANELS = {
   swimlaneSection: { group: 'session', wide: true, label: 'Swimlane', autoEmpty: true, failLabel: 'failed', count: () => { const s = lastViz?.swimlane; return s ? { n: s.bars.length, fail: s.bars.filter((b) => !b.ok).length, title: 'actions drawn across every agent lane' } : null; }, refresh: () => refreshViz(true), exportRows: () => lastViz?.swimlane?.bars ?? null },
   stateMachineSection: { group: 'session', wide: true, label: 'State machine', autoEmpty: true, count: () => { const m = lastViz?.stateMachine; return m ? { n: m.nodes.length, title: `distinct database states reached (${m.stats.edges} transitions)` } : null; }, refresh: () => refreshViz(true), exportRows: () => lastViz?.stateMachine?.edges?.map((e) => ({ from: e.from, to: e.to, count: e.count, no_change: e.noChange, writes: Object.entries(e.mutationTypes).map(([t, n]) => `${t}x${n}`).join(' '), failed_writes: e.failedMutations, added: e.totals.added, removed: e.totals.removed, changed: e.totals.changed, measured_by: e.summarySource })) ?? null },
   episodesSection: { group: 'session', label: 'Episodes', autoEmpty: true, failLabel: 'failed', count: () => { const s = lastViz?.episodes?.stats; return s ? { n: s.episodes, fail: s.failedEpisodes, title: `${s.steps} steps across ${s.episodes} episodes` } : null; }, refresh: () => refreshViz(true), exportRows: () => lastViz?.episodes?.episodes?.map((e) => ({ id: e.id, agent: e.agent, kind: e.kind, outcome: e.outcome, title: e.title, title_source: e.titleSource, steps: e.counts.steps, actions: e.counts.actions, failed: e.counts.failed, started_at: e.startedAt, ms: e.ms })) ?? null },
+  causalitySection: { group: 'session', label: 'Causality', autoEmpty: true, count: () => { const c = lastViz?.causality; return c ? { n: c.stats.chains, title: `${c.stats.linkedActions} action(s) on a causal chain (${c.stats.edges} link(s))` } : null; }, refresh: () => refreshViz(true), exportRows: () => lastViz?.causality?.edges?.map((e) => ({ from: e.from, to: e.to, kind: e.kind })) ?? null },
+  sequenceSection: { group: 'session', wide: true, label: 'Sequence', autoEmpty: true, failLabel: 'failed', count: () => { const s = lastViz?.sequence; return s ? { n: s.messages.length, fail: s.stats.failed, title: `${s.messages.length} message(s) across ${s.stats.participants} agent(s)` } : null; }, refresh: () => refreshViz(true), exportRows: () => lastViz?.sequence?.messages?.map((m) => ({ seq: m.seq, agent: m.agent, type: m.type, target: m.target, ok: m.ok, ms: m.ms })) ?? null },
+  routeMachineSection: { group: 'session', wide: true, label: 'Route FSM', autoEmpty: true, count: () => { const m = lastViz?.routeMachine; return m ? { n: m.nodes.length, title: `${m.stats.navigations} navigation(s) between ${m.nodes.length} page(s)` } : null; }, refresh: () => refreshViz(true), exportRows: () => lastViz?.routeMachine?.edges?.map((e) => ({ from: e.from, to: e.to, count: e.count })) ?? null },
+  wasteSection: { group: 'session', label: 'Waste', autoEmpty: true, count: () => { const w = lastViz?.waste; return w ? { n: w.totals.wastedCalls, title: `${w.totals.wastedCalls} of ${w.totals.calls} call(s) bought nothing (${Math.round(w.totals.wastePct * 100)}%)` } : null; }, refresh: () => refreshViz(true), exportRows: () => lastViz?.waste?.retries?.map((r) => ({ type: r.type, target: r.target, attempts: r.attempts.length, resolved: r.resolvedOk, ms: r.ms })) ?? null },
+  costTreeSection: { group: 'session', label: 'Cost breakdown', autoEmpty: true, count: () => { const c = lastViz?.costTree; return c ? { n: c.calls, text: `~${c.totalTokensEst} tok`, title: `${c.totalBytes.toLocaleString()} bytes delivered (~${c.totalTokensEst} tokens)` } : null; }, refresh: () => refreshViz(true), exportRows: () => lastViz?.costTree?.topCalls ?? null },
+  failureHeatmapSection: { group: 'session', label: 'Failure heatmap (time)', autoEmpty: true, failLabel: 'failed', count: () => { const h = lastViz?.failureHeatmap; return h && h.totals.calls ? { n: h.totals.calls, fail: h.totals.failed, title: `${h.totals.failed} of ${h.totals.calls} call(s) failed, by type and time` } : null; }, refresh: () => refreshViz(true), exportRows: () => lastViz?.failureHeatmap?.cells ?? null },
   tokenSection: { group: 'session', label: 'Tokens', autoEmpty: true, failLabel: 'over budget', count: () => { const r = lastTokenReport; if (!r) return null; const budget = lastSessionFull?.token_budget; return { n: r.totalCalls, text: `~${fmtK(r.totalEstTokens)} tok`, fail: budget && r.totalEstTokens > budget ? 1 : 0, title: `${r.totalCalls} call(s), ~${r.totalEstTokens} estimated tokens` }; }, refresh: () => refreshTokenReport(), exportRows: () => lastTokenReport?.byType ?? null },
   assertSection: { group: 'session', label: 'Asserts', autoEmpty: true, failLabel: 'failing', count: () => { const runs = assertRuns(); return { n: runs.length, fail: runs.filter((a) => !a.result.every((c) => c.pass)).length, title: 'session assert runs' }; }, refresh: () => refreshActions(), exportRows: () => assertRuns().map((a) => ({ time: a.started_at, passed: a.result.every((c) => c.pass), checks: a.result.length, failing: a.result.filter((c) => !c.pass).map((c) => c.detail).join('; ') })) },
   snapshotsSection: { group: 'session', label: 'Snapshots', autoEmpty: true, pausable: true, count: () => ({ n: lastSnapshots.length, title: 'state snapshots' }), refresh: () => refreshSnapshots(), exportRows: () => lastSnapshots },
