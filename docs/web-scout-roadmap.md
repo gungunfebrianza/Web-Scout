@@ -2688,6 +2688,104 @@ gets exactly one row, the null-intent bucket.
 
 Versions: relay 0.23.0, MCP server 0.24.0. Full suite: 356 tests, 3 skipped (2 need a live tab, 1 - committed calibration - still open, same as every prior round).
 
+## V37 - session visualizations, from an Action Log Table proposal, then a value-engineering pass (implemented)
+
+Driven by a live gap named directly against this tool's own dashboard: the Action log table is a
+flat, chronological list of every dispatched call - correct, but it answers "what happened" and
+leaves "why", "in what order relative to each other", "what state did the app pass through", and
+"what did this actually cost" to a human doing it by eye, every session, from scratch. Proposed as
+an 18-item menu of possible derived views over data this tool already records (no new capture, no
+new schema beyond one small addition below); ten were asked for and built across three rounds, then
+a fourth round closed gaps the first three left in their own new surface area.
+
+All ten views are pure functions in the new `session-viz.mjs` (rows in, plain JSON out - no I/O, no
+DOM, unit-testable without a relay or a browser) and share one endpoint, `GET /sessions/:id/viz`, so
+every panel on the dashboard always describes the same moment rather than nine independently-stale
+fetches.
+
+**Round 1 (swimlane, state machine, episode tree, a "Why" column):**
+- **Swimlane** - one lane per agent, one bar per action, idle time between calls collapsed and
+  shown as a dashed line (thinking/waiting, not truncated).
+- **State machine** - nodes are distinct database snapshot CONTENT (not distinct snapshot rows - two
+  snapshots with identical content are one node), edges are what ran between two snapshots. A
+  successful write between two IDENTICAL snapshots is flagged as a no-op mutation; a return to an
+  earlier node is a revisit.
+- **Episode tree** - goal > episode > step > action. Consecutive calls fold into an episode by
+  agent/idle-gap/phase-transition; each step is classified explore/act/verify/recover.
+- **"Why" column, from the agent's OWN transcript** (`intent-import.mjs`, Claude Code and Codex
+  JSONL) - the relay only ever sees `dom.click .save`, never the reason; the coding agent's own host
+  already logs its narration, so this imports it after the session (zero agent tokens spent
+  narrating). Matched by TIME WINDOW (tool_use timestamp -> tool_result timestamp, 250ms skew
+  tolerance - matching by parsing the command itself was tried and rejected, since one strict-CRV
+  click alone logs four actions that must share one why). Real transcripts covered: only ~19% of
+  calls are narrated immediately before the call, so an uncovered step within 2 calls of a narrated
+  one inherits it (shown with a return-arrow prefix, source `transcript-carried`) for 34% total
+  coverage; everything else gets an inferred why, always visually distinguished (italic, leading
+  &asymp;) from the agent's own words.
+
+**Round 2 (sequence diagram, waste/retry view, token cost breakdown, failure heatmap, causality
+tree, route/page FSM):**
+- **Sequence diagram** - each agent against "the page", call then return, in strict call order
+  (not time-scaled, unlike the swimlane) - a request/response reading of the same calls.
+- **Waste and retries** - failed calls (retried or not), re-reads whose answer had not changed, and
+  no-op writes (reused from the state machine), with one wasted-calls/wasted-time total.
+- **Token cost breakdown** - delivered bytes (the same figure the token-report ledger books, now
+  carried as `listActionsForViz`'s own `bytes` column, computed in SQL so the "never reads a result
+  body" promise holds) grouped by call type and by agent, plus the single most expensive calls -
+  an icicle chart's own numbers, not a rendered nested chart.
+- **Failure heatmap (this session)** - call type x time bucket, within one session; complements the
+  existing cross-SESSION heatmap (type x the last 15 sessions) rather than duplicating it.
+- **Causality tree** - `buildEpisodes` now attaches a `causedBy: {id, kind}` to each step, using the
+  exact signals `inferWhy` already gathers (a prior failed attempt of the same call, the last
+  mutating step a verify is checking, an immediately-preceding failure); `buildCausality` reshapes
+  those single-parent links into a forest. Kinds: `retried`/`recovered` (same call again after a
+  failure), `verifies` (a read right after a write), `follows-failure` (anything else right after a
+  failure).
+- **Route / page FSM** - same shape as the state machine, but nodes are pages/routes a session
+  navigated between. This needed real new instrumentation - web-scout otherwise has NO page-
+  navigation tracking at all - so `dom.click`'s own result gained `hrefBefore`/`href`, and
+  `db.listClickNavigations` reads just that from the small set of click results (the one deliberate,
+  narrowly-scoped exception to `listActionsForViz`'s "no result body" rule). A page's identity is
+  `pathname + hash`, so a query-string-only change collapses into the same node.
+
+**Round 3 - value-engineering pass, closing gaps the first two rounds left in their own surface:**
+proposed a fresh list of further improvements to what was JUST shipped (not more of the 18-item
+backlog); one proposed item (a cross-session cost-breakdown companion) turned out to already exist
+(the Savings panel's `byTarget`/`byType`, from the V22-23 token-cost rounds) - checked before
+writing any code, not duplicated. Six real gaps closed:
+- Click-to-jump was missing on exactly 2 of the 10 panels (route FSM, failure heatmap) - every
+  other one already had it. Fixed in the MODEL, not just the dashboard: `buildRouteMachine`'s nodes/
+  edges and `buildFailureHeatmap`'s cells now carry the real (capped) action id(s) that touched them.
+- The session report (`report.mjs`) had zero trace of any of the ten visualizations above - a report
+  exported before this round could not show a single one. Gained a "## Session visualizations"
+  section (state machine's insights, the causality forest, and cost breakdown's top calls are new
+  information there, not a restatement of the Actions table already above it).
+- `session viz <id> [--section ...]` - the only feature in this tool with no CLI access at all,
+  dashboard-only. MCP-exempt (a human debugging convenience for comparing against what the dashboard
+  renders, not a distinct capability).
+- Friction Analytics (`GET /analytics`) used none of the above despite existing specifically to
+  surface patterns across every session - gained `wasteBySession`, ranking every session by wasted-
+  call share via `buildWaste`, grouped from the same actions rows every other metric there already
+  scans (no extra query), a 5-call floor to exclude noise.
+- Session deep-linking did not exist - the dashboard's URL hash only ever carried a bare panel id,
+  never which session, so a shared/bookmarked link silently opened whichever session was newest at
+  click time. `#session=<id>&panel=<id>` now round-trips (a bare `#panelId` still works too), with a
+  "copy link" button on every panel.
+- Waste %, unlike the token budget, had no always-visible header tile - buried in the (often
+  collapsed) Waste panel below the fold. Added to the existing header stat strip, same ok/warn/fail
+  banding the token gauge already uses.
+
+**Why:** the Action log table already has every fact; these are lenses over the same rows, not new
+capture - the entire round (all 10 views plus the follow-up fixes) added exactly one new captured
+field (`dom.click`'s `hrefBefore`/`href`) and zero new tables.
+
+**How to apply:** every view is served from one payload (`GET /sessions/:id/viz`) - a panel that
+looks stale after an action almost certainly means the fingerprint-based re-fetch in
+`dashboard.html`'s `refreshViz` did not see a change, not that the model is wrong. `session report`
+(and `session viz`) both need the session id, same as `session show`.
+
+Versions: relay 0.24.0, MCP server 0.25.0. Full suite: 0 new failures (confirmed via `sync-web-scout.mjs --push`'s own clean-worktree replay: 378 tests, 375 pass, 0 fail, 3 skipped - need a live tab, or a committed calibration this repo has never run). A machine with a stray local `token-calibration.json` (left by an earlier manual `--write`, not committed) sees that skip run and fail instead, and possibly a related estimator-band assertion with it - confirmed unrelated to this round via an empty diff on every file either test reads.
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

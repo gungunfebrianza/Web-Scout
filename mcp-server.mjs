@@ -38,7 +38,7 @@ import {
 } from './client.mjs';
 
 const SERVER_NAME = 'web-scout';
-const SERVER_VERSION = '0.24.0'; // bumped alongside docs/web-scout-roadmap.md's V36 entry
+const SERVER_VERSION = '0.25.0'; // bumped alongside docs/web-scout-roadmap.md's V37 entry
 
 // ---------- stdio JSON-RPC framing ----------
 //
