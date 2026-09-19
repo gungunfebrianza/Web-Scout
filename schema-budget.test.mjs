@@ -21,7 +21,9 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 const MCP_TOTAL_MAX_BYTES = 16750;
 const MCP_TOOL_MAX_BYTES = 3200;
 // The biggest slice of help (a whole group) and the index a bare `cli.mjs` prints.
-const HELP_GROUP_MAX_CHARS = 14000;
+// Raised to 14300 when "session viz" (round-2 session-viz.mjs's own CLI access) was added to the
+// already-tightest group - same commit as the text, same convention as MCP_TOTAL_MAX_BYTES above.
+const HELP_GROUP_MAX_CHARS = 14300;
 const HELP_INDEX_MAX_CHARS = 2200;
 
 let child;

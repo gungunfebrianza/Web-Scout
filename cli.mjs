@@ -306,6 +306,18 @@ async function handleSession(sub, rawArgs) {
     }
     return;
   }
+  if (sub === 'viz') {
+    let args = rawArgs;
+    let section;
+    ({ args, value: section } = extractFlag(args, '--section'));
+    const id = args[0];
+    if (!id) throw new Error('session viz requires an id');
+    const viz = await request('GET', `/sessions/${id}/viz`);
+    if (section === undefined) { printResult(viz); return; }
+    if (!(section in viz)) throw new Error(`session viz --section must be one of: ${Object.keys(viz).filter((k) => typeof viz[k] === 'object' && viz[k] !== null).join(', ')}`);
+    printResult(viz[section]);
+    return;
+  }
   if (sub === 'cleanup') {
     let args = rawArgs;
     let confirm;

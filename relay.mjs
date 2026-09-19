@@ -46,7 +46,7 @@ import { createReadPipeline, readTargetKey, SCOPING_PARAM_KEYS, FOLLOW_UP_WINDOW
 import { sizeOf } from './read-shape.mjs';
 import { estimatorInfo, baselineBand } from './token-estimate.mjs';
 import { parseExpect, buildVerifyReport, sampleStoreDiff } from './crv-verify.mjs';
-import { buildSessionViz } from './session-viz.mjs';
+import { buildSessionViz, buildWaste } from './session-viz.mjs';
 import { discoverTranscripts, readTranscriptFile, importIntents } from './intent-import.mjs';
 import { exportTrace, writeTrace } from './trace.mjs';
 import { autoCalibrateIfMissing } from './transcript-tokens.mjs';
@@ -887,17 +887,26 @@ function staleAgentNames() {
 
 async function gatherReportBundle(sessionId) {
   const session = dbApi.getSession(sessionId);
+  const snapshots = dbApi.listSnapshots(sessionId);
+  const diffs = dbApi.listDiffs(sessionId).map((d) => dbApi.getDiff(d.id));
   return {
     session,
     actions: dbApi.listActions(sessionId),
-    snapshots: dbApi.listSnapshots(sessionId),
-    diffs: dbApi.listDiffs(sessionId).map((d) => dbApi.getDiff(d.id)),
+    snapshots,
+    diffs,
     qa: dbApi.listQA(sessionId),
     console: dbApi.listConsoleEntries(sessionId),
     net: dbApi.listNetEntries(sessionId),
     verityRuns: dbApi.listVerityRuns(sessionId).map((r) => dbApi.getVerityRun(r.id)),
     tokenReport: dbApi.getActionCostReport(sessionId),
     repeatedActionLoops: dbApi.findRepeatedActionLoops(sessionId),
+    // The dashboard's round-1/round-2 visualizations (session-viz.mjs), same models GET
+    // /sessions/:id/viz serves - a saved report had zero trace of any of them before this.
+    // Its own query (listActionsForViz), separate from the full listActions() above, since
+    // that one intentionally skips result bodies this report never needed either.
+    viz: buildSessionViz({
+      session, actions: dbApi.listActionsForViz(sessionId, { limit: 20000 }), snapshots, diffs, clicks: dbApi.listClickNavigations(sessionId),
+    }),
   };
 }
 
@@ -1076,6 +1085,28 @@ function computeAnalytics() {
     })
     .sort((a, b) => b.p95 - a.p95);
 
+  // 9. Waste rate by session - reuses buildWaste (session-viz.mjs's own round-2 "Waste and
+  // retries" model), grouping the SAME `actions` array already scanned above by session_id
+  // (no extra query). Ranks sessions where the highest share of calls bought nothing (a failure
+  // never retried, a duplicate read that came back unchanged) - the per-session Waste panel's own
+  // number, made visible across every session at once instead of requiring a human to open each
+  // one to notice a chronically wasteful shape of work. Sessions under WASTE_MIN_CALLS are
+  // excluded - a 2-call session at 50% waste is noise, not a pattern.
+  const WASTE_MIN_CALLS = 5;
+  const actionsBySession = new Map();
+  for (const a of actions) {
+    const list = actionsBySession.get(a.session_id);
+    if (list) list.push(a); else actionsBySession.set(a.session_id, [a]);
+  }
+  const wasteBySession = sessions
+    .map((s) => {
+      const w = buildWaste(actionsBySession.get(s.id) ?? []);
+      return { sessionId: s.id, goal: s.goal, calls: w.totals.calls, wastedCalls: w.totals.wastedCalls, wastePct: w.totals.wastePct };
+    })
+    .filter((r) => r.calls >= WASTE_MIN_CALLS)
+    .sort((a, b) => b.wastePct - a.wastePct)
+    .slice(0, 15);
+
   return {
     totals: { sessions: sessions.length, actions: actions.length, macros: macros.length, verityRuns: verityRuns.length },
     malformedActionsSkipped,
@@ -1088,6 +1119,7 @@ function computeAnalytics() {
     macroHealth,
     activityPunchcard,
     durationByType,
+    wasteBySession,
     // One row per session (id/goal/tags/startedAt/totalEstTokens) - the
     // dashboard groups these by shared tag client-side to trend token cost
     // across repeated work (this project's own round-1/round-2/... CRV

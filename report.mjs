@@ -14,7 +14,110 @@ function mdEscapeBlock(v) {
   return String(v);
 }
 
-export function buildReportMarkdown({ session, actions, snapshots, diffs, qa, console: consoleEntries, net, verityRuns, tokenReport, repeatedActionLoops }) {
+// Depth-first text rendering of one buildCausality() forest - the dashboard's own tree, indented
+// instead of nested <div>s. `id` is a step's primary action id (see session-viz.mjs's shapeEpisode);
+// childrenOf keys are the same ids, so a plain object lookup (numeric id, string key - JS coerces)
+// walks it without needing a Map.
+function causalityLines(viz, id, depth, out) {
+  const node = viz.causality.nodes.find((n) => n.id === id);
+  if (!node) return;
+  const kind = node.causedBy ? ` _(${node.causedBy.kind})_` : '';
+  out.push(`${'  '.repeat(depth)}- #${node.id} ${mdEscapeCell(node.type)}${node.target ? ` ${mdEscapeCell(node.target)}` : ''}${node.ok ? '' : ' **FAILED**'}${kind}`);
+  for (const childId of viz.causality.childrenOf[id] ?? []) causalityLines(viz, childId, depth + 1, out);
+}
+
+// Text/table form of the round-2 dashboard visualizations (session-viz.mjs) - swimlane/state
+// machine/episodes/sequence/waste/cost/failure-heatmap/causality/route-FSM all derive from the same
+// actions already listed above; this section is what a saved report shows for each instead of
+// nothing (a report exported before this section existed had zero trace of any of them). Markdown
+// can't render the dashboard's own SVGs, so each gets its table/list form instead - some (state
+// machine's insights, cost breakdown's top calls, waste, causality, route FSM) are genuinely new
+// information here; others (sequence, most of episodes) are intentionally terse since the Actions
+// table above already has the same calls in the same order.
+function buildVizSection(viz) {
+  const lines = ['## Session visualizations', ''];
+  const sm = viz.stateMachine;
+  lines.push('### State machine', '');
+  lines.push(`${sm.stats.nodes} distinct database state(s), ${sm.stats.edges} transition(s), ${sm.stats.revisits} return(s) to a state already seen, ${sm.stats.noopMutations} no-op write(s).`);
+  if (sm.insights.length) { lines.push(''); for (const i of sm.insights) lines.push(`- ${mdEscapeBlock(i)}`); }
+  lines.push('');
+
+  lines.push('### Episodes', '');
+  lines.push(`${viz.episodes.stats.episodes} episode(s), ${viz.episodes.stats.steps} step(s), ${viz.episodes.stats.failedEpisodes} failed, ${viz.episodes.stats.recoveredEpisodes} recovered.`);
+  if (viz.episodes.episodes.length) {
+    lines.push('', '| # | Agent | Kind | Outcome | Title |', '|---|---|---|---|---|');
+    for (const ep of viz.episodes.episodes) lines.push(`| ${ep.index} | ${mdEscapeCell(ep.agent)} | ${mdEscapeCell(ep.label)} | ${ep.outcome} | ${mdEscapeCell(ep.title)} |`);
+  }
+  lines.push('');
+
+  lines.push('### Causality', '');
+  if (!viz.causality.roots.length) {
+    lines.push('_No causal chains - nothing here is a retry, a recovery, or an immediate verify (see Episodes above for the full step list)._');
+  } else {
+    const out = [];
+    for (const rootId of viz.causality.roots) causalityLines(viz, rootId, 0, out);
+    lines.push(...out);
+  }
+  lines.push('');
+
+  lines.push('### Sequence', '');
+  lines.push(`${viz.sequence.messages.length} message(s) across ${viz.sequence.stats.participants} agent(s), ${viz.sequence.stats.failed} failed - the dashboard's Sequence panel has the call/return diagram; the Actions table above has the same calls in the same order.`);
+  lines.push('');
+
+  lines.push('### Route / page FSM', '');
+  if (!viz.routeMachine.nodes.length) {
+    lines.push('_No page navigation detected (dom.click\'s own before/after href is the only navigation signal this tool captures)._');
+  } else {
+    lines.push(`${viz.routeMachine.stats.routes} page(s), ${viz.routeMachine.stats.navigations} navigation(s), ${viz.routeMachine.stats.revisits} return(s) to a page already seen.`);
+    lines.push('', '| Page | Visits |', '|---|---|');
+    for (const n of viz.routeMachine.nodes) lines.push(`| ${mdEscapeCell(n.route)} | ${n.visits} |`);
+    lines.push('', '| Transition | Count |', '|---|---|');
+    for (const e of viz.routeMachine.edges) lines.push(`| ${mdEscapeCell(e.from)} → ${mdEscapeCell(e.to)} | ${e.count} |`);
+  }
+  lines.push('');
+
+  lines.push('### Waste and retries', '');
+  const wt = viz.waste.totals;
+  lines.push(`${wt.wastedCalls} of ${wt.calls} call(s) bought nothing (${Math.round(wt.wastePct * 100)}%), ${wt.wastedMs}ms spent on failed attempts.`);
+  if (viz.waste.retries.length) {
+    lines.push('', 'Retries:');
+    for (const r of viz.waste.retries) lines.push(`- ${mdEscapeCell(r.type)}${r.target ? ` ${mdEscapeCell(r.target)}` : ''} - ${r.attempts.map((id) => `#${id}`).join(', ')} - ${r.resolvedOk ? 'recovered' : 'never recovered'}`);
+  }
+  if (viz.waste.duplicateReads.length) {
+    lines.push('', 'Duplicate reads (unchanged answer):');
+    for (const d of viz.waste.duplicateReads) lines.push(`- ${mdEscapeCell(d.type)}${d.target ? ` ${mdEscapeCell(d.target)}` : ''} - read ${d.count}× (#${d.firstId}, ${d.ids.map((id) => `#${id}`).join(', ')})`);
+  }
+  if (viz.waste.noopMutations.length) {
+    lines.push('', 'No-op writes (ran, changed nothing):');
+    for (const n of viz.waste.noopMutations) lines.push(`- #${n.id} ${mdEscapeCell(n.type)}${n.target ? ` ${mdEscapeCell(n.target)}` : ''}`);
+  }
+  lines.push('');
+
+  lines.push('### Cost breakdown (single most expensive calls)', '');
+  lines.push(`${viz.costTree.totalBytes.toLocaleString()} bytes delivered across ${viz.costTree.calls} call(s) (≈ ${viz.costTree.totalTokensEst} tokens) - same total the Token cost table above shows by type.`);
+  if (viz.costTree.topCalls.length) {
+    lines.push('', '| # | Type | Target | Bytes | Est. tokens |', '|---|---|---|---|---|');
+    viz.costTree.topCalls.forEach((t, i) => lines.push(`| ${i + 1} | ${mdEscapeCell(t.type)} | ${mdEscapeCell(t.target)} | ${t.bytes.toLocaleString()} | ${t.tokensEst} |`));
+  }
+  if (viz.costTree.byAgent.length > 1) {
+    lines.push('', '| Agent | Bytes | Share |', '|---|---|---|');
+    for (const a of viz.costTree.byAgent) lines.push(`| ${mdEscapeCell(a.agent)} | ${a.bytes.toLocaleString()} | ${Math.round(a.share * 100)}% |`);
+  }
+  lines.push('');
+
+  lines.push('### Failure heatmap (this session, by time)', '');
+  if (!viz.failureHeatmap.totals.calls) {
+    lines.push('_No actions recorded._');
+  } else {
+    const worst = viz.failureHeatmap.worst;
+    lines.push(`${viz.failureHeatmap.totals.failed} of ${viz.failureHeatmap.totals.calls} call(s) failed (${Math.round(viz.failureHeatmap.totals.failRate * 100)}%).${worst ? ` Worst: **${mdEscapeCell(worst.type)}** around bucket ${worst.bucket} - ${worst.failed}/${worst.calls} failed.` : ''}`);
+  }
+  lines.push('');
+
+  return lines;
+}
+
+export function buildReportMarkdown({ session, actions, snapshots, diffs, qa, console: consoleEntries, net, verityRuns, tokenReport, repeatedActionLoops, viz }) {
   const lines = [];
   lines.push(`# Web-scout Session Report: ${session.goal}`);
   lines.push('');
@@ -65,6 +168,8 @@ export function buildReportMarkdown({ session, actions, snapshots, diffs, qa, co
     }
   }
   lines.push('');
+
+  if (viz) lines.push(...buildVizSection(viz));
 
   lines.push('## State snapshots');
   lines.push('');

@@ -382,6 +382,12 @@ describe('buildFailureHeatmap', () => {
     assert.equal(h.totals.failed, 5);
     assert.equal(h.worst.bucket, 1);
     assert.equal(h.worst.failRate, 1);
+    // Each cell carries enough evidence (real action ids) for a dashboard click to jump to a row.
+    const bucket1 = h.cells.find((c) => c.bucket === 1);
+    assert.equal(bucket1.ids.length, 4);
+    assert.equal(bucket1.failedIds.length, 4);
+    const bucket0 = h.cells.find((c) => c.bucket === 0);
+    assert.equal(bucket0.failedIds.length, 1);
   });
 
   test('types past the cap are folded into "other"', () => {
@@ -439,6 +445,11 @@ describe('buildRouteMachine', () => {
     assert.equal(r.stats.nonNavClicks, 1);
     assert.equal(r.stats.revisits, 1);
     assert.equal(r.current, 'r1');
+    // Every node/edge carries the real click id(s) that touched it - a dashboard click on either
+    // jumps to one. Click 2 (hrefChanged: false) never enters the graph at all.
+    assert.deepEqual(r.nodes.find((n) => n.id === 'r1').actionIds, [1, 3]);
+    assert.deepEqual(r.nodes.find((n) => n.id === 'r2').actionIds, [1, 3]);
+    assert.deepEqual(r.edges.find((e) => e.from === 'r1' && e.to === 'r2').actionIds, [1]);
   });
 
   test('no navigation, no graph', () => {

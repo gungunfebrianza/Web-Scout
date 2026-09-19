@@ -80,6 +80,29 @@ test('full round trip: session start -> current -> list -> end, exit 0 throughou
   assert.equal(JSON.parse(ended.stdout).status, 'ended');
 });
 
+test('session viz returns the full derived-views payload, and --section slices it to just one', () => {
+  const started = run('session', 'start', 'cli.test.mjs viz', 'automated');
+  assert.equal(started.status, 0, started.stderr);
+  const session = JSON.parse(started.stdout);
+
+  const full = run('session', 'viz', String(session.id));
+  assert.equal(full.status, 0, full.stderr);
+  const viz = JSON.parse(full.stdout);
+  for (const key of ['swimlane', 'episodes', 'stateMachine', 'sequence', 'waste', 'costTree', 'failureHeatmap', 'causality', 'routeMachine']) {
+    assert.ok(key in viz, `viz is missing ${key}`);
+  }
+
+  const sliced = run('session', 'viz', String(session.id), '--section', 'waste');
+  assert.equal(sliced.status, 0, sliced.stderr);
+  assert.deepEqual(JSON.parse(sliced.stdout), viz.waste);
+
+  const bad = run('session', 'viz', String(session.id), '--section', 'not-a-real-section');
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /--section must be one of/);
+
+  run('session', 'end', String(session.id));
+});
+
 test('dom/idb/eval against a real connected tab (skipped if none connected in this environment)', (t) => {
   const { stdout: statusOut } = run('status');
   const { agents_connected } = JSON.parse(statusOut);

@@ -59,6 +59,10 @@ export const CLI_SPEC = [
     cmd: 'session cleanup', pos: [1, 1], bool: ['--confirm', '--summary'], val: ['--since-snapshot'], mcp: 'webscout_session.cleanup',
     params: { '--confirm': 'confirm', '--summary': 'summary', '--since-snapshot': 'sinceSnapshotId' },
   },
+  {
+    cmd: 'session viz', pos: [1, 1], val: ['--section'], mcp: null,
+    mcpExempt: 'the dashboard\'s own derived views (swimlane/state machine/episodes/sequence/waste/cost/failure-heatmap/causality/route-FSM) - an agent already gets the same evidence from session show/report; this is a human debugging convenience for comparing against what the dashboard renders, not a distinct capability',
+  },
   { cmd: 'session assert', pos: [2, 2], val: ['--agent'], mcp: 'webscout_session.assert' },
   {
     cmd: 'session intents', pos: [1, 1], val: ['--transcript', '--format'], mcp: null,
