@@ -117,6 +117,35 @@ test('actions: logged, listed newest-first by default, redaction applied by list
   db.endSession(s.id);
 });
 
+test('listActionsForViz carries a delivered-bytes estimate without reading the result body, and listClickNavigations reads dom.click hrefs', () => {
+  const s = db.startSession({ goal: 'viz support test' });
+  const startedAt = new Date().toISOString();
+  const endedAt = new Date(Date.now() + 5).toISOString();
+
+  const id1 = db.logAction({ sessionId: s.id, type: 'idb.dump', params: { store: 'a' }, result: { rows: [1, 2, 3] }, ok: true, startedAt, endedAt });
+  // A second, physically-deduped result (same JSON) still needs a byte figure - from result_blobs.byte_length, not a second copy.
+  const id2 = db.logAction({ sessionId: s.id, type: 'idb.dump', params: { store: 'b' }, result: { rows: [1, 2, 3] }, ok: true, startedAt, endedAt });
+  const viz = db.listActionsForViz(s.id);
+  const row1 = viz.find((a) => a.id === id1);
+  const row2 = viz.find((a) => a.id === id2);
+  assert.equal(row1.bytes, JSON.stringify({ rows: [1, 2, 3] }).length);
+  assert.equal(row2.bytes, row1.bytes, 'the deduped row still reports the same byte size');
+  assert.deepEqual(row1.params, { store: 'a' });
+  assert.ok(!('params_json' in row1));
+
+  const clickOk = db.logAction({
+    sessionId: s.id, type: 'dom.click', params: { selector: '#nav' },
+    result: { clicked: true, mutated: true, hrefChanged: true, hrefBefore: 'https://app/#/a', href: 'https://app/#/b' },
+    ok: true, startedAt, endedAt,
+  });
+  db.logAction({ sessionId: s.id, type: 'dom.click', params: { selector: '#bad' }, result: null, error: 'no element', ok: false, startedAt, endedAt });
+  const clicks = db.listClickNavigations(s.id);
+  assert.equal(clicks.length, 1, 'a failed click carries no navigation info and is excluded');
+  assert.deepEqual(clicks[0], { id: clickOk, startedAt, agentName: 'default', hrefChanged: true, hrefBefore: 'https://app/#/a', href: 'https://app/#/b' });
+
+  db.endSession(s.id);
+});
+
 test('params dedup: a repeated params object is physically stored once, resolved transparently everywhere', () => {
   const s = db.startSession({ goal: 'params dedup test' });
   const startedAt = new Date().toISOString();

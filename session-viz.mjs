@@ -3,17 +3,32 @@
 //
 //   buildSwimlane(actions)            - one lane per agent, a bar per action, per-lane think time
 //   buildEpisodes(actions, opts)      - goal > episode > step > action tree, plus a "why" per action
+//                                       and a "caused by" link per step (see buildCausality)
 //   buildStateMachine({actions, snapshots, diffs})
 //                                     - nodes are distinct snapshot CONTENT, edges are what happened
 //                                       between two snapshots (the state graph a session walked)
-//   buildSessionViz(...)              - all three, from one row set
+//   buildSequence(actions)            - a UML-style sequence diagram: each agent against "the page",
+//                                       call then return, in strict order (not time-scaled)
+//   buildWaste(actions, opts)         - failed calls, duplicate re-reads that came back unchanged,
+//                                       and no-op writes - the calls that bought nothing
+//   buildCostBreakdown(actions)       - delivered bytes/tokens grouped by type and by agent, plus
+//                                       the single most expensive calls (an icicle's own numbers)
+//   buildFailureHeatmap(actions, opts) - call type x time bucket, for where in the session failures
+//                                       clustered (distinct from the dashboard's cross-SESSION one)
+//   buildCausality(episodes)          - the causedBy links buildEpisodes attaches, reshaped into a
+//                                       forest: a retry points at the failure it followed, a verify
+//                                       at the change it checked, a recovery at the failure it fixed
+//   buildRouteMachine(clicks)         - like buildStateMachine, but nodes are pages/routes the
+//                                       session navigated between (see db.listClickNavigations)
+//   buildSessionViz(...)              - all of the above, from one row set
 //
-// Inputs are the lightweight rows db.listActionsForViz / listSnapshots / listDiffs return. A
-// "why" is either the agent's own words (actions.intent, imported from its transcript - see
-// intent-import.mjs) or an inferred one derived from the call sequence; each carries its source so
-// the UI never presents a guess as the agent's reasoning.
+// Inputs are the lightweight rows db.listActionsForViz / listSnapshots / listDiffs / listClickNavigations
+// return. A "why" is either the agent's own words (actions.intent, imported from its transcript -
+// see intent-import.mjs) or an inferred one derived from the call sequence; each carries its source
+// so the UI never presents a guess as the agent's reasoning.
 
 import { MUTATING_TYPES } from './command-registry.mjs';
+import { baselineTokens } from './token-estimate.mjs';
 
 const toMs = (iso) => {
   const t = Date.parse(iso);
@@ -224,6 +239,9 @@ export function buildEpisodes(actions, { idleSplitMs = DEFAULT_EPISODE_IDLE_MS, 
     step.why = step.intent
       ? { text: step.intent, source: step.intentSource ?? 'transcript' }
       : { text: inferWhy(step, { prev, phase, seen, lastActStep }), source: 'inferred' };
+    // The single most direct thing that made this step run - reshaped into a forest by
+    // buildCausality. Computed with the same signals as inferWhy, before `seen` moves on.
+    step.causedBy = causeOf(step, { prev, phase, seen, lastActStep });
 
     if (step.mutating) { cur.hasAct = true; lastActStep = step; }
     if (phase === 'verify') cur.hasVerify = true;
@@ -251,6 +269,18 @@ export function buildEpisodes(actions, { idleSplitMs = DEFAULT_EPISODE_IDLE_MS, 
       stepsWithTranscriptWhy: withTranscript,
     },
   };
+}
+
+// The evidence is the same inferWhy already gathers: a failed step just before (this one retried
+// it or, having succeeded, recovered from it), a prior attempt of the exact same call, or the
+// mutating step a verify-phase step is checking on. Only one cause per step - the most direct one -
+// so the result is a forest, not a full dependency graph.
+function causeOf(step, { prev, phase, seen, lastActStep }) {
+  const again = seen.get(step.paramsKey + step.type);
+  if (again && !again.ok) return { id: again.id, kind: step.ok ? 'recovered' : 'retried' };
+  if (phase === 'verify' && lastActStep) return { id: lastActStep.id, kind: 'verifies' };
+  if (prev && !prev.ok && (!again || again.id !== prev.id)) return { id: prev.id, kind: 'follows-failure' };
+  return null;
 }
 
 function inferWhy(step, { prev, phase, seen, lastActStep }) {
@@ -293,7 +323,7 @@ function shapeEpisode(ep, index, snapshotByAction) {
     snapshotIds,
     steps: ep.steps.map((s) => ({
       id: s.id, actionIds: s.actionIds, type: s.type, types: s.types, target: s.target, ok: s.ok, phase: s.phase, ms: s.ms,
-      why: s.why, ...(s.ok ? {} : { error: clip(s.error, 120) }),
+      why: s.why, causedBy: s.causedBy ?? null, ...(s.ok ? {} : { error: clip(s.error, 120) }),
     })),
   };
 }
@@ -467,13 +497,246 @@ export function buildStateMachine({ actions = [], snapshots = [], diffs = [] } =
     preSnapshotActions: acts.slice(0, pos[0].before).filter((a) => !NOISE_TYPES.has(a.type)).length,
     stats: { snapshots: snaps.length, nodes: nodes.length, edges: edgeList.length, revisits, noChangeTransitions, noopMutations: noopMutationIds.length },
     insights, truncatedNodes,
+    // The raw list behind stats.noopMutations - buildWaste folds these into its own totals.
+    noopMutations: noopMutationIds,
+  };
+}
+
+// -------------------------------------------------------------- sequence diagram
+
+const PAGE_PARTICIPANT = 'page';
+
+// One lifeline per agent plus "the page", in strict call order (not time-scaled - that's the
+// swimlane's job). Each message is a call/return pair: distinct value even for a single agent,
+// since it reads as a request/response log rather than a Gantt chart.
+export function buildSequence(actions) {
+  const rows = ascending(actions).filter((a) => !NOISE_TYPES.has(a.type) && !isInternal(a));
+  const agents = [];
+  const messages = rows.map((a, i) => {
+    const agent = a.agent_name ?? 'default';
+    if (!agents.includes(agent)) agents.push(agent);
+    return {
+      id: a.id, seq: i + 1, agent, type: a.type, target: targetOf(a.params), ok: !!a.ok,
+      ms: Number.isFinite(a.duration_ms) ? a.duration_ms : 0,
+      mutating: MUTATING_TYPES.has(a.type),
+      ...(a.intent ? { why: clip(a.intent, 140) } : {}),
+    };
+  });
+  return {
+    participants: [...agents, PAGE_PARTICIPANT], page: PAGE_PARTICIPANT, messages,
+    stats: { messages: messages.length, participants: agents.length, failed: messages.filter((m) => !m.ok).length },
+  };
+}
+
+// -------------------------------------------------------------- waste and retries
+
+// What the session paid for and got nothing from: a failed call (retried or not), a re-read whose
+// answer had not changed, a write that ran but changed nothing (from buildStateMachine, when given).
+export function buildWaste(actions, { stateMachine = null } = {}) {
+  const steps = buildSteps(ascending(actions));
+  let openChain = null;
+  const retryChains = [];
+  const dupSeen = new Map(); // paramsKey+type -> { firstId, resultHash }
+  const dupEntries = new Map(); // firstId -> entry
+  for (const step of steps) {
+    if (openChain && openChain.type === step.type && openChain.paramsKey === step.paramsKey) {
+      openChain.attempts.push(step.id);
+      openChain.ms += step.ms;
+      if (step.ok) { openChain.resolvedId = step.id; openChain.resolvedOk = true; retryChains.push(openChain); openChain = null; }
+      else if (step.error) openChain.error = step.error;
+    } else if (!step.ok) {
+      if (openChain) retryChains.push(openChain); // a different call intervened - the old chain ends unresolved
+      openChain = { type: step.type, target: step.target, paramsKey: step.paramsKey, error: step.error, attempts: [step.id], ms: step.ms, resolvedId: null, resolvedOk: false };
+    } else if (openChain) {
+      retryChains.push(openChain);
+      openChain = null;
+    }
+    if (!step.mutating && step.ok) {
+      const key = step.paramsKey + step.type;
+      const prevSeen = dupSeen.get(key);
+      const isDup = prevSeen && prevSeen.resultHash && step.resultHash && prevSeen.resultHash === step.resultHash;
+      if (isDup) {
+        let entry = dupEntries.get(prevSeen.firstId);
+        if (!entry) { entry = { type: step.type, target: step.target, firstId: prevSeen.firstId, resultHash: step.resultHash, ids: [] }; dupEntries.set(prevSeen.firstId, entry); }
+        entry.ids.push(step.id);
+        dupSeen.set(key, prevSeen);
+      } else {
+        dupSeen.set(key, { firstId: step.id, resultHash: step.resultHash });
+      }
+    }
+  }
+  if (openChain) retryChains.push(openChain);
+
+  const duplicates = [...dupEntries.values()];
+  const noop = stateMachine?.noopMutations ?? [];
+  const wastedRetryCalls = retryChains.reduce((n, c) => n + c.attempts.length - (c.resolvedOk ? 1 : 0), 0);
+  const wastedDupCalls = duplicates.reduce((n, d) => n + d.ids.length, 0);
+  const wastedMs = retryChains.reduce((n, c) => n + c.ms, 0);
+  const wastedCalls = wastedRetryCalls + wastedDupCalls + noop.length;
+  const totalCalls = steps.length;
+  return {
+    totals: { calls: totalCalls, wastedCalls, wastedMs, wastePct: totalCalls ? wastedCalls / totalCalls : 0 },
+    // A chain of length 1 is a failure nobody retried - still wasted, just not a "retry" in the
+    // literal sense; kept in the same list rather than a separate bucket nobody would check.
+    retries: retryChains.map((c) => ({ type: c.type, target: c.target, error: c.error ? clip(c.error, 100) : null, attempts: c.attempts, resolvedId: c.resolvedId, resolvedOk: c.resolvedOk, ms: c.ms })),
+    duplicateReads: duplicates.map((d) => ({ type: d.type, target: d.target, firstId: d.firstId, ids: d.ids, count: d.ids.length + 1 })),
+    noopMutations: noop,
+  };
+}
+
+// -------------------------------------------------------------- token cost breakdown
+
+// Delivered bytes (db.mjs's own COALESCE(delivered_bytes, LENGTH(result_json), byte_length, 0) -
+// the same figure the token-report ledger books) grouped by type and by agent, plus the single
+// most expensive calls - an icicle chart's numbers without committing to a fixed depth of nesting.
+export function buildCostBreakdown(actions, { topN = 12 } = {}) {
+  const rows = ascending(actions).filter((a) => !NOISE_TYPES.has(a.type) && !isInternal(a));
+  const byType = new Map();
+  const byAgent = new Map();
+  let totalBytes = 0;
+  for (const a of rows) {
+    const bytes = Number.isFinite(a.bytes) ? a.bytes : 0;
+    totalBytes += bytes;
+    const t = byType.get(a.type) ?? { type: a.type, bytes: 0, count: 0 };
+    t.bytes += bytes; t.count += 1; byType.set(a.type, t);
+    const agent = a.agent_name ?? 'default';
+    const g = byAgent.get(agent) ?? { agent, bytes: 0, count: 0 };
+    g.bytes += bytes; g.count += 1; byAgent.set(agent, g);
+  }
+  const withShare = (list) => list.sort((x, y) => y.bytes - x.bytes).map((x) => ({ ...x, tokensEst: baselineTokens(x.bytes), share: totalBytes ? x.bytes / totalBytes : 0 }));
+  const topCalls = rows.slice().sort((x, y) => (Number(y.bytes) || 0) - (Number(x.bytes) || 0)).slice(0, topN)
+    .map((a) => ({ id: a.id, type: a.type, target: targetOf(a.params), bytes: Number(a.bytes) || 0, tokensEst: baselineTokens(Number(a.bytes) || 0), ok: !!a.ok }));
+  return {
+    totalBytes, totalTokensEst: baselineTokens(totalBytes), calls: rows.length,
+    byType: withShare([...byType.values()]), byAgent: withShare([...byAgent.values()]), topCalls,
+  };
+}
+
+// -------------------------------------------------------------- failure heatmap (this session)
+
+// Call type x time bucket, within THIS session - where in the timeline failures clustered. The
+// dashboard's other "Failure heatmap" panel is type x the last 15 SESSIONS; this is the per-session
+// complement built from the same actions rows as everything else here.
+export function buildFailureHeatmap(actions, { buckets = 20, topTypes = 8 } = {}) {
+  const rows = ascending(actions).filter((a) => !NOISE_TYPES.has(a.type) && !isInternal(a) && toMs(a.started_at) !== null);
+  if (!rows.length) return { origin: null, bucketMs: 0, buckets: 0, rowTypes: [], cells: [], totals: { calls: 0, failed: 0, failRate: 0 }, worst: null };
+  const origin = Math.min(...rows.map((a) => toMs(a.started_at)));
+  const end = Math.max(...rows.map((a) => toMs(a.ended_at) ?? toMs(a.started_at)));
+  const bucketMs = Math.max(1000, Math.ceil((end - origin + 1) / buckets));
+  const counts = new Map();
+  for (const a of rows) counts.set(a.type, (counts.get(a.type) ?? 0) + 1);
+  const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const kept = new Set(ranked.slice(0, topTypes).map(([t]) => t));
+  const rowOf = (type) => (kept.has(type) ? type : 'other');
+  const rowTypes = [...kept];
+  if (ranked.length > topTypes) rowTypes.push('other');
+  const matrix = new Map();
+  let totalFailed = 0;
+  for (const a of rows) {
+    const bucket = Math.min(buckets - 1, Math.floor((toMs(a.started_at) - origin) / bucketMs));
+    const key = `${rowOf(a.type)}|${bucket}`;
+    const cell = matrix.get(key) ?? { calls: 0, failed: 0 };
+    cell.calls += 1;
+    if (!a.ok) { cell.failed += 1; totalFailed += 1; }
+    matrix.set(key, cell);
+  }
+  let worst = null;
+  const cells = [];
+  for (const [key, c] of matrix) {
+    const [type, bucketStr] = key.split('|');
+    const bucket = Number(bucketStr);
+    const failRate = c.calls ? c.failed / c.calls : 0;
+    cells.push({ type, bucket, calls: c.calls, failed: c.failed, failRate });
+    if (c.calls >= 3 && (!worst || failRate > worst.failRate)) worst = { type, bucket, calls: c.calls, failed: c.failed, failRate };
+  }
+  return {
+    origin: new Date(origin).toISOString(), bucketMs, buckets, rowTypes, cells,
+    totals: { calls: rows.length, failed: totalFailed, failRate: rows.length ? totalFailed / rows.length : 0 },
+    worst,
+  };
+}
+
+// -------------------------------------------------------------- causality tree
+
+// Reshapes the causedBy link buildEpisodes attaches to each step into a forest: an uncaused step
+// that started at least one chain is a root, and every step it caused (directly or through another
+// caused step) hangs under it. A step nobody's chain touches is left out entirely - this is "why did
+// THIS happen" evidence, not a restatement of the whole episode list.
+export function buildCausality(episodesResult) {
+  const steps = [];
+  for (const ep of episodesResult?.episodes ?? []) {
+    for (const st of ep.steps) {
+      steps.push({ id: st.id, actionIds: st.actionIds, type: st.type, target: st.target, ok: st.ok, phase: st.phase, ms: st.ms, why: st.why, causedBy: st.causedBy ?? null, episodeId: ep.id, episodeIndex: ep.index });
+    }
+  }
+  const byId = new Map(steps.map((s) => [s.id, s]));
+  const childrenOf = new Map();
+  const edges = [];
+  for (const s of steps) {
+    if (s.causedBy && byId.has(s.causedBy.id)) {
+      edges.push({ from: s.causedBy.id, to: s.id, kind: s.causedBy.kind });
+      if (!childrenOf.has(s.causedBy.id)) childrenOf.set(s.causedBy.id, []);
+      childrenOf.get(s.causedBy.id).push(s.id);
+    }
+  }
+  const roots = steps.filter((s) => childrenOf.has(s.id) && !s.causedBy).map((s) => s.id).sort((a, b) => a - b);
+  const linkedIds = new Set([...childrenOf.keys(), ...edges.map((e) => e.to)]);
+  return {
+    nodes: steps.filter((s) => linkedIds.has(s.id)),
+    edges, roots,
+    childrenOf: Object.fromEntries([...childrenOf.entries()].map(([k, v]) => [k, v.sort((a, b) => a - b)])),
+    stats: { linkedActions: linkedIds.size, chains: roots.length, edges: edges.length },
+  };
+}
+
+// -------------------------------------------------------------- route / page FSM
+
+function routeOf(href) {
+  try { const u = new URL(href); return `${u.pathname}${u.hash || ''}` || '/'; } catch { return clip(href, 60); }
+}
+
+// Same shape as buildStateMachine (nodes are distinct states, edges are transitions between them),
+// but the state is which page/route the session was on, from dom.click's own hrefBefore/href -
+// the only navigation signal this tool captures (see inject.js). `clicks` is
+// db.listClickNavigations(sessionId): every ok dom.click, oldest first.
+export function buildRouteMachine(clicks = []) {
+  const navs = clicks.filter((c) => c.hrefChanged && c.href && c.hrefBefore);
+  if (!navs.length) return { nodes: [], edges: [], path: [], current: null, stats: { navigations: 0, routes: 0, transitions: 0, revisits: 0, nonNavClicks: clicks.length } };
+  const nodeByKey = new Map();
+  const nodes = [];
+  const ensure = (href) => {
+    const key = routeOf(href);
+    let n = nodeByKey.get(key);
+    if (!n) { n = { id: `r${nodes.length + 1}`, index: nodes.length + 1, route: key, sample: href, visits: 0 }; nodes.push(n); nodeByKey.set(key, n); }
+    n.visits += 1;
+    return n;
+  };
+  const edges = new Map();
+  const path = [];
+  for (const c of navs) {
+    const from = ensure(c.hrefBefore);
+    const to = ensure(c.href);
+    if (!path.length) path.push(from.id);
+    path.push(to.id);
+    const key = `${from.id}>${to.id}`;
+    let e = edges.get(key);
+    if (!e) { e = { from: from.id, to: to.id, count: 0, actionIds: [], noChange: from === to }; edges.set(key, e); }
+    e.count += 1;
+    e.actionIds.push(c.id);
+  }
+  const edgeList = [...edges.values()];
+  const revisits = path.filter((id, i) => path.indexOf(id) !== i && path[i - 1] !== id).length;
+  return {
+    nodes, edges: edgeList, path, current: path[path.length - 1] ?? null,
+    stats: { navigations: navs.length, routes: nodes.length, transitions: edgeList.length, revisits, nonNavClicks: clicks.length - navs.length },
   };
 }
 
 // --------------------------------------------------------------------- all
 
-export function buildSessionViz({ session = null, actions = [], snapshots = [], diffs = [], limit = null } = {}) {
+export function buildSessionViz({ session = null, actions = [], snapshots = [], diffs = [], clicks = [], limit = null } = {}) {
   const episodes = buildEpisodes(actions, { snapshots, goal: session?.goal ?? null });
+  const stateMachine = buildStateMachine({ actions, snapshots, diffs });
   return {
     sessionId: session?.id ?? null,
     generatedAt: new Date().toISOString(),
@@ -481,6 +744,12 @@ export function buildSessionViz({ session = null, actions = [], snapshots = [], 
     truncated: Number.isFinite(limit) && limit > 0 && actions.length >= limit,
     swimlane: buildSwimlane(actions),
     episodes,
-    stateMachine: buildStateMachine({ actions, snapshots, diffs }),
+    stateMachine,
+    sequence: buildSequence(actions),
+    waste: buildWaste(actions, { stateMachine }),
+    costTree: buildCostBreakdown(actions),
+    failureHeatmap: buildFailureHeatmap(actions),
+    causality: buildCausality(episodes),
+    routeMachine: buildRouteMachine(clicks),
   };
 }

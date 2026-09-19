@@ -1035,6 +1035,28 @@ export function listActionsForViz(sessionId, { limit } = {}) {
   });
 }
 
+// Route/page FSM support: the only navigation signal this tool captures is dom.click's own
+// hrefBefore/href (see inject.js) - not worth a dedicated column, so this reads the small set of
+// successful click results and pulls just those two fields out, unlike listActionsForViz's promise
+// of never touching a result body. Bounded by how many clicks a session logs, not by its total rows.
+const stmtListClicks = db.prepare(`
+  SELECT id, started_at, agent_name, result_json, result_hash
+  FROM actions WHERE session_id = ? AND type = 'dom.click' AND ok = 1 ORDER BY id ASC
+`);
+export function listClickNavigations(sessionId) {
+  return stmtListClicks.all(Number(sessionId)).map((r) => {
+    let result = null;
+    try {
+      const json = resolveResultJson(r.result_json, r.result_hash);
+      result = json ? JSON.parse(json) : null;
+    } catch { /* a damaged result blob just means this click carries no navigation info */ }
+    return {
+      id: r.id, startedAt: r.started_at, agentName: r.agent_name,
+      hrefChanged: !!result?.hrefChanged, hrefBefore: result?.hrefBefore ?? null, href: result?.href ?? null,
+    };
+  });
+}
+
 const stmtSetActionIntent = db.prepare('UPDATE actions SET intent = ?, intent_source = ?, intent_call = ? WHERE id = ? AND session_id = ?');
 const INTENT_MAX_CHARS = 600;
 // Stores each item's `text` as the why for its action. Idempotent - re-importing the same

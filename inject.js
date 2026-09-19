@@ -37,7 +37,7 @@
   const loadId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   // Hash of this file, sent on connect so the relay can tell a tab still running
   // an older inject.js from the one on disk. Restamp with `node build-id.mjs --stamp`.
-  const AGENT_BUILD = '2f0ab85d0968';
+  const AGENT_BUILD = 'd6ee425de9fe';
   const RELAY_URL = agentName
     ? `ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(agentName)}&loadId=${loadId}&build=${AGENT_BUILD}`
     : `ws://127.0.0.1:${port}/agent?loadId=${loadId}&build=${AGENT_BUILD}`;
@@ -815,8 +815,11 @@
       }
       setTimeout(() => {
         observer.disconnect();
+        // hrefBefore/href (not just the boolean) let the relay's route/page FSM (session-viz.mjs
+        // buildRouteMachine) reconstruct which pages a session actually visited, not just that a
+        // nav happened. Only navigation signal this tool captures - no listener elsewhere.
         resolve({
-          clicked: true, mutated, hrefChanged: location.href !== hrefBefore,
+          clicked: true, mutated, hrefChanged: location.href !== hrefBefore, hrefBefore, href: location.href,
           ...(autoPickedFromAmbiguous ? { autoPickedFromAmbiguous, filteredHiddenCount, note: `selector was ambiguous but exactly one match was visible (offsetParent !== null) - auto-picked it, ${filteredHiddenCount} hidden match(es) skipped. Pass --nth explicitly if this wasn't the intended element.` } : {}),
         });
       }, 200);
