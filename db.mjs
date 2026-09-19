@@ -195,6 +195,15 @@ ensureColumn('actions', 'delivered_bytes', 'delivered_bytes INTEGER');
 // below) - same NULL-means-look-it-up-by-hash convention as result_hash
 // above.
 ensureColumn('actions', 'params_hash', 'params_hash TEXT');
+// Why the agent ran this action, in the agent's own words. Never written by the relay's command
+// path (a call carries no reasoning); filled after the fact from the agent's transcript (see
+// intent-import.mjs), so it costs the agent no tokens. intent_source says where the text came
+// from ('transcript' = the narration just before the call, 'transcript-thinking' = a reasoning
+// block when there was no narration); intent_call is the transcript tool-call id, shared by
+// every action a single call produced (a strict-CRV click logs four).
+ensureColumn('actions', 'intent', 'intent TEXT');
+ensureColumn('actions', 'intent_source', 'intent_source TEXT');
+ensureColumn('actions', 'intent_call', 'intent_call TEXT');
 // Content hash of a snapshot's own stores_json - lets a diff be recognized
 // as "identical content to a diff already computed" across DIFFERENT
 // snapshot ids (every idb.snapshot takes a fresh id even when nothing
@@ -968,6 +977,51 @@ export function listActionsSummary(sessionId, { limit } = {}) {
   });
 }
 
+// Everything the session visualizations (session-viz.mjs) need and nothing they do not: no
+// result body is read or parsed (only its hash, for "did this re-read change"), so building the
+// swimlane / episode tree / state machine for a long session never pays for the multi-KB dumps
+// listActionsSummary has to parse. Oldest-first, and `limit` keeps the NEWEST N rows.
+const stmtListActionsForViz = db.prepare(`
+  SELECT id, session_id, type, params_json, params_hash, result_hash, ok, error, started_at, ended_at, duration_ms, agent_name, intent, intent_source, intent_call
+  FROM actions WHERE session_id = ? ORDER BY id DESC LIMIT ?
+`);
+export function listActionsForViz(sessionId, { limit } = {}) {
+  const lim = Number.isFinite(limit) && limit > 0 ? Number(limit) : -1;
+  const rows = stmtListActionsForViz.all(Number(sessionId), lim).reverse();
+  return rows.map((r) => {
+    const { params_json: paramsJson, ...rest } = r;
+    let params = null;
+    try {
+      const json = resolveParamsJson(paramsJson, r.params_hash);
+      params = json ? JSON.parse(json) : null;
+    } catch { /* a damaged params blob just means no target label for this row */ }
+    return { ...rest, params };
+  });
+}
+
+const stmtSetActionIntent = db.prepare('UPDATE actions SET intent = ?, intent_source = ?, intent_call = ? WHERE id = ? AND session_id = ?');
+const INTENT_MAX_CHARS = 600;
+// Stores each item's `text` as the why for its action. Idempotent - re-importing the same
+// transcript rewrites the same rows - and scoped to the session, so a stray id from another
+// session's transcript match can never be labelled here. Returns how many rows were written.
+export function setActionIntents(sessionId, items) {
+  let written = 0;
+  db.exec('BEGIN');
+  try {
+    for (const item of items ?? []) {
+      const text = typeof item?.text === 'string' ? item.text.trim().slice(0, INTENT_MAX_CHARS) : '';
+      if (!text || !Number.isFinite(Number(item.actionId))) continue;
+      const info = stmtSetActionIntent.run(text, item.source ?? 'transcript', item.callId ?? null, Number(item.actionId), Number(sessionId));
+      written += Number(info.changes);
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  return written;
+}
+
 // ---------- action token-cost report ----------
 //
 // Every action's full result_json is already stored (logAction above) -
@@ -1321,7 +1375,9 @@ const stmtInsertSnapshot = db.prepare(`
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtGetSnapshot = db.prepare('SELECT * FROM state_snapshots WHERE id = ?');
-const stmtListSnapshots = db.prepare('SELECT id, session_id, action_id, taken_at, counts_json, byte_size, agent_name, golden_name FROM state_snapshots WHERE session_id = ? ORDER BY id DESC');
+// content_hash / served_from_snapshot_id / where_json ride along (cheap columns, no stores blob) so
+// the state-machine view can tell "same state again" from "new state" without opening a snapshot.
+const stmtListSnapshots = db.prepare('SELECT id, session_id, action_id, taken_at, counts_json, byte_size, agent_name, golden_name, content_hash, served_from_snapshot_id, where_json FROM state_snapshots WHERE session_id = ? ORDER BY id DESC');
 const stmtGetGoldenSnapshot = db.prepare('SELECT * FROM state_snapshots WHERE golden_name = ? ORDER BY id DESC LIMIT 1');
 // Cross-session by design, same as findCachedDiff below - the exact same
 // live-tab state re-snapshotted (a pre/post pair around a no-op action, a

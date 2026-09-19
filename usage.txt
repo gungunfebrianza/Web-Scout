@@ -87,6 +87,14 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    as its own 'session.assert' action. Replaces re-typing the
                                    same idb.dump-and-eyeball checks by hand every later phase.
                                    Exits 1 (not 0) if any check fails - scriptable/CI-safe.
+  session intents <id> [--transcript <file.jsonl>] [--format auto|claude|codex]
+                                   fills the dashboard's "Why" column from the agent's OWN transcript
+                                   (Claude Code ~/.claude/projects/*/*.jsonl, Codex ~/.codex/sessions/**/rollout-*.jsonl):
+                                   the narration just before each web-scout call becomes the why of every action that call
+                                   logged, matched by time. Costs the agent no tokens - it never types a reason; the host
+                                   already wrote it down. No --transcript = every transcript written since the session
+                                   started. Re-running is safe. Actions with no matching narration keep an inferred why,
+                                   shown in the dashboard as inferred, never as the agent's words.
   session end [id]                 end the given session, or the active one if omitted -
                                    prints a one-line token-cost receipt (calls, estTokens, top
                                    offender type; also a --token-budget warning if declared and
@@ -749,6 +757,8 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   `savings.estimator.status` says which it is: uncalibrated, partial, stale (older than 90 days)
   or calibrated; `calibrate-tokens.mjs --check` exits 1 unless it is calibrated, offline, and
   WEBSCOUT_REQUIRE_CALIBRATION=1 makes the test suite fail on the same condition.
+  This repository is still uncalibrated (run pending; needs an ANTHROPIC key - another provider's
+  tokenizer would measure the wrong model).
   A relay running older code than disk is restarted at "session start" (nothing is in flight
   then; open tabs reconnect by themselves) - never mid-session, where it only warns.
   WEBSCOUT_NO_AUTORESTART=1 turns that off.

@@ -60,6 +60,10 @@ export const CLI_SPEC = [
     params: { '--confirm': 'confirm', '--summary': 'summary', '--since-snapshot': 'sinceSnapshotId' },
   },
   { cmd: 'session assert', pos: [2, 2], val: ['--agent'], mcp: 'webscout_session.assert' },
+  {
+    cmd: 'session intents', pos: [1, 1], val: ['--transcript', '--format'], mcp: null,
+    mcpExempt: 'reads the calling agent\'s own transcript file off disk after the fact - an agent already knows why it acted, and an MCP tool that took a transcript path would only be a way to make it read one',
+  },
   { cmd: 'verity import', pos: [2, 2], val: ['--label'], mcp: 'webscout_session.verity_import', params: { '--label': 'label' } },
 
   {

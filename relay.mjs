@@ -46,6 +46,8 @@ import { createReadPipeline, readTargetKey, SCOPING_PARAM_KEYS, FOLLOW_UP_WINDOW
 import { sizeOf } from './read-shape.mjs';
 import { estimatorInfo, baselineBand } from './token-estimate.mjs';
 import { parseExpect, buildVerifyReport } from './crv-verify.mjs';
+import { buildSessionViz } from './session-viz.mjs';
+import { discoverTranscripts, readTranscriptFile, importIntents } from './intent-import.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
@@ -1438,6 +1440,50 @@ const routes = [
   },
   { method: 'GET', pattern: /^\/sessions\/(\d+)\/snapshots$/, handler: async (_req, m) => dbApi.listSnapshots(Number(m[1])) },
   { method: 'GET', pattern: /^\/sessions\/(\d+)\/diffs$/, handler: async (_req, m) => dbApi.listDiffs(Number(m[1])) },
+  {
+    // The dashboard's swimlane / episode tree / state machine, derived in one pass from rows that
+    // are already stored (see session-viz.mjs). Reads no result bodies, so a long session costs
+    // roughly what the Action log's own refresh does. ?limit=N keeps the newest N actions.
+    method: 'GET',
+    pattern: /^\/sessions\/(\d+)\/viz$/,
+    handler: async (req, m) => {
+      const id = Number(m[1]);
+      const session = dbApi.getSession(id);
+      const { searchParams } = new URL(req.url, `http://${HOST}`);
+      const limit = Math.min(Math.max(Number(searchParams.get('limit')) || 1500, 50), 20000);
+      return buildSessionViz({ session, actions: dbApi.listActionsForViz(id, { limit }), snapshots: dbApi.listSnapshots(id), diffs: dbApi.listDiffs(id), limit });
+    },
+  },
+  {
+    // Fills each action's "why" from the agent's own transcript (Claude Code or Codex JSONL),
+    // matched by time - see intent-import.mjs. No body = look for transcripts written since the
+    // session started. Costs the agent nothing: it never types a reason, the host already logged it.
+    method: 'POST',
+    pattern: /^\/sessions\/(\d+)\/intents\/import$/,
+    handler: async (req, m) => {
+      const id = Number(m[1]);
+      const session = dbApi.getSession(id);
+      const body = await readJsonBody(req);
+      const sources = [];
+      if (typeof body.transcriptText === 'string') {
+        sources.push({ label: '(inline)', text: body.transcriptText });
+      } else if (typeof body.transcriptPath === 'string' && body.transcriptPath) {
+        try { sources.push({ label: body.transcriptPath, text: readTranscriptFile(body.transcriptPath) }); } catch (err) { throw new HttpError(400, err.message); }
+      } else {
+        const sinceMs = (Date.parse(session.started_at) || 0) - 60_000;
+        for (const f of discoverTranscripts({ sinceMs, limit: 6 })) {
+          try { sources.push({ label: f.path, text: readTranscriptFile(f.path) }); } catch { /* unreadable or over the size cap - the next candidate may do */ }
+        }
+        if (!sources.length) throw new HttpError(404, 'no Claude Code or Codex transcript was written since this session started (looked in ~/.claude/projects and ~/.codex/sessions) - pass --transcript <file.jsonl>');
+      }
+      const format = body.format === 'claude' || body.format === 'codex' ? body.format : 'auto';
+      const actions = dbApi.listActionsForViz(id, { limit: 20000 });
+      const { items, transcripts, unmatchedActions } = importIntents({ actions, sources, format });
+      const written = dbApi.setActionIntents(id, items);
+      broadcastUpdate('action', id);
+      return { sessionId: id, written, matchedActions: items.length, unmatchedActions, transcripts };
+    },
+  },
   { method: 'GET', pattern: /^\/sessions\/(\d+)\/qa$/, handler: async (_req, m) => dbApi.listQA(Number(m[1])) },
   {
     method: 'GET',
