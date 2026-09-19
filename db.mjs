@@ -184,6 +184,20 @@ ensureColumn('sessions', 'lean', 'lean INTEGER');
 // caller otherwise makes by hand to see what a count alone did not explain. Off by default (NULL)
 // so an existing strict-crv session's reply shape never changes underneath it.
 ensureColumn('sessions', 'strict_crv_compact', 'strict_crv_compact INTEGER');
+// Best-effort context recorded at "session start" - never enforced as a lock (this tool's
+// own explicit non-goal is "no authorization boundary between agents sharing one relay"),
+// only surfaced in the "a session is already active" conflict error below so the next
+// caller can make an informed choice instead of guessing whether ending it is safe.
+ensureColumn('sessions', 'agent_name', 'agent_name TEXT');
+// The origin the session's own agent was connected from at "session start" - see
+// relay.mjs's dispatchTracked/guardDispatchOrigin, which refuses a later command dispatched
+// while that SAME agent name is connected from a DIFFERENT origin. NULL (no agent connected
+// yet when the session started, or a pre-this-round tab that sends no origin) never blocks.
+ensureColumn('sessions', 'pinned_origin', 'pinned_origin TEXT');
+// "session start --allow-remote" opt-out for guardDispatchOrigin's non-local mutation guard -
+// off (NULL/0) by default so a stray tab on a real/production site can never receive a
+// synthetic write by accident (the actual incident this guards against - see docs/web-scout-roadmap.md's V38 entry).
+ensureColumn('sessions', 'allow_remote', 'allow_remote INTEGER');
 // Content-addressed dedup for actions.result_json (see result_blobs table
 // below) - NULL means this row's result was byte-identical to an earlier
 // one already stored in result_blobs, so this row's own result_json is left
@@ -846,7 +860,7 @@ export function getSavingsTrend(days = 14) {
 
 // ---------- sessions ----------
 
-const stmtInsertSession = db.prepare('INSERT INTO sessions (goal, context, status, started_at, strict_crv, strict_crv_stores, tags, token_budget, lean, strict_crv_compact) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+const stmtInsertSession = db.prepare('INSERT INTO sessions (goal, context, status, started_at, strict_crv, strict_crv_stores, tags, token_budget, lean, strict_crv_compact, agent_name, pinned_origin, allow_remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
 const stmtGetCurrentSession = db.prepare("SELECT * FROM sessions WHERE status = 'active' LIMIT 1");
 const stmtGetSession = db.prepare('SELECT * FROM sessions WHERE id = ?');
 const stmtEndSession = db.prepare("UPDATE sessions SET status = 'ended', ended_at = ? WHERE id = ? AND status = 'active'");
@@ -861,6 +875,7 @@ function hydrateSession(row) {
     lean: !!row.lean,
     strict_crv_stores: row.strict_crv_stores ? JSON.parse(row.strict_crv_stores) : null,
     tags: row.tags ? JSON.parse(row.tags) : [],
+    allow_remote: !!row.allow_remote,
   };
 }
 
@@ -868,18 +883,63 @@ export function getCurrentSession() {
   return hydrateSession(stmtGetCurrentSession.get() ?? null);
 }
 
-export function startSession({ goal, context, strictCrv, strictCrvStores, tags, tokenBudget, lean, strictCrvCompact }) {
+// Minutes/hours-ago phrasing for the conflict error below - short enough not
+// to need a real duration-formatting dependency (this tool's zero-npm-deps
+// convention), precise enough to tell "started 40 seconds ago, probably still
+// in flight" from "started 6 hours ago, probably abandoned".
+function agoPhrase(iso) {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return 'unknown time ago';
+  const mins = Math.round(ms / 60000);
+  if (mins < 1) return 'under a minute ago';
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
+}
+
+// Fractional minutes since an ISO timestamp, or null when it cannot be trusted (unparseable, or
+// in the future from clock skew) - callers treat null as "not provably old", never as "old".
+function minutesSince(iso) {
+  const ms = Date.now() - new Date(iso).getTime();
+  return Number.isFinite(ms) && ms >= 0 ? ms / 60000 : null;
+}
+
+// `ifStaleMin` (opt-in, see "session start --if-stale-min"): a conflicting active session at least
+// that many minutes old is ended first, and the reply carries `autoEndedSession` naming what was
+// ended. Younger than that - or of unknown age - still refuses exactly as without the flag: a session
+// that started recently is probably still in flight, so this fails closed instead of guessing it was
+// abandoned. Omitted = the pre-existing behavior, byte for byte.
+export function startSession({ goal, context, strictCrv, strictCrvStores, tags, tokenBudget, lean, strictCrvCompact, pinnedOrigin, agentName, allowRemote, ifStaleMin }) {
   if (!goal || typeof goal !== 'string' || !goal.trim()) {
     throw new Error('a non-empty goal is required to start a session');
   }
-  const existing = getCurrentSession();
+  if (ifStaleMin !== undefined && ifStaleMin !== null && !(Number.isFinite(ifStaleMin) && ifStaleMin >= 0)) {
+    throw new Error('ifStaleMin must be a number of minutes >= 0');
+  }
+  let autoEndedSession;
+  let existing = getCurrentSession();
+  if (existing && ifStaleMin !== undefined && ifStaleMin !== null) {
+    const ageMin = minutesSince(existing.started_at);
+    if (ageMin !== null && ageMin >= ifStaleMin) {
+      endSession(existing.id);
+      autoEndedSession = { id: existing.id, goal: existing.goal, agent: existing.agent_name ?? null, startedAt: existing.started_at, ageMin: Math.round(ageMin * 10) / 10, reason: `auto-ended by "session start --if-stale-min ${ifStaleMin}": it was ${Math.round(ageMin * 10) / 10}m old, at or past the threshold` };
+      existing = null;
+    }
+  }
   if (existing) {
-    throw new Error(`a session is already active (id ${existing.id}: "${existing.goal}") - end it first with "session end", or keep using it`);
+    // Purely informational (this tool's own non-goal: no authorization
+    // boundary between agents sharing one relay) - agent/age are surfaced so
+    // the next caller can decide whether ending it is safe, instead of
+    // guessing from a bare id+goal (confirmed real friction this round: an
+    // agent ended someone else's session with no way to tell whose it was).
+    const who = existing.agent_name ? `, agent '${existing.agent_name}'` : '';
+    const staleNote = ifStaleMin !== undefined && ifStaleMin !== null ? ` (younger than --if-stale-min ${ifStaleMin}, so treated as still in flight and left alone)` : '';
+    throw new Error(`a session is already active (id ${existing.id}: "${existing.goal}"${who}, started ${agoPhrase(existing.started_at)})${staleNote} - end it first with "session end", or keep using it`);
   }
   const startedAt = new Date().toISOString();
   const storesJson = Array.isArray(strictCrvStores) && strictCrvStores.length ? JSON.stringify(strictCrvStores) : null;
-  const info = stmtInsertSession.run(goal, context ?? null, 'active', startedAt, strictCrv ? 1 : 0, storesJson, JSON.stringify(tags ?? []), Number.isFinite(tokenBudget) ? Number(tokenBudget) : null, lean ? 1 : 0, strictCrvCompact ? 1 : 0);
-  return hydrateSession(stmtGetSession.get(Number(info.lastInsertRowid)));
+  const info = stmtInsertSession.run(goal, context ?? null, 'active', startedAt, strictCrv ? 1 : 0, storesJson, JSON.stringify(tags ?? []), Number.isFinite(tokenBudget) ? Number(tokenBudget) : null, lean ? 1 : 0, strictCrvCompact ? 1 : 0, agentName ?? null, pinnedOrigin ?? null, allowRemote ? 1 : 0);
+  const started = hydrateSession(stmtGetSession.get(Number(info.lastInsertRowid)));
+  return autoEndedSession ? { ...started, autoEndedSession } : started;
 }
 
 export function endSession(id) {

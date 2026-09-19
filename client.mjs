@@ -18,9 +18,27 @@
 // outlive many independent calls, so no such global is safe there).
 
 import fs from 'node:fs';
+import path from 'node:path';
 import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { startRelay, restartRelay, recordRelayEvent } from './relay-control.mjs';
+
+// "crv seed"/"crv cleanup" convenience (both cli.mjs and mcp-server.mjs use
+// these): a manifest of {store, ids} entries tracking synthetic rows written
+// across separate calls - a real CRV pass is many separate invocations, not
+// one long-lived process, so ids can't just live in a variable. Default path
+// is a dotfile next to the CWD, same "no npm dependency, no extra service"
+// choice as the rest of this tool - an explicit path overrides it when more
+// than one CRV pass needs to run concurrently without colliding.
+export function manifestPath(explicit) {
+  return explicit || path.join(process.cwd(), '.webscout-crv-manifest.json');
+}
+export function readManifest(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return { entries: [] }; }
+}
+export function writeManifest(file, manifest) {
+  fs.writeFileSync(file, JSON.stringify(manifest, null, 2));
+}
 
 export const HOST = process.env.WEBSCOUT_HOST || '127.0.0.1';
 export const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
@@ -116,6 +134,12 @@ export async function ensureFreshRelayForNewSession() {
   if (!stale.length) return { checked: true, restarted: false };
   if (health.active_session) return { checked: true, restarted: false, stale, reason: 'a session is active - restarting now would drop its read cache' };
   const tabs = health.agents_connected ?? [];
+  // Real incident this round: an unrelated read (no session active yet)
+  // auto-restarted the relay while a SECOND agent's tab was connected,
+  // dropping its WebSocket mid-CRV-run with no warning. The existing
+  // active_session guard above doesn't cover this - restarting is only
+  // harmless when at most the caller's own single tab would be affected.
+  if (tabs.length > 1) return { checked: true, restarted: false, stale, reason: `other tab(s) are connected (${tabs.join(', ')}) - restarting now would drop their connection too; pass WEBSCOUT_NO_AUTORESTART=1 or run "relay restart" once nothing else is using it` };
   const result = await restartRelay({ port: PORT, host: HOST, env: { WEBSCOUT_AUTO_CALIBRATE: '1' } });
   if (!result.restarted) {
     emitNote(`WARNING: the relay is running code older than what is on disk (${stale.join(', ')}) and restarting it failed (${result.start?.reason ?? result.stop?.reason ?? 'unknown'}). Run: node tools/web-scout/cli.mjs relay restart`, 'relay-autorestart');

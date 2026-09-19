@@ -1,0 +1,8 @@
+[
+  {
+    "id": "example-store-missing-default",
+    "signature": "Cannot read properties of undefined (reading 'exampleSetting')",
+    "description": "ILLUSTRATIVE PLACEHOLDER, not a real bug: a made-up 'settings' store has no default row on a fresh install, so the page's init code reads a field of undefined. signature is a case-sensitive substring; write /pattern/flags for a regex instead.",
+    "remediation": "Seed the missing default row before loading the page (for example with 'crv seed'), then reload. Replace this whole entry with your own."
+  }
+]

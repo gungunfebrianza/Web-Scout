@@ -37,10 +37,17 @@
   const loadId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   // Hash of this file, sent on connect so the relay can tell a tab still running
   // an older inject.js from the one on disk. Restamp with `node build-id.mjs --stamp`.
-  const AGENT_BUILD = 'd6ee425de9fe';
+  const AGENT_BUILD = '7171d355525f';
+  // Sent once per connect (same lifecycle as loadId - a real navigation only, never
+  // an in-page reconnect) so the relay can pin a session to the origin it was started
+  // against and warn/refuse when a later command targets a DIFFERENT origin under the
+  // SAME agent name - confirmed real: an agent name silently served two different
+  // IndexedDB origins (127.0.0.1 vs localhost) across a session with nothing detecting
+  // the mismatch until many calls in. See relay.mjs's dispatchTracked.
+  const originParam = `&origin=${encodeURIComponent(location.origin)}`;
   const RELAY_URL = agentName
-    ? `ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(agentName)}&loadId=${loadId}&build=${AGENT_BUILD}`
-    : `ws://127.0.0.1:${port}/agent?loadId=${loadId}&build=${AGENT_BUILD}`;
+    ? `ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(agentName)}&loadId=${loadId}&build=${AGENT_BUILD}${originParam}`
+    : `ws://127.0.0.1:${port}/agent?loadId=${loadId}&build=${AGENT_BUILD}${originParam}`;
   const DB_NAME = 'AgentCapitalOS';
 
   console.warn('[web-scout] ACTIVE - full DOM/IndexedDB/network access is exposed to a local relay. Never leave this on for a real session.');

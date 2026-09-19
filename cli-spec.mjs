@@ -42,9 +42,9 @@ export const CLI_SPEC = [
   { cmd: 'relay status', pos: [0, 0], mcp: null, mcpExempt: NOMCP_PROCESS },
 
   {
-    cmd: 'session start', pos: [1, 2], bool: ['--strict-crv', '--auto-snapshot', '--no-briefing', '--lean', '--crv-compact'], val: ['--tags', '--stores', '--token-budget', '--agent'],
+    cmd: 'session start', pos: [1, 2], bool: ['--strict-crv', '--auto-snapshot', '--no-briefing', '--lean', '--crv-compact', '--allow-remote'], val: ['--tags', '--stores', '--token-budget', '--if-stale-min', '--agent'],
     mcp: 'webscout_session.start',
-    params: { '--strict-crv': 'strictCrv', '--stores': 'strictCrvStores', '--tags': 'tags', '--token-budget': 'tokenBudget', '--no-briefing': 'noBriefing', '--lean': 'lean', '--crv-compact': 'crvCompact' },
+    params: { '--strict-crv': 'strictCrv', '--stores': 'strictCrvStores', '--tags': 'tags', '--token-budget': 'tokenBudget', '--if-stale-min': 'ifStaleMin', '--no-briefing': 'noBriefing', '--lean': 'lean', '--crv-compact': 'crvCompact', '--allow-remote': 'allowRemote' },
     cliOnly: { '--auto-snapshot': 'convenience wrapper - an MCP caller takes an explicit webscout_idb snapshot action' },
   },
   { cmd: 'session end', pos: [0, 1], bool: ['--trace'], mcp: 'webscout_session.end', params: { '--trace': 'trace' } },
@@ -56,7 +56,7 @@ export const CLI_SPEC = [
     params: { '--format': 'format', '--out': 'out', '--verity': 'verityPath' },
   },
   {
-    cmd: 'session cleanup', pos: [1, 1], bool: ['--confirm', '--summary'], val: ['--since-snapshot'], mcp: 'webscout_session.cleanup',
+    cmd: 'session cleanup', pos: [1, 1], bool: ['--confirm', '--summary'], val: ['--since-snapshot', '--agent'], mcp: 'webscout_session.cleanup',
     params: { '--confirm': 'confirm', '--summary': 'summary', '--since-snapshot': 'sinceSnapshotId' },
   },
   {
@@ -108,6 +108,22 @@ export const CLI_SPEC = [
     cmd: 'crv run', pos: [0, 0], bool: ['--allow-extra', '--verbose'], val: ['--stores', '--type', '--params', '--expect', '--expect-file', '--samples', '--agent'], mcp: 'webscout_idb.crv_run',
     params: { '--stores': 'stores', '--type': 'type', '--params': 'params', '--expect': 'expect', '--allow-extra': 'allowExtra', '--samples': 'samples', '--verbose': 'verbose' },
     cliOnly: { '--expect-file': 'shell-quoting workaround - an MCP caller passes expect inline as a string or JSON' },
+  },
+  {
+    // Read-only diagnostic. The optional trailing positional is the
+    // selector - CLI convention (domSelector, same as every dom.* command);
+    // MCP takes it as the named param `selector` instead (no flag/param
+    // mapping needed for a bare positional).
+    cmd: 'crv preflight', pos: [0, 1], val: ['--stores', '--agent'], mcp: 'webscout_idb.crv_preflight',
+    params: { '--stores': 'stores' },
+  },
+  {
+    cmd: 'crv seed', pos: [2, 2], val: ['--manifest', '--agent'], mcp: 'webscout_idb.crv_seed',
+    params: { '--manifest': 'manifest' },
+  },
+  {
+    cmd: 'crv cleanup', pos: [0, 0], val: ['--manifest', '--agent'], mcp: 'webscout_idb.crv_cleanup',
+    params: { '--manifest': 'manifest' },
   },
   { cmd: 'idb diff', pos: [2, 2], mcp: 'webscout_idb.diff' },
   { cmd: 'idb diff-golden', pos: [2, 2], mcp: 'webscout_idb.diff_golden' },

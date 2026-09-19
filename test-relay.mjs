@@ -161,9 +161,9 @@ export function spawnAsync(args, { env = {}, cwd, timeoutMs = 15000 } = {}) {
 // counter with `epoch: 0`: replies then carry `epoch: state.epoch`, `page.epoch`
 // answers it, and a test bumps `state.epoch` to simulate the page changing on
 // its own. `state.avoided = n` stamps n avoided bytes on the next reply only (`state.outlineOld` likewise stamps the size of the reply an outline replaced).
-export async function connectFakeAgent(port, handlers = {}, { name = 'default', epoch, build = currentInjectBuild() } = {}) {
+export async function connectFakeAgent(port, handlers = {}, { name = 'default', epoch, build = currentInjectBuild(), origin } = {}) {
   const state = { epoch, avoided: undefined, outlineOld: undefined };
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(name)}&loadId=fake-agent${build ? `&build=${build}` : ''}`);
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(name)}&loadId=fake-agent${build ? `&build=${build}` : ''}${origin ? `&origin=${encodeURIComponent(origin)}` : ''}`);
   const seen = [];
   ws.onmessage = async (ev) => {
     const msg = JSON.parse(ev.data);
