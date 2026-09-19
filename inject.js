@@ -37,7 +37,7 @@
   const loadId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   // Hash of this file, sent on connect so the relay can tell a tab still running
   // an older inject.js from the one on disk. Restamp with `node build-id.mjs --stamp`.
-  const AGENT_BUILD = 'ba18ce05a813';
+  const AGENT_BUILD = '2f0ab85d0968';
   const RELAY_URL = agentName
     ? `ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(agentName)}&loadId=${loadId}&build=${AGENT_BUILD}`
     : `ws://127.0.0.1:${port}/agent?loadId=${loadId}&build=${AGENT_BUILD}`;
@@ -373,6 +373,11 @@
   const noteAvoided = (ctx, unscopedBytes, deliveredBytes) => {
     if (ctx && unscopedBytes > deliveredBytes) ctx.avoidedBytes = (ctx.avoidedBytes || 0) + (unscopedBytes - deliveredBytes);
   };
+  // Keeps only the named top-level keys of a plain object (a missing key is left out, not null).
+  const projectKeys = (obj, fields) => Object.fromEntries(fields.filter((f) => obj && Object.prototype.hasOwnProperty.call(obj, f)).map((f) => [f, obj[f]]));
+  const isFieldList = (v) => Array.isArray(v) && v.length > 0;
+  // "a.b.0" walked through nested objects/arrays; undefined when any step is missing.
+  const valueAtPath = (root, dotted) => dotted.split('.').reduce((cur, k) => (cur === null || cur === undefined ? undefined : cur[k]), root);
 
   function previewOf(el, i) {
     const cls = el.className ? `.${String(el.className).trim().split(/\s+/).join('.')}` : '';
@@ -691,7 +696,7 @@
     // that never reads the markup at all. A stronger lever than the
     // htmlCap/textCap default below: those still PAY for (capped) content
     // by default, this opts OUT of paying for it at all.
-    'dom.query': ({ selector, full, meta }, ctx) => {
+    'dom.query': ({ selector, full, meta, pick }, ctx) => {
       const all = document.querySelectorAll(selector);
       if (all.length === 0) return { found: false };
       let el = all[0];
@@ -701,6 +706,25 @@
       }
       // the default-shaped reply is what an unscoped call would have cost
       const defaultBytes = () => Math.min(el.outerHTML.length, 2000) + Math.min((el.textContent ?? '').length, 1000);
+      // pick: only the named parts of the element - tag, id, class, text, html, value, attr:<name> -
+      // so "what does this link point at" costs the href, not the markup around it.
+      if (isFieldList(pick)) {
+        const picked = { found: true, matchCount: all.length };
+        const htmlCap = full ? 20000 : 2000;
+        const textCap = full ? 5000 : 1000;
+        for (const item of pick.map(String)) {
+          if (item === 'tag') picked.tag = el.tagName;
+          else if (item === 'id') picked.id = el.id || null;
+          else if (item === 'class') picked.className = el.className || null;
+          else if (item === 'value') picked.value = 'value' in el ? el.value : null;
+          else if (item === 'html') { const h = el.outerHTML; picked.outerHTML = h.slice(0, htmlCap); if (h.length > htmlCap) picked.outerHTMLTruncated = true; }
+          else if (item === 'text') { const t = el.textContent ?? ''; picked.text = t.slice(0, textCap) || null; if (t.length > textCap) picked.textTruncated = true; }
+          else if (item.startsWith('attr:') && item.length > 5) { picked.attrs = picked.attrs || {}; picked.attrs[item.slice(5)] = el.getAttribute(item.slice(5)); }
+          else throw new Error(`dom.query pick: unknown item '${item}' - use tag, id, class, text, html, value or attr:<name>`);
+        }
+        noteAvoided(ctx, defaultBytes(), JSON.stringify(picked).length);
+        return picked;
+      }
       if (meta) {
         const metaReply = {
           found: true,
@@ -970,9 +994,14 @@
     // only after idb.snapshot times out (SNAPSHOT_TIMEOUT_MS, 60s) against
     // it. `stores` (array of names) kept exactly as before for existing
     // callers; `counts` is additive.
-    'idb.list': async () => {
+    // `stores` (names) narrows the answer to those stores (`missing` names any that do not
+    // exist) and only counts them; `nonEmpty` leaves out empty stores (`emptyStores` says how many).
+    'idb.list': async ({ stores, nonEmpty } = {}, ctx) => {
       const db = await openDb();
-      const names = [...db.objectStoreNames];
+      const allNames = [...db.objectStoreNames];
+      const wanted = isFieldList(stores) ? stores.map(String) : null;
+      const names = wanted ? allNames.filter((n) => wanted.includes(n)) : allNames;
+      const missing = wanted ? wanted.filter((n) => !allNames.includes(n)) : [];
       const tx = db.transaction(names, 'readonly');
       const counts = Object.fromEntries(await Promise.all(names.map((name) => new Promise((resolve, reject) => {
         const req = tx.objectStore(name).count();
@@ -980,7 +1009,15 @@
         req.onerror = () => reject(req.error);
       }))));
       db.close();
-      return { stores: names, counts };
+      const shown = nonEmpty ? names.filter((n) => counts[n] > 0) : names;
+      const reply = {
+        stores: shown,
+        counts: Object.fromEntries(shown.map((n) => [n, counts[n]])),
+        ...(nonEmpty ? { emptyStores: names.length - shown.length } : {}),
+        ...(missing.length ? { missing } : {}),
+      };
+      if (wanted || nonEmpty) noteAvoided(ctx, allNames.reduce((sum, n) => sum + n.length + 12, 0) + 30, JSON.stringify(reply).length);
+      return reply;
     },
     // `where`/`fields`/`limit` filter and project IN-PAGE, before the
     // result ever reaches the WebSocket - confirmed real waste: the CLI's
@@ -995,7 +1032,7 @@
     // `limit` caps rows AFTER filtering (matchedCount still reports the
     // real total so a truncated result is never silently mistaken for a
     // complete one).
-    'idb.dump': async ({ store, where, fields, limit } = {}, ctx) => {
+    'idb.dump': async ({ store, where, fields, limit, countOnly } = {}, ctx) => {
       const db = await openDb();
       if (!db.objectStoreNames.contains(store)) {
         db.close();
@@ -1015,9 +1052,11 @@
       if (Array.isArray(fields) && fields.length) {
         rows = rows.map((r) => Object.fromEntries(fields.filter((f) => r && Object.prototype.hasOwnProperty.call(r, f)).map((f) => [f, r[f]])));
       }
-      if (where || fields || lim !== undefined) noteAvoided(ctx, estimateBytes(allRows), JSON.stringify(rows).length);
+      if (countOnly) rows = []; // counts only: "did N rows land" without paying for the rows
+      if (where || fields || lim !== undefined || countOnly) noteAvoided(ctx, estimateBytes(allRows), JSON.stringify(rows).length);
       return {
         store, keyPath, totalCount: allRows.length, matchedCount, count: rows.length, rows,
+        ...(countOnly ? { countOnly: true } : {}),
         ...(where ? { where } : {}),
         ...(fields ? { fields } : {}),
         ...(truncated ? { truncated: true, note: `${matchedCount - lim} more row(s) matched but were cut by --limit ${lim}` } : {}),
@@ -1029,12 +1068,22 @@
     // either a slow full dump or a hand-rolled `eval` reaching for
     // db.getRecord directly. Uses store.get(key), the real indexed lookup,
     // not a filter over getAll().
-    'idb.get': ({ store, key }) => new Promise((resolve, reject) => {
+    'idb.get': ({ store, key, fields }, ctx) => new Promise((resolve, reject) => {
       openDb().then((db) => {
         if (!db.objectStoreNames.contains(store)) { db.close(); reject(new Error(`no such store: ${store}`)); return; }
         const tx = db.transaction(store, 'readonly');
         const req = tx.objectStore(store).get(key);
-        req.onsuccess = () => { db.close(); resolve({ store, key, found: req.result !== undefined, row: req.result ?? null }); };
+        req.onsuccess = () => {
+          db.close();
+          const row = req.result ?? null;
+          if (row && isFieldList(fields) && typeof row === 'object') {
+            const projected = projectKeys(row, fields.map(String));
+            noteAvoided(ctx, JSON.stringify(row).length, JSON.stringify(projected).length);
+            resolve({ store, key, found: true, row: projected, fields });
+            return;
+          }
+          resolve({ store, key, found: req.result !== undefined, row });
+        };
         req.onerror = () => { db.close(); reject(req.error); };
       }, reject);
     }),
@@ -1278,7 +1327,7 @@
     // always a plain host element (a div/button/...), not the component
     // fiber itself - React never attaches a function/class fiber directly to
     // a DOM node.
-    'react.inspect': ({ selector, nth }) => {
+    'react.inspect': ({ selector, nth, pick }, ctx) => {
       const { el } = resolveTarget(selector, nth);
       const hostFiber = getReactFiber(el);
       if (!hostFiber) {
@@ -1289,7 +1338,7 @@
         throw new Error(`'${selector}' resolved to a React-managed DOM node, but no function/class component fiber was found walking up its ancestor chain (only host fibers) - this can happen at the very root of the tree`);
       }
       const isClass = isClassFiber(fiber);
-      return {
+      const reply = {
         componentName: componentDisplayName(fiber),
         isClassComponent: isClass,
         key: fiber.key,
@@ -1301,6 +1350,19 @@
             note: 'function component: hooks are positional (call order), not named - index 0 is the first useState/useReducer/useRef/... call in this component',
           }),
       };
+      // pick: "props", "state", "hooks" whole, or a dotted path into them ("props.user.id",
+      // "hooks.0") - the answer to one question, not the whole component.
+      if (isFieldList(pick)) {
+        const picked = { componentName: reply.componentName };
+        for (const item of pick.map(String)) {
+          if (item === 'props' || item === 'state' || item === 'hooks') { if (item in reply) picked[item] = reply[item]; }
+          else if (item === 'key') picked.key = reply.key;
+          else { picked.picked = picked.picked || {}; picked.picked[item] = valueAtPath(reply, item); }
+        }
+        noteAvoided(ctx, JSON.stringify(reply).length, JSON.stringify(picked).length);
+        return picked;
+      }
+      return reply;
     },
     // Ancestor CHAIN of enclosing component names (not full inspect detail
     // per level - use react.inspect on a more specific selector for that) -
@@ -1429,13 +1491,18 @@
     // N most recent of those. Filtered here, in the page, so a 500-entry ring
     // buffer never crosses the wire when the caller wanted three entries.
     // With neither param the reply is unchanged (count === entries.length).
-    'net.log': ({ limit, urlContains } = {}, ctx) => {
+    // failed keeps only errored requests and 4xx/5xx responses; fields projects each entry to those keys.
+    'net.log': ({ limit, urlContains, fields, failed } = {}, ctx) => {
       let entries = netLog.slice();
-      const filtered = typeof urlContains === 'string' && urlContains !== '';
-      if (filtered) entries = entries.filter((e) => String(e.url ?? '').includes(urlContains));
+      const byUrl = typeof urlContains === 'string' && urlContains !== '';
+      const filtered = byUrl || failed === true;
+      if (byUrl) entries = entries.filter((e) => String(e.url ?? '').includes(urlContains));
+      if (failed === true) entries = entries.filter((e) => e.error || e.status >= 400);
       const capped = Number.isFinite(limit) && limit >= 0 && entries.length > limit;
       if (capped) entries = limit === 0 ? [] : entries.slice(-limit);
-      if (filtered || capped) noteAvoided(ctx, JSON.stringify(netLog).length, JSON.stringify(entries).length);
+      const projected = isFieldList(fields);
+      if (projected) entries = entries.map((e) => projectKeys(e, fields.map(String)));
+      if (filtered || capped || projected) noteAvoided(ctx, JSON.stringify(netLog).length, JSON.stringify(entries).length);
       return filtered || capped ? { count: entries.length, total: netLog.length, entries } : { count: entries.length, entries };
     },
     'net.clear': () => {
@@ -1455,11 +1522,21 @@
       else if (typeof filter === 'string' && filter.trim()) captureBodyFilters.add(filter.trim());
       return { active: captureBodyFilters.size > 0, filters: [...captureBodyFilters], limit: NET_BODY_CAPTURE_LIMIT };
     },
-    'console.log': ({ limit } = {}, ctx) => {
-      const capped = Number.isFinite(limit) && limit >= 0 && consoleLog.length > limit;
-      const entries = capped ? (limit === 0 ? [] : consoleLog.slice(-limit)) : consoleLog.slice();
-      if (capped) noteAvoided(ctx, JSON.stringify(consoleLog).length, JSON.stringify(entries).length);
-      return capped ? { count: entries.length, total: consoleLog.length, entries } : { count: entries.length, entries };
+    // level (error|warn|uncaught|unhandledrejection) and contains filter by entry; fields projects
+    // each entry (dropping "stack" is the usual saving); limit then keeps the N most recent.
+    'console.log': ({ limit, level, contains, fields } = {}, ctx) => {
+      let entries = consoleLog.slice();
+      const levels = Array.isArray(level) ? level.map(String) : (typeof level === 'string' && level ? level.split(',').map((l) => l.trim()) : null);
+      const byText = typeof contains === 'string' && contains !== '';
+      const filtered = !!levels || byText;
+      if (levels) entries = entries.filter((e) => levels.includes(e.level));
+      if (byText) entries = entries.filter((e) => String(e.message ?? '').includes(contains));
+      const capped = Number.isFinite(limit) && limit >= 0 && entries.length > limit;
+      if (capped) entries = limit === 0 ? [] : entries.slice(-limit);
+      const projected = isFieldList(fields);
+      if (projected) entries = entries.map((e) => projectKeys(e, fields.map(String)));
+      if (filtered || capped || projected) noteAvoided(ctx, JSON.stringify(consoleLog).length, JSON.stringify(entries).length);
+      return filtered || capped ? { count: entries.length, total: consoleLog.length, entries } : { count: entries.length, entries };
     },
     'console.clear': () => {
       const cleared = consoleLog.length;

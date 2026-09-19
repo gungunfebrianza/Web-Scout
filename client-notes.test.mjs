@@ -94,3 +94,11 @@ test('an MCP tool call returns the notes as extra text content after the result'
   assert.ok(texts.some((t) => t === '[web-scout] mcp nudge'));
   assert.ok(texts.some((t) => /session running total: ~9000 estimated tokens so far \(\+66 this call\)/.test(t)));
 });
+
+test('a total the relay marked quiet is not printed; a marked-notable one still is', async () => {
+  headers = { 'x-webscout-session-tokens': '9000', 'x-webscout-call-tokens': '40', 'x-webscout-tokens-quiet': '1' };
+  assert.deepEqual((await collectNotes(() => request('GET', '/x'))).notes, []);
+  headers = { 'x-webscout-session-tokens': '9000', 'x-webscout-call-tokens': '1500' };
+  const { notes } = await collectNotes(() => request('GET', '/x'));
+  assert.match(notes[0], /~9000 estimated tokens so far \(\+1500 this call\)/);
+});

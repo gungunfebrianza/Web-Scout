@@ -44,8 +44,10 @@ test('the event log records, filters by age, and summarizes', () => {
     recordRelayEvent(1, { kind: 'unclean-exit', pid: 2 });
     fs.appendFileSync(eventsPath(1), `${JSON.stringify({ at: '2000-01-01T00:00:00.000Z', kind: 'unclean-exit' })}${String.fromCharCode(10)}not json${String.fromCharCode(10)}`);
     const recent = readRelayEvents(1);
-    assert.deepEqual(summarizeRelayEvents(recent), { autostarts: 1, uncleanExits: 1, recent: recent });
-    assert.equal(readRelayEvents(1, 100 * 365 * 24 * 3600 * 1000).length, 3, 'a wider window includes the old event and skips the torn line');
+    assert.deepEqual(summarizeRelayEvents(recent), { autostarts: 1, autoRestarts: 0, uncleanExits: 1, recent: recent });
+    recordRelayEvent(1, { kind: 'auto-restart', files: ['report.mjs'] });
+    assert.equal(summarizeRelayEvents(readRelayEvents(1)).autoRestarts, 1, 'a session-start restart is counted on its own');
+    assert.equal(readRelayEvents(1, 100 * 365 * 24 * 3600 * 1000).length, 4, 'a wider window includes the old event and skips the torn line');
   } finally {
     process.env.WEBSCOUT_PID_PATH = saved;
   }

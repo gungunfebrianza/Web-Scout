@@ -193,3 +193,61 @@ test('the token report shows shaping as a delivery ledger and labels its estimat
   const today = sv.trend.find((t) => t.day === new Date().toISOString().slice(0, 10));
   assert.ok(today.shapedBytes > 0, 'the trend has a shaped-bytes column');
 });
+
+test('one delivered-bytes number: the per-type report, the running total and the receipt all follow what the caller was handed', { skip: skipLive }, async () => {
+  data.orders = makeRows(200, 60);
+  tab.state.epoch += 1;
+  const s = await api('POST', '/sessions', { goal: 'read-shaping.test.mjs delivered', context: 'automated', briefing: false });
+  const peeked = await read('idb.dump', { store: 'big' }, { peek: true });
+  assert.equal(peeked.json.result.peek, true);
+  const perType = await api('GET', `/sessions/${s.id}/token-report`);
+  const row = perType.byType.find((r) => r.type === 'idb.dump');
+  assert.ok(row.resultBytes > 10000, 'the full result is still what was logged');
+  assert.ok(row.deliveredBytes < 2500, `but the caller got the peek: ${row.deliveredBytes}`);
+  assert.equal(row.withheldBytes, row.resultBytes - row.deliveredBytes);
+  assert.equal(row.estTokens, Math.round((row.deliveredBytes + row.paramsBytes) / 4), 'tokens follow delivered bytes, not the logged result');
+  assert.equal(perType.totalEstTokens, row.estTokens, 'the running total agrees with the report');
+  assert.equal(Number(peeked.headers.get('x-webscout-session-tokens')), row.estTokens);
+  const ended = await api('POST', `/sessions/${s.id}/end`);
+  assert.equal(ended.savingsReceipt.deliveredEstTokens, row.estTokens);
+});
+
+test('a lean session shapes plain reads by default, --no-guard gets the body, and adoption is counted', { skip: skipLive }, async () => {
+  data.orders = makeRows(200, 60);
+  tab.state.epoch += 1;
+  const before = (await report()).readStrategy.adoption;
+  const s = await api('POST', '/sessions', { goal: 'read-shaping.test.mjs lean', context: 'automated', briefing: false, lean: true });
+  assert.equal(s.lean, true);
+  assert.match(s.leanProfile.note, /lean session/);
+
+  const big = (await read('idb.dump', { store: 'lean-a' })).json.result; // no flags at all
+  assert.equal(big.peek, true, 'a large body came back as its shape without the caller asking');
+  assert.equal(big.guarded, true);
+  const body = (await read('idb.dump', { store: 'lean-a' }, { noGuard: true })).json.result;
+  assert.equal(body.rows.length ?? body.rows.rows.length, 200, 'noGuard gives the whole result');
+
+  data.orders = makeRows(20, 5);
+  tab.state.epoch += 1;
+  const small = (await read('idb.dump', { store: 'lean-b' })).json.result;
+  assert.equal(small.__table, true, 'a small body still comes back as a table');
+  const repeat = (await read('idb.dump', { store: 'lean-b' })).json.result;
+  assert.equal(repeat.unchanged, true, 'a repeat of what they hold is one line');
+
+  const after = (await report()).readStrategy.adoption;
+  assert.ok(after.lean.calls - before.lean.calls >= 3);
+  assert.ok(after.plain.calls - before.plain.calls >= 1, 'a noGuard call opts OUT of shaping, so it counts as an unshaped read');
+  await api('POST', `/sessions/${s.id}/end`);
+
+  const plain = await api('POST', '/sessions', { goal: 'read-shaping.test.mjs not lean', context: 'automated', briefing: false });
+  assert.equal(plain.lean, false);
+  assert.equal(plain.leanProfile, undefined);
+  const untouched = (await read('idb.dump', { store: 'lean-c' })).json.result;
+  assert.equal(untouched.rows.length, 20, 'without --lean nothing changes');
+  await api('POST', `/sessions/${plain.id}/end`);
+});
+
+test('the token report costs the hints: bytes sent against bytes the adopting calls saved', { skip: skipLive }, async () => {
+  const hints = (await report()).readStrategy.hints;
+  assert.ok(hints.sentBytes > 0, 'earlier tests drew hints, and their size is booked');
+  assert.equal(hints.netBytes, hints.adoptedBytesSaved - hints.sentBytes);
+});

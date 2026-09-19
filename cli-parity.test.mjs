@@ -38,14 +38,26 @@ before(async () => {
 
 after(() => { child?.stdin.end(); child?.kill(); });
 
+// The five read-shaping params are written "+shape" in a description (defined once, under
+// webscout_dom) so each read action does not repeat them - schema tokens are paid every session.
+const SHAPE_PARAM_NAMES = ['table', 'ifChanged', 'delta', 'peek', 'noGuard'];
+
 // "  click {selector, nth?} - ..." -> { click: ['selector', 'nth'] }
 function documentedParams(tool) {
   const out = {};
   for (const m of tool.description.matchAll(/^ {2}(\w+) \{([^}]*)\}/gm)) {
-    out[m[1]] = m[2].split(',').map((p) => p.trim().match(/^\w+/)?.[0]).filter(Boolean);
+    out[m[1]] = m[2].split(',').flatMap((p) => (p.trim() === '+shape' ? SHAPE_PARAM_NAMES : [p.trim().match(/^\w+/)?.[0]])).filter(Boolean);
   }
   return out;
 }
+
+test('every "+shape" action is a cacheable read, and the shape params are defined in one place', () => {
+  const dom = tools.find((t) => t.name === 'webscout_dom').description;
+  for (const name of SHAPE_PARAM_NAMES) assert.match(dom, new RegExp(`\\b${name}\\b`), `webscout_dom must define ${name}`);
+  const withShape = tools.flatMap((t) => [...t.description.matchAll(/^ {2}(\w+) \{[^}]*\+shape[^}]*\}/gm)].map((m) => `${t.name}.${m[1]}`));
+  const specShape = CLI_SPEC.filter((r) => (r.bool ?? []).includes('--peek')).map((r) => r.mcp);
+  assert.deepEqual(withShape.sort(), specShape.sort(), 'the actions documented with +shape are exactly the CLI commands that take --peek');
+});
 
 test('every CLI command with an MCP mapping points at a real tool action', () => {
   for (const row of CLI_SPEC.filter((r) => r.mcp)) {

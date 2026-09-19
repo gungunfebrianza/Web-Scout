@@ -175,6 +175,9 @@ ensureColumn('state_snapshots', 'golden_name', 'golden_name TEXT');
 // Token cost panel to render a burn-rate bar and print a warning once the
 // session's own estTokens total crosses it. NULL means no budget declared.
 ensureColumn('sessions', 'token_budget', 'token_budget INTEGER');
+// `session start --lean`: reads in this session are shaped by default (rows as tables, repeats
+// as pointers/deltas, large bodies as their shape) instead of only when a call asks. NULL/0 = off.
+ensureColumn('sessions', 'lean', 'lean INTEGER');
 // Content-addressed dedup for actions.result_json (see result_blobs table
 // below) - NULL means this row's result was byte-identical to an earlier
 // one already stored in result_blobs, so this row's own result_json is left
@@ -182,6 +185,12 @@ ensureColumn('sessions', 'token_budget', 'token_budget INTEGER');
 // NULL on a pre-migration row (or a row whose result was never deduped)
 // simply means "read result_json directly", same as always.
 ensureColumn('actions', 'result_hash', 'result_hash TEXT');
+// What the CALLER was actually handed for this action, when that is less than the logged
+// result (a peek, a table, a delta or a pointer replaced the body). NULL means "the full
+// result was delivered" - every older row, and every read that was not shaped. The logged
+// result stays complete; every token total below reads delivered_bytes first, so there is
+// one number for "what did this session put in front of the agent".
+ensureColumn('actions', 'delivered_bytes', 'delivered_bytes INTEGER');
 // Content-addressed dedup for actions.params_json (see params_blobs table
 // below) - same NULL-means-look-it-up-by-hash convention as result_hash
 // above.
@@ -645,7 +654,7 @@ const stmtSavingsDailyTotal = db.prepare('SELECT COALESCE(SUM(calls), 0) AS call
 const stmtSavingsDailyRange = db.prepare('SELECT day, key, calls, bytes FROM savings_daily WHERE day >= ? ORDER BY day');
 const stmtDeliveredPerDay = db.prepare(`
   SELECT substr(a.started_at, 1, 10) AS day, COUNT(*) AS calls,
-         SUM(COALESCE(LENGTH(a.result_json), (SELECT byte_length FROM result_blobs WHERE hash = a.result_hash), 0)) AS bytes
+         SUM(COALESCE(a.delivered_bytes, LENGTH(a.result_json), (SELECT byte_length FROM result_blobs WHERE hash = a.result_hash), 0)) AS bytes
   FROM actions a WHERE a.started_at >= ? GROUP BY day ORDER BY day
 `);
 
@@ -700,6 +709,10 @@ export function getReadStrategyStats() {
   const hintScope = total('hintScope');
   const hintReuse = total('hintReuse');
   const hintAdopted = total('hintAdopted');
+  const hintBytes = total('hintBytes');
+  const plain = total('readPlain');
+  const explicit = total('readExplicit');
+  const lean = total('readLean');
   const peekCalls = peek.calls + guard.calls;
   // Bytes each shaping mode kept off the caller's screen. A peek only defers the
   // body: when the same read then came back in full, those bytes were spent after
@@ -718,9 +731,25 @@ export function getReadStrategyStats() {
       },
       netBytesSaved,
     },
+    // Who chose the shaping on cacheable reads: the caller (explicit flags), the session (lean), or
+    // nobody. plain bytes are what flowed unshaped - the size of the opportunity a lean session takes.
+    adoption: {
+      reads: plain.calls + explicit.calls + lean.calls,
+      plain: { calls: plain.calls, deliveredBytes: plain.bytes },
+      explicit: { calls: explicit.calls, deliveredBytes: explicit.bytes },
+      lean: { calls: lean.calls, deliveredBytes: lean.bytes },
+      explicitRatePct: pct(explicit.calls, plain.calls + explicit.calls + lean.calls),
+      leanRatePct: pct(lean.calls, plain.calls + explicit.calls + lean.calls),
+    },
+    // A hint costs the bytes it is written in and pays back only on the call that follows it:
+    // adoptedBytesSaved is what those adopting calls kept off the screen (first-order - later
+    // calls that keep using the flag are not attributed to the hint).
     hints: {
       scope: hintScope.calls, reuse: hintReuse.calls, adopted: hintAdopted.calls,
       adoptedRatePct: pct(hintAdopted.calls, hintScope.calls + hintReuse.calls),
+      sentBytes: hintBytes.bytes,
+      adoptedBytesSaved: hintAdopted.bytes,
+      netBytes: hintAdopted.bytes - hintBytes.bytes,
     },
     reRead: { scopedCalls: scoped.calls, reReads: reRead.calls, reReadBytes: reRead.bytes, ratePct: pct(reRead.calls, scoped.calls) },
     outline: {
@@ -780,7 +809,7 @@ export function getSavingsTrend(days = 14) {
 
 // ---------- sessions ----------
 
-const stmtInsertSession = db.prepare('INSERT INTO sessions (goal, context, status, started_at, strict_crv, strict_crv_stores, tags, token_budget) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+const stmtInsertSession = db.prepare('INSERT INTO sessions (goal, context, status, started_at, strict_crv, strict_crv_stores, tags, token_budget, lean) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 const stmtGetCurrentSession = db.prepare("SELECT * FROM sessions WHERE status = 'active' LIMIT 1");
 const stmtGetSession = db.prepare('SELECT * FROM sessions WHERE id = ?');
 const stmtEndSession = db.prepare("UPDATE sessions SET status = 'ended', ended_at = ? WHERE id = ? AND status = 'active'");
@@ -791,6 +820,7 @@ function hydrateSession(row) {
   return {
     ...row,
     strict_crv: !!row.strict_crv,
+    lean: !!row.lean,
     strict_crv_stores: row.strict_crv_stores ? JSON.parse(row.strict_crv_stores) : null,
     tags: row.tags ? JSON.parse(row.tags) : [],
   };
@@ -800,7 +830,7 @@ export function getCurrentSession() {
   return hydrateSession(stmtGetCurrentSession.get() ?? null);
 }
 
-export function startSession({ goal, context, strictCrv, strictCrvStores, tags, tokenBudget }) {
+export function startSession({ goal, context, strictCrv, strictCrvStores, tags, tokenBudget, lean }) {
   if (!goal || typeof goal !== 'string' || !goal.trim()) {
     throw new Error('a non-empty goal is required to start a session');
   }
@@ -810,7 +840,7 @@ export function startSession({ goal, context, strictCrv, strictCrvStores, tags, 
   }
   const startedAt = new Date().toISOString();
   const storesJson = Array.isArray(strictCrvStores) && strictCrvStores.length ? JSON.stringify(strictCrvStores) : null;
-  const info = stmtInsertSession.run(goal, context ?? null, 'active', startedAt, strictCrv ? 1 : 0, storesJson, JSON.stringify(tags ?? []), Number.isFinite(tokenBudget) ? Number(tokenBudget) : null);
+  const info = stmtInsertSession.run(goal, context ?? null, 'active', startedAt, strictCrv ? 1 : 0, storesJson, JSON.stringify(tags ?? []), Number.isFinite(tokenBudget) ? Number(tokenBudget) : null, lean ? 1 : 0);
   return hydrateSession(stmtGetSession.get(Number(info.lastInsertRowid)));
 }
 
@@ -843,6 +873,13 @@ const stmtListActions = db.prepare('SELECT * FROM actions WHERE session_id = ? O
 const stmtListActionsAsc = db.prepare('SELECT * FROM actions WHERE session_id = ? ORDER BY id ASC');
 const stmtListActionsLimit = db.prepare('SELECT * FROM actions WHERE session_id = ? ORDER BY id DESC LIMIT ?');
 const stmtGetActionById = db.prepare('SELECT * FROM actions WHERE id = ?');
+
+const stmtSetActionDelivered = db.prepare('UPDATE actions SET delivered_bytes = ? WHERE id = ?');
+// Records that the caller was handed `bytes` for this action instead of its full result.
+export function setActionDelivered(actionId, bytes) {
+  if (actionId === undefined || actionId === null || !Number.isFinite(bytes)) return;
+  stmtSetActionDelivered.run(Math.max(0, Math.round(bytes)), Number(actionId));
+}
 
 export function logAction({ sessionId, type, params, result, ok, error, startedAt, endedAt, agentName }) {
   const durationMs = new Date(endedAt).getTime() - new Date(startedAt).getTime();
@@ -948,35 +985,42 @@ const stmtActionCostByType = db.prepare(`
   SELECT a.type AS type,
     COUNT(*) AS calls,
     SUM(LENGTH(COALESCE(a.result_json, rb.json, ''))) AS resultBytes,
+    SUM(COALESCE(a.delivered_bytes, LENGTH(COALESCE(a.result_json, rb.json, '')))) AS deliveredBytes,
     SUM(LENGTH(COALESCE(a.params_json, pb.json, ''))) AS paramsBytes
   FROM actions a LEFT JOIN result_blobs rb ON a.result_hash = rb.hash
     LEFT JOIN params_blobs pb ON a.params_hash = pb.hash
-  WHERE a.session_id = ? GROUP BY a.type ORDER BY resultBytes DESC
+  WHERE a.session_id = ? GROUP BY a.type ORDER BY deliveredBytes DESC
 `);
 const stmtActionCostByTypeAll = db.prepare(`
   SELECT a.type AS type,
     COUNT(*) AS calls,
     SUM(LENGTH(COALESCE(a.result_json, rb.json, ''))) AS resultBytes,
+    SUM(COALESCE(a.delivered_bytes, LENGTH(COALESCE(a.result_json, rb.json, '')))) AS deliveredBytes,
     SUM(LENGTH(COALESCE(a.params_json, pb.json, ''))) AS paramsBytes
   FROM actions a LEFT JOIN result_blobs rb ON a.result_hash = rb.hash
     LEFT JOIN params_blobs pb ON a.params_hash = pb.hash
-  GROUP BY a.type ORDER BY resultBytes DESC
+  GROUP BY a.type ORDER BY deliveredBytes DESC
 `);
 // chars/4 - the commonly-cited rough proxy for English/JSON-ish text tokens,
 // not a real tokenizer. Good enough to RANK command types against each
 // other and spot the outliers; never treat as an exact bill.
 export const CHARS_PER_TOKEN_ESTIMATE = 4;
 
+// resultBytes is what was LOGGED (the full result); deliveredBytes is what the caller was
+// handed, and estTokens follows delivered - a peeked read costs the peek, not the body.
 function toActionCostRow(r) {
   const resultBytes = r.resultBytes || 0;
+  const deliveredBytes = r.deliveredBytes ?? resultBytes;
   const paramsBytes = r.paramsBytes || 0;
   return {
     type: r.type,
     calls: r.calls,
     resultBytes,
+    deliveredBytes,
+    withheldBytes: Math.max(0, resultBytes - deliveredBytes),
     paramsBytes,
     avgResultBytes: r.calls ? Math.round(resultBytes / r.calls) : 0,
-    estTokens: Math.round((resultBytes + paramsBytes) / CHARS_PER_TOKEN_ESTIMATE),
+    estTokens: Math.round((deliveredBytes + paramsBytes) / CHARS_PER_TOKEN_ESTIMATE),
   };
 }
 
@@ -989,7 +1033,7 @@ function toActionCostRow(r) {
 // COALESCE(result_json, blob)/chars-per-4 estimate as getActionCostReport,
 // just SUMmed with no GROUP BY - one aggregate row, not one per type.
 const stmtSessionTokensSoFar = db.prepare(`
-  SELECT SUM(LENGTH(COALESCE(a.result_json, rb.json, '')) + LENGTH(COALESCE(a.params_json, pb.json, ''))) AS totalBytes
+  SELECT SUM(COALESCE(a.delivered_bytes, LENGTH(COALESCE(a.result_json, rb.json, ''))) + LENGTH(COALESCE(a.params_json, pb.json, ''))) AS totalBytes
   FROM actions a LEFT JOIN result_blobs rb ON a.result_hash = rb.hash
     LEFT JOIN params_blobs pb ON a.params_hash = pb.hash
   WHERE a.session_id = ?
@@ -1209,7 +1253,7 @@ export function getActionCostByMacro(sessionId) {
 // session's own tags), not something this function should guess.
 const stmtSessionTokenTotals = db.prepare(`
   SELECT s.id AS sessionId, s.goal AS goal, s.tags AS tagsJson, s.started_at AS startedAt, s.token_budget AS tokenBudget,
-    SUM(LENGTH(COALESCE(a.result_json, rb.json, '')) + LENGTH(COALESCE(a.params_json, pb.json, ''))) AS totalBytes
+    SUM(COALESCE(a.delivered_bytes, LENGTH(COALESCE(a.result_json, rb.json, ''))) + LENGTH(COALESCE(a.params_json, pb.json, ''))) AS totalBytes
   FROM sessions s LEFT JOIN actions a ON a.session_id = s.id LEFT JOIN result_blobs rb ON a.result_hash = rb.hash
     LEFT JOIN params_blobs pb ON a.params_hash = pb.hash
   GROUP BY s.id ORDER BY s.id ASC

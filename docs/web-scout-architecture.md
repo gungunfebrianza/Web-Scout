@@ -1061,9 +1061,10 @@ target read narrowed books `peekThenNarrowed`, read whole books `peekThenFull` w
 delivered bytes, and `getReadStrategyStats().shaping.netBytesSaved` subtracts those.
 
 The running session total (the `x-webscout-session-tokens` header, the budget level and the
-session receipt) is `getSessionTokensSoFar` + cache-hit bytes actually delivered - bytes a
-shaped reply withheld (`sessionDeliveryAdjust`); the logged action row still holds the full
-result, so `getActionCostReport` ("Read by callers") is unchanged by design.
+session receipt) is `getSessionTokensSoFar` + cache-hit bytes actually delivered. Since V33
+`getSessionTokensSoFar` and `getActionCostReport` read `actions.delivered_bytes` before the
+logged result size (see "Delivered bytes, lean sessions and quiet notes (V33)"); the action
+row still holds the full result.
 
 `behaviourHint` inside the pipeline keeps a per-session trail (scoped-at, last scope
 params, re-read counts, full cache re-deliveries) and emits at most one hint per target
@@ -1079,3 +1080,53 @@ concurrent reads (`idb.list`, `db.version`), a 6s bound, no action row - unless
 `noteScopedRead`). `token-estimate.mjs` holds the per-kind ratios and reads
 `token-calibration.json` when present; all three new modules are on `RELAY_SOURCE_FILES`, so
 an edit to one flags the running relay as stale.
+
+## Delivered bytes, lean sessions and quiet notes (V33)
+
+**One delivered number.** `deliverRead` (relay.mjs) calls `dbApi.setActionDelivered(actionId,
+outBytes)` whenever a fresh read's reply was smaller than its logged result; a cache hit has no
+action row, so its delivered bytes stay in `sessionCacheHitBytes`. `getSessionTokensSoFar`,
+`getSessionTokenTotals`, the trend's per-day bytes and `getActionCostReport` use
+`COALESCE(delivered_bytes, length(result))`; `resultBytes` stays the logged size and each
+per-type row also carries `deliveredBytes` and `withheldBytes`. `getActionCostByTarget` still
+reports logged sizes on purpose: it answers "what does a full read of this target cost", the
+figure scoping advice needs.
+
+**Lean.** `sessions.lean` (column added by `ensureColumn`) is passed to `shape()`. `leanOn` =
+lean and not `--no-guard`; then `table` and `delta` are implied and the guard threshold is
+`min(budget level, WEBSCOUT_READ_GUARD_TOKENS, LEAN_GUARD_TOKENS)`. Hints and adoption see the
+caller's own flags, not the implied ones. `readPlain` / `readExplicit` / `readLean` (savings_daily)
+book delivered bytes by who chose the shaping; a `--no-guard` call counts as plain.
+`createReadPipeline({leanGuardTokens})` exists so `trace.mjs` can sweep the threshold.
+
+**Quiet notes.** `behaviourHint` issues through `mayHint`: under `MAX_HINTS_PER_SESSION` and
+fewer than `HINT_IGNORED_LIMIT` unadopted hints of that kind (`scope`, `reuse`, `hit`).
+`pendingReuse` is a Map of cache key to kind so adoption is credited to the right kind, with the
+adopting call's `spared` bytes booked as `hintAdopted` bytes; every hint's text length is booked as
+`hintBytes`. The generic response wrapper sets `x-webscout-tokens-quiet: 1` when the call added
+under `NOTABLE_CALL_TOKENS` and the total stayed in its doubling bucket (`tokenMilestone`); a
+client that does not see the header prints as before.
+
+**Verify.** `POST /state/verify` (relay.mjs) is baseline resolution + `dispatchCommand('idb.snapshot')`
++ `computeDiff` + `crv-verify.mjs`'s `buildVerifyReport`; it logs `idb.snapshot` and `idb.verify`
+actions and saves the snapshot and diff like the two-call form. `crv-verify.mjs` is on
+`RELAY_SOURCE_FILES`.
+
+**Projection.** New params on the in-page handlers are listed in `SCOPING_PARAM_KEYS`; each
+calls `noteAvoided` with the unscoped size, which becomes `avoided` on the reply and books the
+scoped-reads ledger. `projectKeys`, `isFieldList` and `valueAtPath` are the shared helpers.
+
+**Help and budgets.** `help.mjs` parses `usage.txt`: a two-space line starting with a `CLI_SPEC`
+command word opens an entry, prose blocks are recognised by their first phrase, column-0 lines
+after the entries are `global`. `schema-budget.test.mjs` holds the tool-list, per-tool, shared
+property description and help-slice caps.
+
+**Traces.** `trace.mjs` reads the database read-only (`node:sqlite`, so exporting never runs
+`db.mjs`'s migrations against a live relay's file), anonymises with `standIn` (same length and
+equality, hash-derived), and replays through `createReadPipeline`. Only reads the page was asked
+are in a trace (a cache hit logs nothing), so every replayed read is a fresh dispatch.
+
+**Session-start restart.** `ensureFreshRelayForNewSession` (client.mjs, used by the CLI and the
+MCP `start`) reads `/health`, and restarts (`restartRelay`) only when `stale_source_files` is
+non-empty and there is no active session; it waits up to 8s for the tabs that were connected to
+reconnect and records an `auto-restart` event.

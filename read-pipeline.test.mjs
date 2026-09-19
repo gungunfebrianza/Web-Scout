@@ -8,15 +8,20 @@ import { createReadPipeline, budgetLevel, normalizeShapeOpts, isNarrowed, readTa
 const rows = (n, pad = 0) => Array.from({ length: n }, (_, i) => ({ id: i + 1, status: i % 2 ? 'open' : 'done', owner: `user-${i}`, note: 'n'.repeat(pad) }));
 const dump = (n, pad) => ({ store: 'orders', keyPath: 'id', count: n, rows: rows(n, pad) });
 
+// who-asked and hint-cost counters are bookkeeping about the calls, not savings: kept apart so a
+// mode's ledger entry can be asserted on its own
+const COUNTER_KEYS = new Set(['readPlain', 'readExplicit', 'readLean', 'hintBytes']);
+
 function harness() {
   const booked = [];
+  const counters = [];
   let clock = 1000;
-  const pipeline = createReadPipeline({ bump: (key, bytes) => booked.push([key, bytes]), now: () => clock });
+  const pipeline = createReadPipeline({ bump: (key, bytes) => (COUNTER_KEYS.has(key) ? counters : booked).push([key, bytes]), now: () => clock });
   const call = (over = {}) => {
     const full = over.full ?? dump(20);
     return pipeline.shape({ sessionId: 1, type: 'idb.dump', agentName: 'default', params: { store: 'orders' }, cacheKey: 'default::idb.dump::{"store":"orders"}', hit: false, actionId: 10, opts: {}, budget: null, ...over, full });
   };
-  return { pipeline, booked, call, tick: (ms) => { clock += ms; }, keys: () => booked.map(([k]) => k) };
+  return { pipeline, booked, counters, call, tick: (ms) => { clock += ms; }, keys: () => booked.map(([k]) => k) };
 }
 
 test('with no options the caller gets the full result and nothing is booked', () => {
@@ -228,4 +233,76 @@ test('option and target helpers', () => {
   assert.equal(isNarrowed('idb.dump', { store: 'a', where: { id: 1 } }), true);
   assert.equal(isNarrowed('dom.query', { selector: 'a', meta: false }), false);
   assert.equal(readTargetKey('idb.dump', { store: 'a', limit: 3 }), readTargetKey('idb.dump', { store: 'a' }));
+});
+
+// ---------- lean sessions, who asked, and quiet hints ----------
+
+test('a lean session shapes by default: a table, a pointer for a repeat, a peek for a large body', () => {
+  const h = harness();
+  const big = dump(200, 60);
+  const first = h.call({ full: big, actionId: 10, lean: true });
+  assert.equal(first.mode, 'guard', 'over the lean guard: the shape, without the caller asking');
+  assert.equal(first.out.guarded, true);
+  const small = dump(30);
+  const t = h.call({ full: small, actionId: 11, cacheKey: 'k-small', lean: true });
+  assert.equal(t.mode, 'table', 'small enough to deliver, still stated as a table');
+  const pointer = h.call({ full: small, hit: true, entry: { cachedAt: 't', actionId: 11 }, cacheKey: 'k-small', lean: true });
+  assert.equal(pointer.mode, 'pointer', 'the caller holds this exact result: unchanged, one line');
+  assert.deepEqual(h.counters.map(([k]) => k).filter((k) => k !== 'hintBytes'), ['readLean', 'readLean', 'readLean']);
+});
+
+test('--no-guard on a call in a lean session gives the body without the lean defaults', () => {
+  const h = harness();
+  const big = dump(200, 60);
+  const r = h.call({ full: big, actionId: 10, lean: true, opts: { noGuard: true } });
+  assert.equal(r.mode, 'full');
+  assert.equal(r.out.rows.length, 200);
+  const again = h.call({ full: big, hit: true, entry: { cachedAt: 't', actionId: 10 }, lean: true, opts: { noGuard: true } });
+  assert.equal(again.mode, 'full', 'no implied pointer either: they asked for the body');
+});
+
+test('a session that is not lean is unchanged by the lean code path', () => {
+  const h = harness();
+  const r = h.call({ full: dump(200, 60), actionId: 10 });
+  assert.equal(r.mode, 'full');
+  assert.deepEqual(h.counters.map(([k]) => k), ['readPlain']);
+});
+
+test('reads are counted by who chose the shaping: the caller, the session, or nobody', () => {
+  const h = harness();
+  h.call({ full: dump(20), opts: { table: true }, cacheKey: 'a' });
+  h.call({ full: dump(20), cacheKey: 'b' });
+  h.call({ full: dump(20), cacheKey: 'c', lean: true });
+  assert.deepEqual(h.counters.map(([k]) => k), ['readExplicit', 'readPlain', 'readLean']);
+  assert.ok(h.counters.every(([, bytes]) => bytes > 0), 'each carries the bytes delivered, so plain reads show how much flowed unshaped');
+});
+
+test('hints are capped per session and go quiet for a kind the caller keeps ignoring', () => {
+  const h = harness();
+  const big = dump(150, 60);
+  const sent = [];
+  for (let i = 0; i < 8; i += 1) {
+    const target = `{"store":"s${i}"}`;
+    const scopedKey = `default::idb.dump::{"store":"s${i}","limit":5}`;
+    h.call({ full: dump(5), params: { store: `s${i}`, limit: 5 }, cacheKey: scopedKey, actionId: 100 + i });
+    const r = h.call({ full: big, params: { store: `s${i}` }, cacheKey: `default::idb.dump::${target}`, actionId: 200 + i });
+    if (r.hint) sent.push(r.hint);
+  }
+  assert.equal(sent.length, 2, `a kind the caller ignored twice stops: ${sent.length} hints sent`);
+});
+
+test('the hint text sent and the bytes an adopting call saved are both booked, so a hint can be costed', () => {
+  const h = harness();
+  const big = dump(120, 60);
+  const entry = { cachedAt: 't', actionId: 10 };
+  h.call({ full: big, actionId: 10 });
+  const r1 = h.call({ full: big, hit: true, entry });
+  const r2 = h.call({ full: big, hit: true, entry });
+  assert.match(r2.hint ?? r1.hint, /--if-changed/);
+  const sentBytes = h.counters.filter(([k]) => k === 'hintBytes').reduce((a, [, b]) => a + b, 0);
+  assert.ok(sentBytes > 100, 'the hint itself is a cost');
+  h.call({ full: big, hit: true, entry, opts: { ifChanged: true } });
+  const adopted = h.booked.filter(([k]) => k === 'hintAdopted');
+  assert.equal(adopted.length, 1);
+  assert.ok(adopted[0][1] > 1000, 'credited with what the adopting call kept off the screen');
 });
