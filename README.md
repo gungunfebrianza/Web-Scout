@@ -154,6 +154,28 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   a,b --type dom.click --params '{"selector":"#save"}' --expect "notes:+1"` is the
   WHOLE loop in one call - baseline snapshot, the action, verify - instead of three
   separate round trips each with their own full-body reply
+- `crv preflight` replaces the four hand-run calls a real CRV pass needed before this
+  round (`status` + `db version-check` + `dom query` + `idb list`) with one read-only
+  check: agent connectivity/origin/staleness, DB version drift, whether `--stores`
+  exist, whether a target selector is present, and recent console errors since the
+  page last loaded. Also lists every connected agent (`agents[]`, with `tabCollision` when
+  two tabs took one agent name from each other in the last 5 minutes) and any
+  `knownIssueMatches` from an optional, untracked `known-issues.json` you maintain per
+  checkout (`known-issues.example.json` is the template; see CONTRIBUTING.md). Never
+  requires an active session
+- `crv seed <store> <rows-json>` writes rows (`idb put-many`) and records every
+  stored row's real key into a manifest file, so `crv cleanup` can delete exactly
+  those ids later (`idb delete-many`, one call per store) without hand-tracking ids
+  across a session's separate `idb put` calls
+- `session start` pins itself to its own agent's current origin: a later dom/idb/eval
+  call is refused if that SAME agent name is now connected from a DIFFERENT origin
+  (confirmed real: an agent name silently served two different origins/databases
+  across one session with nothing catching it for dozens of calls), and a MUTATING
+  command or `eval` against a non-localhost origin is refused unless `--allow-remote` -
+  neither ever blocks on an unknown/missing origin
+- `session start --if-stale-min N` ends a conflicting active session that started at least N
+  minutes ago and starts yours in the same call; a younger one is still refused. Without the
+  flag a conflict always refuses
 - `session start --strict-crv --crv-compact` adds a sampled preview of what changed
   (the same shape `idb verify`'s pass branch returns) to every triggering call's own
   reply, alongside the existing counts - sparing the separate `idb diff <idA> <idB>`
@@ -276,7 +298,7 @@ than what is on disk, so a green run can't quietly be validating stale code.
 
 **Sessions** (required before anything else)
 ```bash
-session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--auto-snapshot] [--token-budget N] [--no-briefing]
+session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b,c] [--auto-snapshot] [--token-budget N] [--no-briefing] [--if-stale-min N]
                                # --stores scopes every strict-crv auto-snapshot to those
                                # stores - omitting it against a real-size db WILL time out.
                                # --auto-snapshot (needs --stores) takes+persists a snapshot

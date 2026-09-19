@@ -2786,6 +2786,137 @@ looks stale after an action almost certainly means the fingerprint-based re-fetc
 
 Versions: relay 0.24.0, MCP server 0.25.0. Full suite: 0 new failures (confirmed via `sync-web-scout.mjs --push`'s own clean-worktree replay: 378 tests, 375 pass, 0 fail, 3 skipped - need a live tab, or a committed calibration this repo has never run). A machine with a stray local `token-calibration.json` (left by an earlier manual `--write`, not committed) sees that skip run and fail instead, and possibly a related estimator-band assertion with it - confirmed unrelated to this round via an empty diff on every file either test reads.
 
+## V38 - lessons from a real CRV run that got lost, then blocked twice, before it ever seeded a row (implemented)
+
+Driven by a real incident, not a proposed feature list: running a real-browser CRV pass against a fresh sandbox tab, the SAME agent
+name silently answered from two different origins (`http://127.0.0.1:9000` and
+`http://localhost:9000#sus`, two different IndexedDBs) across one session, undetected for ~68 tool
+calls. Separately, an unrelated read auto-restarted the shared relay mid-pass and dropped another
+tab's connection, and `session start` blocked on someone else's already-active global session with
+only a bare id+goal in the error - no way to tell whether ending it was safe. None of this is an
+authorization boundary between agents (this tool's own explicit non-goal, unchanged) - every fix
+below is informational or has an explicit opt-out, never a hard wall nothing can lift.
+
+- **Origin pinning** - `inject.js` now sends its own `location.origin` on every WebSocket connect
+  (same lifecycle as `loadId`/`build` - a real navigation only, never an in-page reconnect).
+  `session start` pins the session to its own agent's CURRENT origin (`sessions.pinned_origin`,
+  additive column); every later command dispatched through `dispatchCommand` (`guardDispatchOrigin`)
+  refuses with a 409 naming both origins if that SAME agent name is now connected from a DIFFERENT
+  one. Never blocks on an unknown/missing origin (a pre-this-round tab).
+- **Non-local write guard** - the same guard refuses a MUTATING command or `eval` against a
+  non-`localhost`/`127.0.0.1` origin, unless the session opted in with `session start
+  --allow-remote` (`sessions.allow_remote`) - a stray tab on a real/production site can no longer
+  receive a synthetic write by accident. Reads are never blocked by this.
+- **`crv preflight [--stores a,b,c] [<selector>] [--agent <name>]`** - one read-only call replacing
+  the four hand-run before a CRV pass this round actually needed (`status` + `db version-check` +
+  `dom query` + `idb list`): agent connectivity/origin/staleness, DB version drift, whether the
+  requested stores exist, whether a target selector is present, and recent console errors since the
+  page's last load (the tab's own in-page ring buffer, `inject.js`'s `consoleLog` - never faked as
+  an empty `[]` when the underlying check itself failed). Never requires an active session; never
+  mutates anything.
+- **Auto-restart guarded against other connected tabs** - `client.mjs`'s `ensureFreshRelayForNewSession`
+  already refused to restart mid-session (would drop the read cache); it now also refuses when more
+  than one agent is currently connected (restarting would drop a tab that is not the caller's own),
+  the exact gap the incident above hit. `WEBSCOUT_NO_AUTORESTART=1` is unchanged.
+- **Session-conflict context** - `startSession`'s "already active" error now names the blocking
+  session's `agent` (best-effort, recorded at its own start) and how long ago it started, so the next
+  caller can make an informed choice instead of guessing from a bare id+goal. Purely informational,
+  same non-authorization-boundary discipline as everything else here - still freely endable by
+  anyone.
+- **`session cleanup --since-snapshot --agent`** - its relay handler already read `body.agent`, but
+  the CLI never threaded `--agent` through, so a named-agent sandbox tab had no safe way to clean
+  itself up (it silently targeted `'default'` instead). `idb diff`/`idb diff-golden` were checked
+  too and confirmed to never touch a live tab at all (pure snapshot-vs-snapshot comparison
+  server-side) - documented in `usage.txt` instead of adding a dead parameter.
+- **`crv seed <store> <rows-json>` / `crv cleanup`** - wraps `idb put-many`/`idb delete-many` with a
+  manifest file (`.webscout-crv-manifest.json` in the CWD by default, `--manifest` overrides)
+  tracking every synthetic row's real key across a CRV pass's separate CLI invocations - replaces
+  hand-tracking ids across many `idb put` calls, confirmed real friction this round. Deletes exactly
+  the ids it wrote, never a broader diff; never mutates the row shape itself (no marker field) - the
+  manifest is the only place "this is synthetic" lives.
+- **Deferred, documented only** - automatic store-dependency discovery (a real run needed
+  two stores beyond the six originally-scoped stores, found only by
+  hitting boot failures): too speculative to build from one incident; `CONTRIBUTING.md` instead
+  recommends grepping the target page's own compute/render functions for every `crud.*`/
+  `getAllFromStore`/`getRecord` call reachable from page init before scoping a CRV's stores, since
+  app bootstrap seeding can require a store nobody thought was "part of" the feature under test.
+  Also deferred: extracting page-level assembly logic (a different repo area's
+  `computeProductionAuthorityReadinessData`) into pure, unit-testable modules - found by this round's
+  CRV because a bug there could only be caught by a regex/structural test, not a real one; real
+  architecture work, out of scope for a tool-only round.
+
+**Why:** keep the tooling that catches the next real regression from ALSO being the thing that
+silently mutates the wrong tab or drops someone else's connection.
+
+**How to apply:** `crv preflight` first, every CRV pass, before seeding anything - it is the same
+information `status`/`db version-check`/`dom query`/`idb list` already gave, just in one call and
+before any write. A 409/403 from a dom/idb/eval call now usually means the tab moved or is not
+local - re-run `crv preflight` rather than retrying blind. `CONTRIBUTING.md` gained a paragraph: a
+bug a real-browser CRV finds ships with a BEHAVIORAL regression test in the same commit, not only a
+structural one (naming this round's own regime-slice fix, in a different repo area, as the
+anti-pattern to avoid repeating).
+
+Versions: relay 0.25.0, MCP server 0.26.0. Full suite: 384 tests, 378 pass, 0 new failures, 4
+pre-existing (2 in `auto-restart.test.mjs` - a fire-and-forget `session end` call racing the next
+test's `session start`, confirmed unrelated by reproducing it against the pre-V38 code; 2 from a
+stray local `token-calibration.json`, the same known environmental trigger V37 documented), 2
+skipped (need a live tab).
+
+## V39 - preflight names collisions and known failures, session start can clear a stale session (implemented)
+
+Driven by friction a real CRV round hit, not a proposed feature list: two real tabs under one agent
+name silently took the connection from each other (from the caller's side the agent's `origin`
+flip-flopped between calls, diagnosable only by repeated `eval location.href` and comparing); an
+empty-database boot crash that had already been diagnosed once was rediscovered from scratch; a
+`session start` blocked on an abandoned session cost a separate read-decide-end-retry round trip;
+and one run hit an environment-permission denial with no documented recovery path. Everything below
+is informational or opt-in - none of it is an authorization boundary (this tool's explicit non-goal,
+unchanged).
+
+- **Tab-collision detection** - the agent entry gains `replacedCount` (carried over, so a back-and-
+  forth fight accumulates) and `lastReplacedAt`, set when a new connection under a name replaces a
+  LIVE one. `POST /crv/preflight` now always returns `agents[]` for EVERY connected agent (also on the
+  not-connected and stale-agent early returns): `{name, origin, connectedAt, replacedCount,
+  msSinceLastReplace, tabCollision}`. `tabCollision` is a replacement within
+  `TAB_COLLISION_WINDOW_MS` (5 min) - older ones are history (a reload, a stale tab finally closed) and
+  stop alarming. One call answers "is a tab fighting another over this name", including when the
+  requested agent's own row looks fine.
+- **Known-issues registry (mechanism only)** - an optional, untracked, per-checkout
+  `known-issues.json` next to `relay.mjs` (`WEBSCOUT_KNOWN_ISSUES` overrides the path; git-ignored;
+  `known-issues.example.json` is the tracked one-placeholder template): `[{id, signature, description,
+  remediation}]`, `signature` a substring or `/pattern/flags`. `crv preflight` matches every boot error
+  against it into `knownIssueMatches: [{id, description, remediation}]` - `[]` is "checked, none
+  matched" (also when the file is absent: the feature is inert, no error), `null` is "could not check"
+  (unreadable/invalid file, with `knownIssuesCheckError`; or entries loaded but no console result). A bad
+  entry is skipped with a `knownIssuesWarnings` line. Read on every call, so an edit needs no relay
+  restart. A match is named, not excused: console errors still make `ok` false. No entries ship with the
+  tool.
+- **`session start --if-stale-min N`** (MCP `ifStaleMin`) - if another session is active and its age
+  (fractional minutes since `started_at`) is >= N, `startSession` ends it first and the reply carries
+  `autoEndedSession` (id, goal, agent, age, reason), logged by the relay and echoed on the CLI's stderr;
+  a younger session is refused as today, the error saying it was left alone because it is younger than
+  the threshold (fail closed: a recent session is probably still in flight). An unparseable or
+  future `started_at` also refuses. Omitting the flag is byte-for-byte the old behavior. The relay
+  releases the auto-ended session's read cache and counters the same way `session end` does (the shared
+  `dropSessionMemory`).
+- **Documented, not built** - `CONTRIBUTING.md` gained: what to do when the CALLER's own permission
+  layer blocks a CRV command (allow-rule for the exact command, or run it once out-of-band / ask a
+  human - not a web-scout boundary, and not something to re-word around); scoping test reruns to the
+  changed area during an edit-verify loop, with the full suite reserved for the final pass; and trust
+  tiers for verifying a delegated pass's self-report (always re-check the cheap things, sample the
+  expensive ones, widen only on a discrepancy).
+
+**Why:** the diagnosis that took repeated manual probes (a name collision, an already-known boot
+crash) should cost one preflight call, and a stale session should not need its own decide-and-retry
+round trip - each with the failure mode kept honest (`null` vs `[]`, fail closed on age).
+
+**How to apply:** `crv preflight` first; if `agents[]` shows `tabCollision`, close the extra tab or give
+it its own `?webscout_name=`. Keep real `known-issues.json` entries per checkout, never in this repo.
+`session start --if-stale-min 60` is safe to put in a wrapper; `--if-stale-min 0` ends ANY conflicting
+session, so use it only when nothing else shares the relay.
+
+Versions: relay 0.26.0, MCP server 0.27.0. Full suite: 393 tests, 387 pass, 2 skipped (need a live tab), 4 failing that predate this round and are unrelated (2 in `auto-restart.test.mjs`, the same fire-and-forget `session end`/`session start` race V38 documented; the `--peek` read-shaping case; and the committed-calibration freshness check, the known stray-local-`token-calibration.json` trigger). 9 new tests: 8 in `preflight-diagnostics.test.mjs` (registry match/absent/broken, example file, tab collision, agents[] when not connected, `--if-stale-min` over HTTP and via the CLI) and 1 in `db.mjs.test.mjs` (threshold arithmetic with a stubbed clock).
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

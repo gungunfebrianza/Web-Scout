@@ -185,6 +185,71 @@ entry point (`isMainModule`, checked against `process.argv[1]`) - a plain
 relay and bound the real port with no env override. Use `node --check relay.mjs` for
 a syntax check instead - it never executes the module.
 
+## Before a real-browser CRV pass: scope the stores, don't guess
+
+A real CRV run needed two stores beyond the ones the task obviously named - found only by hitting a boot failure mid-pass, not by planning
+for them. App bootstrap seeding (a `seedIfEmpty`-shaped function run at page init) can require a
+store nobody thought was "part of" the feature under test. Before scoping a CRV's `--stores`, grep
+the target page's own compute/render/init functions (not just its obvious data stores) for every
+`crud.*`/`getAllFromStore`/`getRecord` call reachable from page load - a store one of those touches
+belongs in scope even if the feature under test never mentions it by name. `crv preflight
+--stores a,b,c` (V38) then confirms all of them actually exist before you seed anything.
+
+## A bug a real-browser CRV finds ships with a behavioral test, not only a structural one
+
+When a CRV pass surfaces a real product bug, fix it in the same commit as a regression test that
+exercises the actual BEHAVIOR (calls the real function/endpoint, asserts on its real output) - not
+only a `assert.match(sourceText, /pattern/)` scan of the file. A V38-round CRV found a real bug this
+way (a regime-scoped readiness slice was double-counting its own parent corpus as independent
+historical evidence, in a different repo area's `computeProductionAuthorityReadinessData`) and
+shipped the fix with only a structural assertion - weaker than it should have been, and the
+anti-pattern to avoid repeating, not a precedent to follow.
+
+## Known failures you have already diagnosed: the opt-in registry
+
+`crv preflight` can name a console error that was root-caused once, so the next pass does not
+rediscover it. It reads an optional, untracked `known-issues.json` next to `relay.mjs` (or the path in
+`WEBSCOUT_KNOWN_ISSUES`) on every call: an array of `{ id, signature, description, remediation }`,
+where `signature` is a substring of the console error text, or `/pattern/flags` for a regex.
+`known-issues.example.json` is the tracked schema template (one placeholder entry, not a real bug).
+Matches come back as `knownIssueMatches: [{ id, description, remediation }]` - `[]` means "checked,
+nothing matched" (also when the file is absent, which is the normal, inert state), `null` means it
+could not check (unreadable file, or entries loaded but no console result), with the reason in
+`knownIssuesCheckError`. A matched issue is named, not excused: console errors still make `ok` false.
+This file is per-checkout and operator-maintained. Never commit real entries into the tool's own
+generic docs or the example file; it is git-ignored for that reason.
+
+## When the caller's own environment blocks a CRV command
+
+A caller (an AI coding agent, a CI runner, a sandboxed shell) may have its OWN permission or
+classification layer that refuses to run `cli.mjs` or a relay command. That is not a web-scout auth
+boundary - web-scout deliberately has none (see the roadmap's "Explicit non-goals") - and nothing in
+this tool can lift it. Two generic recoveries: (a) add an explicit allow-rule for the exact command
+in whatever local permission config the caller's environment supports (an AI coding agent's own
+tool-permission system, a CI job's allow-list), or (b) run the blocked command once, by hand or
+out-of-band, or ask a human to, so the caller can carry on from the resulting state. Do not work
+around the block by re-wording the same command until a classifier lets it through.
+
+## Scope test reruns to the changed area while iterating
+
+In an edit-verify loop, rerun only what the edit could have broken: `node --test <file>` for the
+touched area, or `node --test --test-name-pattern "<pattern>" <file>` for one test. Reserve the full
+suite (`node --test --test-force-exit tools/web-scout/*.test.mjs`) for the final verification pass
+before reporting done. Rerunning everything after every small edit spends minutes and output tokens
+without catching more, since an unrelated file's failure was already there before the edit. Record the
+full-suite baseline once up front, so a failure at the end can be told apart from one that predates
+the work.
+
+## Verifying a delegated pass: not every claim needs the same depth
+
+When a CRV pass or other verification is delegated to another agent or subprocess and its self-report
+needs a second look, match the depth to the cost. Always re-check what is cheap: a version-bump grep,
+a re-diff of a test count, `git status` for files that should not have changed. Sample what is
+expensive: instead of reading every line of every touched file, spot-check two or three
+representative files or changes (one from each kind of change made). Widen the sample only when a
+spot-check finds a discrepancy. Exhaustively re-verifying everything burns tokens without a
+proportional gain in what it catches, so state up front which checks are which.
+
 ## PR expectations
 
 - Update the README and/or `docs/web-scout-roadmap.md` alongside the code

@@ -13,6 +13,7 @@ import path from 'node:path';
 import http from 'node:http';
 import {
   request, BASE, HOST, PORT, netHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, ensureFreshRelayForNewSession,
+  manifestPath, readManifest, writeManifest,
 } from './client.mjs';
 import { validateArgs, findMsysMangledArgs, findSpec } from './cli-spec.mjs';
 import { parseUsage, helpTopic, helpMissing } from './help.mjs';
@@ -160,6 +161,7 @@ async function handleSession(sub, rawArgs) {
     let noBriefing;
     let leanValue;
     let crvCompactValue;
+    let allowRemoteValue;
     ({ args, value: noBriefing } = extractBooleanFlag(args, '--no-briefing'));
     ({ args, value: leanValue } = extractBooleanFlag(args, '--lean'));
     ({ args, value: tagsValue } = extractFlag(args, '--tags'));
@@ -168,11 +170,20 @@ async function handleSession(sub, rawArgs) {
     ({ args, value: storesValue } = extractFlag(args, '--stores'));
     ({ args, value: autoSnapshot } = extractBooleanFlag(args, '--auto-snapshot'));
     ({ args, value: tokenBudgetValue } = extractFlag(args, '--token-budget'));
+    ({ args, value: allowRemoteValue } = extractBooleanFlag(args, '--allow-remote'));
+    let ifStaleMinValue;
+    ({ args, value: ifStaleMinValue } = extractFlag(args, '--if-stale-min'));
     ({ args, value: agentFlag } = extractFlag(args, '--agent'));
+    if (ifStaleMinValue !== undefined && !(Number.isFinite(Number(ifStaleMinValue)) && String(ifStaleMinValue).trim() !== '' && Number(ifStaleMinValue) >= 0)) {
+      throw new Error('--if-stale-min needs a number of minutes >= 0');
+    }
     const tags = tagsValue ? tagsValue.split(',').map((t) => t.trim()).filter(Boolean) : [];
     const strictCrvStores = storesValue ? storesValue.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
     await ensureFreshRelayForNewSession();
-    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, crv_compact: crvCompactValue || undefined, tags, token_budget: tokenBudgetValue !== undefined ? Number(tokenBudgetValue) : undefined, briefing: noBriefing ? false : undefined, lean: leanValue || undefined, agent: agentFlag });
+    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, crv_compact: crvCompactValue || undefined, tags, token_budget: tokenBudgetValue !== undefined ? Number(tokenBudgetValue) : undefined, briefing: noBriefing ? false : undefined, lean: leanValue || undefined, agent: agentFlag, allow_remote: allowRemoteValue || undefined, if_stale_min: ifStaleMinValue !== undefined ? Number(ifStaleMinValue) : undefined });
+    if (session.autoEndedSession) {
+      console.error(`NOTE: ${session.autoEndedSession.reason} (session #${session.autoEndedSession.id}: "${session.autoEndedSession.goal}").`);
+    }
     if (strictCrv && !storesValue) {
       console.error('WARNING: --strict-crv with no --stores auto-snapshots the WHOLE db on every dom.click/fill/eval/idb.put/idb.delete - this WILL time out (60s) against a real-size production IndexedDB. Pass --stores a,b,c to scope it.');
     }
@@ -326,9 +337,17 @@ async function handleSession(sub, rawArgs) {
     ({ args, value: confirm } = extractBooleanFlag(args, '--confirm'));
     ({ args, value: sinceSnapshotId } = extractFlag(args, '--since-snapshot'));
     ({ args, value: summary } = extractBooleanFlag(args, '--summary'));
+    // --since-snapshot dispatches a real idb.snapshot/idb.delete to a live tab
+    // (relay.mjs's /sessions/:id/cleanup handler already reads body.agent) -
+    // this flag was simply never threaded through from the CLI, so cleanup
+    // against a non-default agent silently targeted 'default' instead
+    // (confirmed real: a named-agent sandbox tab had no safe way to clean
+    // itself up). The id-only mode (no --since-snapshot) never touches a
+    // live tab at all, so --agent is a no-op there.
+    ({ args, value: agentFlag } = extractFlag(args, '--agent'));
     const id = args[0];
     if (!id) throw new Error('session cleanup requires an id');
-    printResult(await request('POST', `/sessions/${id}/cleanup`, { confirm, sinceSnapshotId: sinceSnapshotId !== undefined ? Number(sinceSnapshotId) : undefined, summary }));
+    printResult(await request('POST', `/sessions/${id}/cleanup`, { confirm, sinceSnapshotId: sinceSnapshotId !== undefined ? Number(sinceSnapshotId) : undefined, summary, agent: agentFlag }));
     return;
   }
   if (sub === 'intents') {
@@ -901,6 +920,10 @@ async function main() {
   let paramsValue;
   ({ args, value: typeValue } = extractFlag(args, '--type'));
   ({ args, value: paramsValue } = extractFlag(args, '--params'));
+  // "crv seed"/"crv cleanup": the manifest file that tracks synthetic row ids across
+  // separate CLI invocations - see the crv.seed/crv.cleanup entries below.
+  let manifestValue;
+  ({ args, value: manifestValue } = extractFlag(args, '--manifest'));
 
   if (command === 'page' && args[0] === 'reload') {
     let a = args.slice(1);
@@ -1160,6 +1183,51 @@ async function main() {
         expect: expectFileValue ? fs.readFileSync(expectFileValue, 'utf8') : expectValue,
         allowExtra: allowExtraValue || undefined, verbose: verboseValue || undefined, samples: samplesValue !== undefined ? Number(samplesValue) : undefined,
       }),
+      // One call replacing the four hand-run before every CRV pass ("status" +
+      // "db version-check" + "dom query" + "idb list") - see relay.mjs's own
+      // POST /crv/preflight comment. Optional trailing selector, same
+      // positional convention as every dom.* command (domSelector above).
+      preflight: () => request('POST', '/crv/preflight', { agent: agentFlag, stores: csv(storesValue), selector: domSelector || undefined }),
+      // Wraps "idb put-many" (same store/rows shape) but also records every
+      // stored row's real key into the manifest (see manifestPath above) -
+      // replaces hand-tracking ids across a session's separate "idb put"
+      // calls, confirmed real friction cleaning up a real CRV pass this
+      // round. Never writes a synthetic marker field onto the row itself
+      // (would risk breaking real app code that reads it strictly) - the
+      // manifest is the only place the "this row is synthetic" fact lives.
+      seed: async () => {
+        const store = subArgs[0];
+        const rows = JSON.parse(subArgs[1]);
+        const result = await send('idb.putMany', { store, rows });
+        const file = manifestPath(manifestValue);
+        const manifest = readManifest(file);
+        const ids = (result.rows || []).map((row) => (Array.isArray(result.keyPath) ? result.keyPath.map((k) => row?.[k]) : row?.[result.keyPath]));
+        let entry = manifest.entries.find((e) => e.store === store);
+        if (!entry) { entry = { store, ids: [] }; manifest.entries.push(entry); }
+        entry.ids.push(...ids);
+        writeManifest(file, manifest);
+        return { ...result, manifest: file, manifestIds: ids };
+      },
+      // Deletes exactly the ids "crv seed" recorded (one or more stores'
+      // worth, accumulated across however many "crv seed" calls a pass
+      // made), via the existing "idb delete-many" path, then clears the
+      // manifest - never a broader "delete everything in this store"
+      // (see usage.txt's own DANGEROUS-against-a-shared-db warning on
+      // "session cleanup --since-snapshot" for why a narrow, id-exact
+      // delete is the only safe default here).
+      cleanup: async () => {
+        const file = manifestPath(manifestValue);
+        const manifest = readManifest(file);
+        if (!manifest.entries.length) return { cleaned: [], note: `no manifest entries at ${file} - nothing to clean up` };
+        const cleaned = [];
+        for (const entry of manifest.entries) {
+          if (!entry.ids.length) continue;
+          const result = await send('idb.deleteMany', { store: entry.store, keys: entry.ids });
+          cleaned.push({ store: entry.store, ...result });
+        }
+        try { fs.unlinkSync(file); } catch { /* already gone, or never written - either way nothing left to clean */ }
+        return { cleaned, manifest: file };
+      },
     },
     net: {
       // --limit N keeps only the N most recent entries and --url <substr> only

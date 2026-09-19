@@ -16,14 +16,25 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 
 // Measured 16,296 bytes (~4,070 tokens) when V33 added verify/pick/lean and compressed the rest;
 // the V32 list was 17,973. Measured 16,613 when V34 added crv_run (one-call baseline -> action ->
-// verify; see [[web-scout-v34-round]]) - raised deliberately, same commit as the text. The cap
-// leaves ~1% headroom.
-const MCP_TOTAL_MAX_BYTES = 16750;
-const MCP_TOOL_MAX_BYTES = 3200;
+// verify; see [[web-scout-v34-round]]) - raised deliberately, same commit as the text. Measured
+// 17,230 when V38 added crv_preflight/crv_seed/crv_cleanup (webscout_idb) and session start's
+// allowRemote/origin-pin text (webscout_session) - the real CRV-tooling gaps that round's own
+// real-browser incident named directly; raised again, same commit, same convention.
+// Measured 17,437 when V39 added session start's ifStaleMin (webscout_session) and named preflight's
+// agents[]/knownIssueMatches in crv_preflight (webscout_idb) - raised to 17450, same commit, same convention.
+const MCP_TOTAL_MAX_BYTES = 17450;
+// Raised to 3550 when V38 added crv_preflight/crv_seed/crv_cleanup to webscout_idb (already the
+// biggest single tool, from crv_run) - same commit-with-the-text convention as above.
+// Raised to 3650 when V39 extended crv_preflight's one-line description (webscout_idb measured 3,606).
+const MCP_TOOL_MAX_BYTES = 3650;
 // The biggest slice of help (a whole group) and the index a bare `cli.mjs` prints.
 // Raised to 14300 when "session viz" (round-2 session-viz.mjs's own CLI access) was added to the
 // already-tightest group - same commit as the text, same convention as MCP_TOTAL_MAX_BYTES above.
-const HELP_GROUP_MAX_CHARS = 14300;
+// Raised to 15500 when V38's origin-pin/--allow-remote/--agent text landed in the same
+// already-tightest ("session") group - same convention, same commit as the text.
+// Raised to 15800 when V39's "session start --if-stale-min" text landed in the same group (measured
+// 15,774) - same convention, same commit as the text.
+const HELP_GROUP_MAX_CHARS = 15800;
 const HELP_INDEX_MAX_CHARS = 2200;
 
 let child;

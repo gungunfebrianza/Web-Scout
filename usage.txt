@@ -40,7 +40,7 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    blocked RIGHT NOW (another tab - web-scout-connected or not -
                                    holding a connection at the older version), and by what, instead
                                    of only reporting THAT a version-bump "page reload" hasn't taken.
-  session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--crv-compact] [--tags a,b,c] [--token-budget N] [--lean] [--no-briefing] [--agent <name>]
+  session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--crv-compact] [--tags a,b,c] [--token-budget N] [--lean] [--no-briefing] [--agent <name>] [--allow-remote] [--if-stale-min N]
                                    declare context/goal - REQUIRED before any action.
                                    --strict-crv auto-snapshots+diffs before/after every
                                    dom.click/dom.fill/eval/idb.put/idb.delete in this session.
@@ -62,6 +62,18 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    connected, warns (does not block) when the tab's LIVE
                                    IndexedDB version != js/db.js's own DB_VERSION - the tab
                                    has not re-opened the DB since a migration bump.
+                                   The session is pinned to its own agent's origin at this
+                                   moment - a later dom/idb/eval call dispatched while that SAME
+                                   agent name is connected from a DIFFERENT origin is refused
+                                   (confirmed real: an agent silently served two different
+                                   origins/databases across one session). A MUTATING command or
+                                   eval against a non-localhost origin is also refused, unless
+                                   --allow-remote - a stray tab on a real/production site must
+                                   never receive a synthetic write by accident. Neither ever
+                                   blocks on an unknown/missing origin (an older tab).
+                                   --if-stale-min N: if another session is already active and started at least N
+                                   minutes ago, end it first (says so) and start this one; a younger one still
+                                   refuses (probably in flight). Omitted = always refuse. 0 = end any conflict.
   session start ... --auto-snapshot --stores a,b,c
                                    also takes+persists a scoped idb.snapshot right at session
                                    start (unscoped is refused - same 60s timeout risk as an
@@ -148,7 +160,10 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    the response flags how many eval actions looked like writes,
                                    but UI-driven writes get no signal at all here. Prefer
                                    --since-snapshot for those.
-  session cleanup <id> --since-snapshot <snapshotId> [--confirm]
+  session cleanup <id> --since-snapshot <snapshotId> [--confirm] [--agent <name>]
+                                   this mode dispatches a real idb.snapshot/idb.delete to a live
+                                   tab (default agent 'default') - --agent targets a different one,
+                                   e.g. a throwaway sandbox tab started with --agent of its own.
                                    catches EVERY new row added to ANY store since that
                                    snapshot - however it was written (button click, eval,
                                    idb.put, doesn't matter) - by re-snapshotting the same
@@ -351,8 +366,31 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    exactly "idb verify"'s own (see above). If the ACTION itself
                                    fails the whole call fails - no baseline was consumed by a
                                    verify that then couldn't mean anything.
-  idb diff <idA> <idB>            compute + PERSIST the diff between two persisted snapshots.
-  idb diff-golden <name> <idB>    Both cache-aware: if <idB>'s own CONTENT (not id - a fresh
+  crv preflight [--stores a,b,c] [<selector>] [--agent <name>]
+                                   one read-only call replacing the four hand-run before a CRV
+                                   pass (status + db version-check + dom query + idb list): agent
+                                   connectivity/origin/staleness, DB version drift, whether --stores
+                                   exist, whether <selector> is present, and recent console errors
+                                   since this page load; agents[] (all connected agents, tabCollision =
+                                   two tabs took one name in the last 5 min); knownIssueMatches (from an
+                                   optional local known-issues.json, see CONTRIBUTING.md; [] none, null
+                                   unchecked). Never requires an active session, never mutates anything.
+  crv seed <store> <rows-json> [--manifest <path>] [--agent <name>]
+                                   "idb put-many", plus records every stored row's real key into a
+                                   manifest file (default: .webscout-crv-manifest.json in the CWD) -
+                                   replaces hand-tracking synthetic ids across a session's separate
+                                   "idb put" calls. Never mutates the row shape itself (no marker
+                                   field added) - the manifest is the only place "this is synthetic"
+                                   lives.
+  crv cleanup [--manifest <path>] [--agent <name>]
+                                   deletes exactly the ids "crv seed" recorded (via "idb delete-
+                                   many", one call per store), then clears the manifest. Narrower
+                                   than "session cleanup --since-snapshot" by design - only ever
+                                   touches ids this same tool wrote, never a broader diff.
+  idb diff <idA> <idB>            compute + PERSIST the diff between two persisted snapshots -
+  idb diff-golden <name> <idB>    NEVER dispatches to a live tab (--agent is not a param here;
+                                   a diff only ever compares two ALREADY-SAVED snapshots server-side).
+                                   Both cache-aware: if <idB>'s own CONTENT (not id - a fresh
                                    snapshot always gets a new id even when nothing changed) matches
                                    a diff already computed for this golden/pair, the full diff body
                                    is NOT recomputed or re-sent - response carries fromCache:true,

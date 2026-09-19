@@ -361,3 +361,45 @@ test('a ledger with a unique-bytes figure reports its real reduction percentage'
   assert.ok(ledger.refs.total > ledger.refs.unique);
   db.endSession(s.id);
 });
+
+test('startSession ifStaleMin: opt-in, fails closed on a young conflicting session, ends an old one first', () => {
+  const first = db.startSession({ goal: 'stale-flag first', agentName: 'tab-a' });
+
+  // Without the flag: exactly today's refusal, with no stale-flag wording in it.
+  assert.throws(() => db.startSession({ goal: 'no flag' }), (err) => /already active/.test(err.message) && !/if-stale-min/.test(err.message));
+
+  // Too young: refuses, says why, and leaves the running session alone.
+  assert.throws(() => db.startSession({ goal: 'too young', ifStaleMin: 60 }), /already active[\s\S]*younger than --if-stale-min 60/);
+  assert.equal(db.getCurrentSession().id, first.id, 'a refused start must not end anything');
+  assert.equal(db.getSession(first.id).status, 'active');
+
+  // The threshold is real arithmetic on started_at, not just "0 always wins": 59 min old vs a 60
+  // threshold refuses, 61 min old vs 60 succeeds. (Date.now stubbed for this block only.)
+  const realNow = Date.now;
+  try {
+    Date.now = () => realNow() + 59 * 60000;
+    assert.throws(() => db.startSession({ goal: 'still young', ifStaleMin: 60 }), /already active/);
+    Date.now = () => realNow() + 61 * 60000;
+    const replaced = db.startSession({ goal: 'after stale', ifStaleMin: 60 });
+    assert.equal(replaced.autoEndedSession.id, first.id);
+    assert.equal(replaced.autoEndedSession.agent, 'tab-a');
+    assert.ok(replaced.autoEndedSession.ageMin >= 61);
+    assert.match(replaced.autoEndedSession.reason, /if-stale-min 60/);
+    Date.now = realNow;
+    db.endSession(replaced.id);
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(db.getSession(first.id).status, 'ended', 'the stale session really is ended, not just hidden');
+
+  // ifStaleMin 0 succeeds immediately; with no conflict the flag is a no-op (no autoEndedSession).
+  const alone = db.startSession({ goal: 'no conflict', ifStaleMin: 0 });
+  assert.equal(alone.autoEndedSession, undefined);
+  const zero = db.startSession({ goal: 'zero threshold', ifStaleMin: 0 });
+  assert.equal(zero.autoEndedSession.id, alone.id);
+  assert.equal(db.getSession(alone.id).status, 'ended');
+  db.endSession(zero.id);
+
+  assert.throws(() => db.startSession({ goal: 'bad', ifStaleMin: -1 }), /ifStaleMin must be/);
+  assert.throws(() => db.startSession({ goal: 'bad', ifStaleMin: Number.NaN }), /ifStaleMin must be/);
+});

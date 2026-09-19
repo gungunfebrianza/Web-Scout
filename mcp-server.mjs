@@ -35,10 +35,11 @@ import fs from 'node:fs';
 import readline from 'node:readline';
 import {
   request, BASE, netHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, collectNotes, ensureFreshRelayForNewSession,
+  manifestPath, readManifest, writeManifest,
 } from './client.mjs';
 
 const SERVER_NAME = 'web-scout';
-const SERVER_VERSION = '0.25.0'; // bumped alongside docs/web-scout-roadmap.md's V37 entry
+const SERVER_VERSION = '0.27.0'; // bumped alongside docs/web-scout-roadmap.md's V39 entry
 
 // ---------- stdio JSON-RPC framing ----------
 //
@@ -114,13 +115,13 @@ const TOOLS = [
     name: 'webscout_session',
     description: 'Session lifecycle and evidence. A goal MUST be declared (start) before any dom/idb/net/console/eval/page action is accepted; exactly one session is active at a time.\n'
       + 'Actions:\n'
-      + '  start {goal, context?, strictCrv?, strictCrvStores?, crvCompact?, tags?, tokenBudget?, noBriefing?, lean?} - declare a session; becomes the active one. strictCrvStores scopes every strictCrv auto-snapshot (omitting it on a real-size db WILL time out). crvCompact adds a change preview to every strictCrv reply (verify\'s pass shape), not just counts.tokenBudget arms a read guard: past 60% of it reads over ~3000 estimated tokens return their shape (noGuard overrides), past 85% ~1000, rows as {columns, rows}. lean makes read shaping the DEFAULT (tables; a pointer/delta for a repeat of a result you hold; the shape of a body over ~4000 tokens; noGuard gives the body). The reply carries a `briefing` (stores + counts, DB version, tab freshness) unless noBriefing\n'
+      + '  start {goal, context?, strictCrv?, strictCrvStores?, crvCompact?, tags?, tokenBudget?, noBriefing?, lean?, allowRemote?, ifStaleMin?} - declare a session; becomes the active one. ifStaleMin: a conflicting active session at least that many minutes old is ended first (younger still refuses). strictCrvStores scopes every strictCrv auto-snapshot (omitting it on a real-size db WILL time out). crvCompact adds a change preview to every strictCrv reply (verify\'s pass shape), not just counts.tokenBudget arms a read guard: past 60% of it reads over ~3000 estimated tokens return their shape (noGuard overrides), past 85% ~1000, rows as {columns, rows}. lean makes read shaping the DEFAULT (tables; a pointer/delta for a repeat of a result you hold; the shape of a body over ~4000 tokens; noGuard gives the body). The reply carries a `briefing` (stores + counts, DB version, tab freshness) unless noBriefing. Pinned to its origin: a later write/eval refuses if that changed, or is non-local, unless allowRemote\n'
       + '  end {id?, trace?} - end a session (default: the active one); trace also exports it (anonymised) to grow the trace.mjs replay corpus, result.trace: {file, events, reads}\n'
       + '  current {} - the active session, or {active:false}\n'
       + '  list {} - every session, newest first\n'
       + '  show {id} - full detail: actions, snapshots, diffs, qa, console, net\n'
       + '  report {id, format?: "md"|"json", out?, verityPath?} - export a report; out writes a local file instead of returning it\n'
-      + '  cleanup {id, confirm?, sinceSnapshotId?, summary?} - list (confirm:true deletes) rows this session\'s writes left live; dry-run by default; summary: per-store counts instead of row bodies\n'
+      + '  cleanup {id, confirm?, sinceSnapshotId?, summary?, agent?} - list (confirm:true deletes) rows this session\'s writes left live; dry-run by default; summary: per-store counts, not row bodies\n'
       + '  assert {id, checks, agent?} - declarative checks against LIVE state (one check object or an array)\n'
       + '  ask {question, sessionId?} - ask the configured AI backend about a session\'s evidence (optional, see README "Ask AI")\n'
       + '  verity_import {sessionId, label?, path?, result?} - fold a Verity UI Relay scenario-result into the evidence trail (path: local file; result: inline JSON; one required)',
@@ -136,6 +137,8 @@ const TOOLS = [
           briefing: p.noBriefing ? false : undefined,
           lean: p.lean || undefined,
           agent: p.agent,
+          allow_remote: p.allowRemote || undefined,
+          if_stale_min: p.ifStaleMin !== undefined && p.ifStaleMin !== null ? Number(p.ifStaleMin) : undefined,
         });
         // Folds the CLI's separate stderr-only warnOnDbVersionDrift() into
         // the returned result instead - an MCP client has no equivalent of
@@ -183,7 +186,7 @@ const TOOLS = [
         return { content };
       },
       cleanup: (p) => request('POST', `/sessions/${requireField(p, 'id')}/cleanup`, {
-        confirm: !!p.confirm, sinceSnapshotId: p.sinceSnapshotId !== undefined ? Number(p.sinceSnapshotId) : undefined, summary: !!p.summary,
+        confirm: !!p.confirm, sinceSnapshotId: p.sinceSnapshotId !== undefined ? Number(p.sinceSnapshotId) : undefined, summary: !!p.summary, agent: p.agent,
       }),
       assert: (p) => {
         const id = requireField(p, 'id');
@@ -267,6 +270,9 @@ const TOOLS = [
       + '  snapshot {stores?, golden?, where?, since?} - capture + PERSIST -> {id, counts}; golden names it a regression baseline; where scopes every store to matching rows (partial by construction). since: a baseline id - fresh snapshot of that baseline\'s stores returning ONLY what changed\n'
       + '  verify {baseline?, stores?, expect?, allowExtra?, samples?, verbose?} - the verify step of baseline -> action -> verify in ONE call: re-snapshots the baseline\'s stores, diffs, checks expect, replies pass/fail plus rows only for what failed. expect: "notes:+1,tags:same" (+N added, +N+ at least N, -N removed, ~N changed, same) or a JSON array; a changed store not named is "unexpected" and fails unless allowExtra; no expect = nothing may change. baseline: snapshot id, golden name, or omitted for the session\'s newest snapshot\n'
       + '  crv_run {stores, type, params?, expect?, allowExtra?, samples?, verbose?} - snapshot, dispatch {type,params} (not idb.snapshot), verify (above) in one call; action failure fails the call\n'
+      + '  crv_preflight {stores?, selector?} - pre-CRV check: origin/staleness, DB drift, stores/selector exist, console errors (+ knownIssueMatches from an optional local registry), agents[] with tabCollision\n'
+      + '  crv_seed {store, rows, manifest?} - put_many + records stored keys into a manifest (default: dotfile in CWD) for crv_cleanup\n'
+      + '  crv_cleanup {manifest?} - delete_many every id crv_seed recorded, clears the manifest\n'
       + '  diff {idA, idB} - persisted diff of two snapshots\n'
       + '  diff_golden {name, idB} - diff a named golden snapshot (any session) against idB\n'
       + '  restore {snapshotId?, golden?} - PUT a snapshot\'s rows back (never deletes)\n'
@@ -293,6 +299,32 @@ const TOOLS = [
         agent: p?.agent, stores: requireField(p, 'stores'), type: requireField(p, 'type'), params: p?.params ?? {},
         expect: p?.expect, allowExtra: p?.allowExtra || undefined, verbose: p?.verbose || undefined, samples: numOrUndef(p?.samples),
       }),
+      crv_preflight: (p) => request('POST', '/crv/preflight', { agent: p?.agent, stores: p?.stores, selector: p?.selector }),
+      crv_seed: async (p) => {
+        const store = requireField(p, 'store');
+        const result = await sendCmd('idb.putMany', { store, rows: requireField(p, 'rows') }, p?.agent);
+        const file = manifestPath(p?.manifest);
+        const manifest = readManifest(file);
+        const ids = (result.rows || []).map((row) => (Array.isArray(result.keyPath) ? result.keyPath.map((k) => row?.[k]) : row?.[result.keyPath]));
+        let entry = manifest.entries.find((e) => e.store === store);
+        if (!entry) { entry = { store, ids: [] }; manifest.entries.push(entry); }
+        entry.ids.push(...ids);
+        writeManifest(file, manifest);
+        return { ...result, manifest: file, manifestIds: ids };
+      },
+      crv_cleanup: async (p) => {
+        const file = manifestPath(p?.manifest);
+        const manifest = readManifest(file);
+        if (!manifest.entries.length) return { cleaned: [], note: `no manifest entries at ${file} - nothing to clean up` };
+        const cleaned = [];
+        for (const entry of manifest.entries) {
+          if (!entry.ids.length) continue;
+          const result = await sendCmd('idb.deleteMany', { store: entry.store, keys: entry.ids }, p?.agent);
+          cleaned.push({ store: entry.store, ...result });
+        }
+        try { fs.unlinkSync(file); } catch { /* already gone, or never written */ }
+        return { cleaned, manifest: file };
+      },
       diff: (p) => request('POST', '/state/diff', { idA: Number(requireField(p, 'idA')), idB: Number(requireField(p, 'idB')) }),
       diff_golden: (p) => request('POST', '/state/diff', { golden: requireField(p, 'name'), idB: Number(requireField(p, 'idB')) }),
       restore: (p) => request('POST', '/state/restore', { agent: p?.agent, snapshotId: p?.snapshotId !== undefined ? Number(p.snapshotId) : undefined, golden: p?.golden }),

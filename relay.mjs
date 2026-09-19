@@ -62,7 +62,7 @@ const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
 const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 // Bumped alongside docs/web-scout-roadmap.md's latest "## VN" entry - purely
 // informational (the dashboard's About panel), never read by any behavior.
-const WEBSCOUT_VERSION = '0.24.0'; // bumped alongside docs/web-scout-roadmap.md's V37 entry
+const WEBSCOUT_VERSION = '0.26.0'; // bumped alongside docs/web-scout-roadmap.md's V39 entry
 const COMMAND_TIMEOUT_MS = 15000; // interactive dom/net/eval round trips
 const SNAPSHOT_TIMEOUT_MS = 60000; // bulk idb.snapshot reads can be large
 // Short, independent budgets for two round trips that must never inherit
@@ -267,7 +267,10 @@ class HttpError extends Error {
   }
 }
 
-const agents = new Map(); // name -> { socket, buffer }
+const agents = new Map(); // name -> { socket, buffer, connectedAt, origin, replacedCount, lastReplacedAt, ... }
+// A replacement this recent is a live fight between two tabs sharing one agent name; an older one
+// is history (a tab reloaded, or a stale tab finally closed) and shouldn't keep raising the alarm.
+const TAB_COLLISION_WINDOW_MS = 5 * 60 * 1000;
 const pending = new Map(); // command id -> { resolve, reject, timer, agentName }
 let nextCommandId = 1;
 const sseClients = new Set(); // open dashboard EventSource responses
@@ -407,7 +410,47 @@ function sendToAgent(obj, agentName) {
 
 // ---------- Command <-> agent round trip ----------
 
+// origin.hostname, tolerant of a malformed/legacy origin string (a tab
+// connected before this round's inject.js sends none, handled by the null
+// check at each call site, never here).
+function safeHostname(origin) {
+  try { return new URL(origin).hostname; } catch { return null; }
+}
+
+// The two safety checks this round's real CRV incident named directly: (1) a
+// session pinned to the origin its own agent reported at "session start" now
+// refuses a command dispatched while that SAME agent name is connected from a
+// DIFFERENT origin (the 127.0.0.1-vs-localhost mixup that went undetected for
+// ~68 calls); (2) a MUTATING command (or eval) refuses against a non-local
+// origin unless the session opted in - a stray tab on a real/production site
+// must never receive a synthetic write. Both are advisory-strength by this
+// tool's own non-goal ("no authorization boundary between agents") - null/
+// unknown origin never blocks, and (2) has an explicit opt-out
+// (`session start --allow-remote`), never a hard wall nothing can lift.
+// Reads the CURRENT session fresh (not threaded as a parameter) so this
+// fires for every real dispatch path (dispatchTracked's /command and
+// /crv/run, but also /state/snapshot's and /state/restore's own direct
+// dispatchCommand calls) rather than only the one caller that happens to
+// have a `session` object in scope - a session-less dispatch (briefing,
+// ping, before any "session start") has no pin to check against and is
+// never blocked here.
+function guardDispatchOrigin(type, agentName) {
+  const session = dbApi.getCurrentSession();
+  if (!session) return;
+  const liveOrigin = agents.get(agentName)?.origin ?? null;
+  if (session.pinned_origin && liveOrigin && session.pinned_origin !== liveOrigin) {
+    throw new HttpError(409, `this session (#${session.id}) was pinned to ${session.pinned_origin} at "session start", but agent '${agentName}' is currently connected from ${liveOrigin} - a full navigation (not a same-page route change) moved it to a different origin, which is also a different IndexedDB. Start a new session against this origin, or reconnect the tab back to ${session.pinned_origin} first.`);
+  }
+  if ((MUTATING_TYPES.has(type) || type === 'eval') && !session.allow_remote) {
+    const hostname = liveOrigin ? safeHostname(liveOrigin) : null;
+    if (hostname && hostname !== 'localhost' && hostname !== '127.0.0.1') {
+      throw new HttpError(403, `refusing to run '${type}' (a write/eval) against a non-local origin (${liveOrigin}) on agent '${agentName}' - this looks like a real site, not a local dev app. If this is genuinely intended, start the session with --allow-remote.`);
+    }
+  }
+}
+
 function dispatchCommand(type, params, timeoutMs = COMMAND_TIMEOUT_MS, agentName = DEFAULT_AGENT) {
+  guardDispatchOrigin(type, agentName);
   return new Promise((resolve, reject) => {
     const id = nextCommandId;
     nextCommandId += 1;
@@ -781,6 +824,106 @@ function requireActiveSession() {
   return session;
 }
 
+// Nothing under an ended session can change again - an unbounded relay process would otherwise keep
+// every past session's read-result cache and mutation counter alive in memory forever. Shared by
+// the explicit "session end" route and by "session start --if-stale-min"'s auto-end, so a session
+// ended either way is released the same way.
+function dropSessionMemory(sessionId) {
+  readResultCache.delete(sessionId);
+  sessionMutationCounters.delete(sessionId);
+  sessionCacheAwarenessNudged.delete(sessionId);
+  sessionCacheHitBytes.delete(sessionId);
+  readPipeline.endSession(sessionId);
+  lastReportedSessionTokens.delete(sessionId);
+}
+
+// ---------- Known-issues registry (opt-in, operator-maintained) ----------
+//
+// A per-checkout JSON file of already-diagnosed failure signatures, so a console error that has
+// been root-caused once is named (with its remediation) by "crv preflight" instead of being
+// rediscovered from scratch. Deliberately mechanism only: nothing ships in it, the file is
+// untracked (see .gitignore), and its absence is normal - the feature is simply inert. Shape, see
+// known-issues.example.json: an array of { id, signature, description, remediation }. `signature`
+// is a plain substring, or "/pattern/flags" for a regex. Read on every preflight (a small file, and
+// an operator's edit takes effect without restarting the relay). WEBSCOUT_KNOWN_ISSUES points
+// elsewhere - the tests' own isolation, so they never read or write a real operator's file.
+const KNOWN_ISSUES_PATH = process.env.WEBSCOUT_KNOWN_ISSUES || path.join(__dirname, 'known-issues.json');
+
+function compileSignature(signature) {
+  const asRegex = /^\/(.+)\/([a-z]*)$/s.exec(signature);
+  if (asRegex) {
+    // g/y make RegExp.test stateful across calls (lastIndex) - never wanted for a yes/no match.
+    const re = new RegExp(asRegex[1], asRegex[2].replace(/[gy]/g, ''));
+    return (text) => re.test(text);
+  }
+  return (text) => text.includes(signature);
+}
+
+// null = no file (inert, not an error). Throws on an unreadable/unparseable/non-array file so the
+// caller can say "could not check" instead of pretending nothing matched.
+function loadKnownIssues() {
+  let raw;
+  try {
+    raw = fs.readFileSync(KNOWN_ISSUES_PATH, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw new Error(`known-issues file unreadable: ${err.message}`);
+  }
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch (err) { throw new Error(`known-issues file is not valid JSON: ${err.message}`); }
+  if (!Array.isArray(parsed)) throw new Error('known-issues file must be a JSON array of { id, signature, description, remediation }');
+  const issues = [];
+  const warnings = [];
+  parsed.forEach((entry, i) => {
+    if (!entry || typeof entry.id !== 'string' || typeof entry.signature !== 'string' || !entry.signature) {
+      warnings.push(`entry ${i} skipped: needs a string id and a non-empty string signature`);
+      return;
+    }
+    try {
+      issues.push({ id: entry.id, description: entry.description ?? null, remediation: entry.remediation ?? null, matches: compileSignature(entry.signature) });
+    } catch (err) {
+      warnings.push(`entry ${i} (${entry.id}) skipped: bad signature regex: ${err.message}`);
+    }
+  });
+  return { issues, warnings };
+}
+
+// Always an array when the check could run (empty = "checked, none matched"); null only when it
+// could not (unreadable file, or loaded issues but no console result to match them against).
+function matchKnownIssues(bootErrors, report) {
+  let loaded;
+  try {
+    loaded = loadKnownIssues();
+  } catch (err) {
+    report.knownIssuesCheckError = err.message;
+    return null;
+  }
+  if (!loaded) return [];
+  if (loaded.warnings.length) report.knownIssuesWarnings = loaded.warnings;
+  if (!loaded.issues.length) return [];
+  if (!Array.isArray(bootErrors)) return null;
+  const texts = bootErrors.map((e) => `${e?.message ?? ''}\n${e?.stack ?? ''}`);
+  return loaded.issues
+    .filter((issue) => texts.some((text) => issue.matches(text)))
+    .map(({ id, description, remediation }) => ({ id, description, remediation }));
+}
+
+// One row per currently-connected agent, so a single preflight can answer "is some tab fighting
+// another over this agent name" instead of several manual `eval location.href` round trips.
+function connectedAgentsSummary() {
+  const now = Date.now();
+  return [...agents.entries()]
+    .filter(([, entry]) => entry.socket && !entry.socket.destroyed)
+    .map(([name, entry]) => {
+      const replacedCount = entry.replacedCount ?? 0;
+      const msSinceLastReplace = entry.lastReplacedAt ? now - entry.lastReplacedAt : null;
+      return {
+        name, origin: entry.origin ?? null, connectedAt: entry.connectedAt, replacedCount, msSinceLastReplace,
+        tabCollision: replacedCount > 0 && msSinceLastReplace !== null && msSinceLastReplace < TAB_COLLISION_WINDOW_MS,
+      };
+    });
+}
+
 // ---------- Ask AI ----------
 
 async function handleAsk(sessionIdInput, question) {
@@ -866,6 +1009,10 @@ function agentsDetail() {
       // comment. waitForReconnect uses a CHANGED loadId, not just a later
       // connectedAt, as its proof of an actual reload.
       loadId: a.loadId ?? null,
+      // Set once per real navigation (same lifecycle as loadId, above) - a tab
+      // predating this round's inject.js sends none, which is reported as null,
+      // never guessed. See dispatchTracked's origin-pin check.
+      origin: a.origin ?? null,
       ...agentBuildStatus(a),
     }));
 }
@@ -1274,11 +1421,21 @@ const routes = [
     // retrying and investigate instead.
     method: 'GET',
     pattern: /^\/health$/,
-    handler: async () => ({
-      status: 'ok', agents_connected: connectedAgentNames(), agents_detail: agentsDetail(), stale_agents: staleAgentNames(), active_session: dbApi.getCurrentSession(), db_version_drift: await getDbVersionDrift(), pending_command_count: pending.size,
-      // stale_source_files non-empty = this process is running OLDER code than what is on disk - restart it (`relay restart`).
-      relay: { pid: process.pid, started_at: RELAY_STARTED_AT.toISOString(), uptime_seconds: Math.round((Date.now() - RELAY_STARTED_AT.getTime()) / 1000), stale_source_files: getStaleSourceFiles(), events_24h: summarizeRelayEvents(readRelayEvents(PORT)) },
-    }),
+    handler: async () => {
+      const detail = agentsDetail();
+      // Real incident this round: two agent connections (same relay, different
+      // agent names) reported two different origins, and nothing surfaced it
+      // until a mutating command had already landed against the wrong one.
+      // Informational only - never refuses anything by itself (see
+      // dispatchTracked for the actual per-session guard).
+      const distinctOrigins = [...new Set(detail.map((a) => a.origin).filter(Boolean))];
+      return {
+        status: 'ok', agents_connected: connectedAgentNames(), agents_detail: detail, stale_agents: staleAgentNames(), active_session: dbApi.getCurrentSession(), db_version_drift: await getDbVersionDrift(), pending_command_count: pending.size,
+        ...(distinctOrigins.length > 1 ? { origin_conflict: `connected agents report ${distinctOrigins.length} different origins (${distinctOrigins.join(', ')}) - double-check which agent a command actually targets before mutating anything` } : {}),
+        // stale_source_files non-empty = this process is running OLDER code than what is on disk - restart it (`relay restart`).
+        relay: { pid: process.pid, started_at: RELAY_STARTED_AT.toISOString(), uptime_seconds: Math.round((Date.now() - RELAY_STARTED_AT.getTime()) / 1000), stale_source_files: getStaleSourceFiles(), events_24h: summarizeRelayEvents(readRelayEvents(PORT)) },
+      };
+    },
   },
   {
     // Powers the dashboard's Settings dialog (Server config + About tabs).
@@ -1370,6 +1527,10 @@ const routes = [
     pattern: /^\/sessions$/,
     handler: async (req) => {
       const body = await readJsonBody(req);
+      const startingAgentName = body.agent || DEFAULT_AGENT;
+      if (body.if_stale_min !== undefined && body.if_stale_min !== null && !(Number.isFinite(body.if_stale_min) && body.if_stale_min >= 0)) {
+        throw new HttpError(400, 'if_stale_min must be a number of minutes >= 0');
+      }
       const session = dbApi.startSession({
         goal: body.goal,
         context: body.context,
@@ -1379,7 +1540,22 @@ const routes = [
         tokenBudget: Number.isFinite(body.token_budget) ? Number(body.token_budget) : undefined,
         lean: !!body.lean,
         strictCrvCompact: !!body.crv_compact,
+        // Best-effort - null when no agent is connected yet under this name
+        // (a caller who hasn't opened the tab, or will connect a different
+        // one). See dispatchTracked's guardDispatchOrigin for the check this
+        // enables, and "session start --allow-remote" for the opt-out below.
+        pinnedOrigin: agents.get(startingAgentName)?.origin ?? null,
+        agentName: startingAgentName,
+        allowRemote: !!body.allow_remote,
+        ifStaleMin: body.if_stale_min ?? undefined,
       });
+      if (session.autoEndedSession) {
+        // The db layer already ended the row; this drops the same per-session memory the explicit
+        // "session end" route does, and says plainly in the relay log why a session vanished.
+        dropSessionMemory(session.autoEndedSession.id);
+        sessionSavingsTally.delete(session.autoEndedSession.id); // the explicit route reads this for its receipt first; nobody will here
+        log(`session #${session.autoEndedSession.id} ("${session.autoEndedSession.goal}", agent '${session.autoEndedSession.agent ?? '?'}') ${session.autoEndedSession.reason}; started session #${session.id}`);
+      }
       broadcastUpdate('session', null);
       openDashboardInBrowser();
       maybeAutoCalibrate();
@@ -1409,12 +1585,7 @@ const routes = [
       // Nothing under an ended session can change again - an unbounded relay
       // process would otherwise keep every past session's read-result cache
       // and mutation counter alive in memory forever for no benefit.
-      readResultCache.delete(sessionId);
-      sessionMutationCounters.delete(sessionId);
-      sessionCacheAwarenessNudged.delete(sessionId);
-      sessionCacheHitBytes.delete(sessionId);
-      readPipeline.endSession(sessionId);
-      lastReportedSessionTokens.delete(sessionId);
+      dropSessionMemory(sessionId);
       try { dbApi.snapshotSavings('storage', dbApi.getTokenSavingsReport().byKind.storage.bytesSaved); } catch { /* the receipt never depends on it */ }
       const savingsReceipt = { ...(sessionSavingsTally.get(sessionId) ?? { scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0, shapedCalls: 0, shapedBytes: 0 }), deliveredEstTokens };
       sessionSavingsTally.delete(sessionId);
@@ -2231,6 +2402,78 @@ const routes = [
   },
 
   {
+    // One call replacing the four hand-run before every CRV pass a real
+    // session this round needed (status, db version-check, dom query, idb
+    // list) to answer "is this even the right tab, in a state worth
+    // testing": agent connectivity/origin/staleness, DB version drift,
+    // whether the requested stores exist, whether a target selector is
+    // present, and recent console errors on this page load. Read-only, never
+    // requires an active session (the whole point is answering this BEFORE
+    // deciding whether it's safe to start one) and never mutates anything.
+    method: 'POST',
+    pattern: /^\/crv\/preflight$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      const agentName = body.agent || DEFAULT_AGENT;
+      const stores = Array.isArray(body.stores) ? body.stores : [];
+      const selector = typeof body.selector === 'string' && body.selector.trim() ? body.selector.trim() : null;
+
+      const agentEntry = agents.get(agentName);
+      const connected = !!(agentEntry?.socket && !agentEntry.socket.destroyed);
+      // `agents` covers every connected agent, not only the requested one, and rides on every reply
+      // shape below (including "not connected") - a tab-name collision is exactly the case where the
+      // requested agent's own row alone can look fine.
+      const report = { agent: agentName, connected, origin: agentEntry?.origin ?? null, agents: connectedAgentsSummary() };
+      if (!connected) {
+        return {
+          ...report, ok: false,
+          reason: `no web-scout agent named '${agentName}' connected - open the target page with the activation flag first${agentName !== DEFAULT_AGENT ? ` (?webscout_name=${agentName})` : ''}`,
+        };
+      }
+      Object.assign(report, agentBuildStatus(agentEntry));
+      report.dbVersionDrift = await getDbVersionDrift();
+      if (report.agentStale) {
+        return { ...report, ok: false, reason: 'this tab runs an older in-page agent than inject.js on disk - reload it ("page reload --hard") before relying on any live check below' };
+      }
+
+      try {
+        const list = await dispatchCommand('idb.list', {}, BRIEFING_TIMEOUT_MS, agentName);
+        const existingStores = new Set(list?.stores ?? Object.keys(list?.counts ?? {}));
+        report.storesExist = Object.fromEntries(stores.map((s) => [s, existingStores.has(s)]));
+        report.missingStores = stores.filter((s) => !existingStores.has(s));
+      } catch (err) {
+        report.storesExist = null;
+        report.storesCheckError = err.message;
+      }
+
+      if (selector) {
+        try {
+          const query = await dispatchCommand('dom.query', { selector }, BRIEFING_TIMEOUT_MS, agentName);
+          report.selectorPresent = !!query?.found;
+        } catch (err) {
+          report.selectorPresent = null;
+          report.selectorCheckError = err.message;
+        }
+      }
+
+      // Best-effort, honestly scoped: this is the tab's own in-page ring buffer
+      // (inject.js's consoleLog), reset on every real navigation - it answers
+      // "any console.error since this page last loaded", never further back,
+      // and is never faked as an empty [] when the check itself failed.
+      try {
+        const consoleResult = await dispatchCommand('console.log', { level: 'error' }, BRIEFING_TIMEOUT_MS, agentName);
+        report.bootErrors = consoleResult?.entries ?? [];
+      } catch (err) {
+        report.bootErrors = null;
+        report.bootErrorsCheckError = err.message;
+      }
+      report.knownIssueMatches = matchKnownIssues(report.bootErrors, report);
+
+      report.ok = !(report.missingStores?.length) && (selector ? report.selectorPresent !== false : true) && !(report.bootErrors?.length);
+      return report;
+    },
+  },
+  {
     // The verify half of baseline -> action -> verify in ONE call: re-snapshot the
     // baseline's own stores, diff, check the expectations (crv-verify.mjs), and
     // answer in a few lines - pass/fail, what else changed, and rows only for the
@@ -2535,6 +2778,7 @@ server.on('upgrade', (req, socket) => {
   const agentName = searchParams.get('name') || DEFAULT_AGENT;
   const loadId = searchParams.get('loadId') || null;
   const build = searchParams.get('build') || null;
+  const origin = searchParams.get('origin') || null;
   const accept = crypto.createHash('sha1').update(key + WS_MAGIC).digest('base64');
   socket.write(
     'HTTP/1.1 101 Switching Protocols\r\n'
@@ -2546,11 +2790,20 @@ server.on('upgrade', (req, socket) => {
   // A new connection under the SAME name replaces the prior one - unchanged
   // behavior for the default single-tab case. Different names coexist.
   const existing = agents.get(agentName);
-  if (existing && !existing.socket.destroyed) {
+  const replacingLive = !!(existing && !existing.socket.destroyed);
+  if (replacingLive) {
     log(`replacing previously connected agent '${agentName}'`);
     existing.socket.destroy();
   }
-  agents.set(agentName, { socket, buffer: Buffer.alloc(0), connectedAt: Date.now(), lastAckAt: null, loadId, build });
+  // Collision bookkeeping, surfaced by "crv preflight": two real tabs connecting under one name take
+  // the connection from each other, and from the caller's side that looks like the agent's origin
+  // flip-flopping between calls. The counters carry over from the entry being replaced so a
+  // back-and-forth fight accumulates instead of resetting to 1 each time.
+  agents.set(agentName, {
+    socket, buffer: Buffer.alloc(0), connectedAt: Date.now(), lastAckAt: null, loadId, build, origin,
+    replacedCount: (existing?.replacedCount ?? 0) + (replacingLive ? 1 : 0),
+    lastReplacedAt: replacingLive ? Date.now() : (existing?.lastReplacedAt ?? null),
+  });
   log(`agent '${agentName}' connected from`, req.socket.remoteAddress);
   broadcastUpdate('agent', null);
 
