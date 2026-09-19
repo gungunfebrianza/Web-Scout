@@ -2684,12 +2684,9 @@ now says this explicitly. `token-report --session <id>`'s new `byIntent` is only
 `session intents`/transcript import has actually run for that session - an unnarrated session still
 gets exactly one row, the null-intent bucket.
 
-Versions: relay 0.23.0, MCP server 0.24.0. Full suite: 373 tests (up from 350 - the 3 recovered
-files plus new coverage), 3 skipped (2 need a live tab, 1 - committed calibration - still open,
-same as every prior round). One pre-existing, documented Windows-only flake remains
-(`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` at process exit, landing on whichever
-file happens to finish near the full run's end - not new this round, not caused by anything here,
-and already named in `CONTRIBUTING.md`'s own `spawnClean`/`isUp` paragraph).
+**Also fixed: the "documented Windows libuv flake" was a real, reproducible bug in one file, not background noise (6).** `auto-calibrate.test.mjs`'s live-relay case failed `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` in 7-10 of 10 runs under `--test-force-exit` (CI's command) - it had been written off as the flake `CONTRIBUTING.md` already names, and it blocked `sync-web-scout.mjs --push` (which refuses on any failing test). Bisected by running the file with and without the live case (only the live case triggers it, only under force-exit) and swapping `fetch` for `node:http` with `agent: false`: 0 failures in 10 runs afterwards. Lesson: a known flake label is a reason to measure a failure rate, not to stop looking.
+
+Versions: relay 0.23.0, MCP server 0.24.0. Full suite: 356 tests, 3 skipped (2 need a live tab, 1 - committed calibration - still open, same as every prior round).
 
 ## Explicit non-goals
 
