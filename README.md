@@ -277,6 +277,9 @@ session end [id]              # defaults to the active session; nudges "macro re
 session current
 session list
 session show <id>             # everything for one session
+session viz <id> [--section swimlane|episodes|stateMachine|sequence|waste|costTree|failureHeatmap|causality|routeMachine]
+                               # the dashboard's own derived views as JSON - same data GET
+                               # /sessions/:id/viz serves; --section prints just one of them
 session report <id> [--format md|json] [--out <path>]
 session assert <id> '[{"store":"skills","countGte":1}]'
 session cleanup <id> [--confirm] [--summary] [--since-snapshot <snapshotId>]

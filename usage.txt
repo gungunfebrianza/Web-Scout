@@ -127,6 +127,9 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    imports that Verity scenario-result file into the
                                    session first, so it appears in the report's own
                                    "Verity UI checks" section (see "verity import" below)
+  session viz <id> [--section swimlane|episodes|stateMachine|sequence|waste|costTree|failureHeatmap|causality|routeMachine]
+                                   the dashboard's own derived views as JSON (same data GET
+                                   /sessions/:id/viz serves) - --section prints just one of them
   session cleanup <id> [--confirm] [--summary]
                                    --summary collapses pendingDeletes/deleted/failed/changedNotDeleted
                                    down to a per-store row COUNT instead of full row bodies - a dry-run

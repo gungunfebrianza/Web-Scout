@@ -345,8 +345,10 @@
   /* ---- route / page FSM ---- */
   .viz-svg .rm-title { fill: var(--ink-primary); font-size: 11px; font-weight: 600; }
   .viz-svg .rm-sub { fill: var(--ink-muted); font-size: 9px; }
+  .rm-node[data-reveal] { cursor: pointer; }
   .rm-node rect.rm-box { fill: var(--bg-panel-raised); stroke: var(--accent-alien); stroke-width: 1.2; }
   .rm-node.current rect.rm-box { stroke: var(--accent-predator); stroke-width: 2; }
+  .rm-edge[data-reveal] { cursor: pointer; }
   .rm-edge path { fill: none; stroke: var(--accent-alien); stroke-width: 1.4; }
   .rm-edge.selfloop path { stroke: var(--accent-predator); stroke-dasharray: 4 3; }
 
@@ -355,6 +357,7 @@
   .heatmap-table th, .heatmap-table td { border: 1px solid var(--border-hud); padding: 3px 6px; white-space: nowrap; }
   .heatmap-table th { position: sticky; top: 0; background: var(--bg-panel); }
   .heat-cell { text-align: center; color: var(--ink-primary); cursor: help; }
+  .heat-cell[data-reveal] { cursor: pointer; }
   .heat-cell.heat-empty { color: var(--ink-muted); background: var(--bg-panel-inset) !important; }
   .selector-graph-svg text { font-size: 10px; fill: var(--ink-muted); font-family: var(--font-mono); }
   .selector-graph-svg .sg-node-type { fill: var(--accent-info); }
@@ -655,6 +658,13 @@
   </section>
 </div>
 
+<section class="hud-section hud-scroll-col" id="wasteBySessionSection">
+<h2>Wasteful sessions</h2>
+<div class="muted">sessions ranked by share of calls that bought nothing (a failure never retried, a duplicate read that came back unchanged, a no-op write) - the per-session Waste panel's own number, across every session at once (5+ calls only)</div>
+<div class="hud-scroll-body" id="wasteBySessionContainer"></div>
+<div id="wasteBySessionEmpty" class="empty" hidden>No sessions with 5+ calls yet.</div>
+</section>
+
 <section class="hud-section" id="burnSection">
   <h2>Token burn, all sessions</h2>
   <div class="muted">cumulative estimated tokens across every session, chronological - a red dot marks a session that finished over its own declared budget</div>
@@ -905,7 +915,7 @@
 
   <section class="hud-section" id="routeMachineSection">
   <h2>Route / page FSM</h2>
-  <div class="viz-note">each box is a distinct page/route (by pathname + hash); each arrow is a click that changed it. Built from dom.click's own before/after href - the only navigation signal this tool captures, so a page changed by anything else (a redirect, another tab) will not appear.</div>
+  <div class="viz-note">each box is a distinct page/route (by pathname + hash); each arrow is a click that changed it. Built from dom.click's own before/after href - the only navigation signal this tool captures, so a page changed by anything else (a redirect, another tab) will not appear. Click a box or an arrow to jump to a click that touched it.</div>
   <div class="viz-scroll" id="routeMachineBody"></div>
   <div id="routeMachineStats" class="viz-stats"></div>
   <div id="routeMachineEmpty" class="empty" hidden>No page navigation seen yet - either the session never clicked a link that changed the URL, or it hasn't clicked anything.</div>
@@ -945,7 +955,7 @@
 
   <section class="hud-section" id="failureHeatmapSection">
   <h2>Failure heatmap (this session)</h2>
-  <div class="viz-note">call type &times; time bucket, within this session - where in the timeline failures clustered. (The other "Failure heatmap" panel below compares across the last 15 sessions instead.)</div>
+  <div class="viz-note">call type &times; time bucket, within this session - where in the timeline failures clustered. (The other "Failure heatmap" panel below compares across the last 15 sessions instead.) Click a cell to jump to one of its calls.</div>
   <div class="hud-scroll-body" id="failureHeatmapBody"></div>
   <div id="failureHeatmapStats" class="viz-stats"></div>
   <div id="failureHeatmapEmpty" class="empty" hidden>No actions recorded yet.</div>
@@ -1386,7 +1396,11 @@ async function refreshSessionPicker() {
   }
   el('noSession').hidden = true;
   el('sessionPanel').hidden = false;
-  const wanted = prev && filtered.some((s) => String(s.id) === prev) ? prev : String(filtered[0].id);
+  // A #session=<id> link (see parseHash/copyPanelLink) wins once, over both the previous
+  // selection and the newest-first default - that is the entire point of sharing one.
+  const fromLink = pendingSessionId != null && filtered.some((s) => String(s.id) === String(pendingSessionId)) ? String(pendingSessionId) : null;
+  const wanted = fromLink ?? (prev && filtered.some((s) => String(s.id) === prev) ? prev : String(filtered[0].id));
+  if (fromLink) pendingSessionId = null; // consumed
   picker.value = wanted;
   currentSessionId = Number(wanted);
 }
@@ -1470,7 +1484,8 @@ function computeStats() {
   const agentsConnected = lastHealth?.agents_connected?.length ?? 0;
   const totalEstTokens = lastTokenReport?.totalEstTokens ?? 0;
   const budget = lastSessionFull?.token_budget;
-  return { totalActions, failRate, consoleErrors, netCalls, agentsConnected, totalEstTokens, budget };
+  const waste = lastViz?.waste?.totals ?? null;
+  return { totalActions, failRate, consoleErrors, netCalls, agentsConnected, totalEstTokens, budget, waste };
 }
 
 // Ring gauge for the Est. tokens tile - a circular progress ring reads
@@ -1499,13 +1514,21 @@ function renderStatStrip() {
   const tokenTileBody = s.budget
     ? `<div class="row" style="gap:8px; flex-wrap:nowrap;">${gaugeRingHtml(s.totalEstTokens / s.budget, tokenBand)}<div><div class="hud-tile-label">Est. tokens</div><div class="hud-tile-value">${s.totalEstTokens}</div><div class="muted" style="font-size:10px;">of ${s.budget}</div></div></div>`
     : `<div class="hud-tile-label">Est. tokens</div><div class="hud-tile-value">${s.totalEstTokens}</div>`;
+  // Waste tile - the Waste panel's own wastePct, always visible here instead of only once that
+  // panel (further down the page, often collapsed) is scrolled to. Same tokenBudget-style banding.
+  const wasteBand = s.waste && s.waste.calls ? (s.waste.wastePct < 0.1 ? 'ok' : s.waste.wastePct < 0.3 ? 'warn' : 'fail') : '';
+  const wasteHint = s.waste && s.waste.calls
+    ? `${s.waste.wastedCalls} of ${s.waste.calls} call(s) bought nothing (a failure never retried, a duplicate read, a no-op write) - see the Waste panel.`
+    : 'Share of this session\'s calls that bought nothing - see the Waste panel.';
+  const wasteValue = s.waste && s.waste.calls ? `${Math.round(s.waste.wastePct * 100)}%` : '–';
   el('hudStatStrip').innerHTML = `
     <div class="hud-tile" data-hint="Total actions run in this session so far."><div class="hud-tile-label">Actions</div><div class="hud-tile-value">${s.totalActions}</div></div>
     <div class="hud-tile hud-tile-${band}" data-hint="Failed actions / total actions this session."><div class="hud-tile-label">Fail rate</div><div class="hud-tile-value">${s.failRate.toFixed(1)}%</div></div>
     <div class="hud-tile" data-hint="Console messages logged at error/uncaught/unhandledrejection level."><div class="hud-tile-label">Console errors</div><div class="hud-tile-value">${s.consoleErrors}</div></div>
     <div class="hud-tile" data-hint="Network requests captured this session."><div class="hud-tile-label">Net calls</div><div class="hud-tile-value">${s.netCalls}</div></div>
     <div class="hud-tile" data-hint="Browser agents currently connected to the relay."><div class="hud-tile-label">Agents</div><div class="hud-tile-value">${s.agentsConnected}</div></div>
-    <div class="hud-tile ${tokenBand ? `hud-tile-${tokenBand}` : ''}" data-hint="${tokenHint}">${tokenTileBody}</div>`;
+    <div class="hud-tile ${tokenBand ? `hud-tile-${tokenBand}` : ''}" data-hint="${tokenHint}">${tokenTileBody}</div>
+    <div class="hud-tile ${wasteBand ? `hud-tile-${wasteBand}` : ''}" data-hint="${esc(wasteHint)}"><div class="hud-tile-label">Waste</div><div class="hud-tile-value">${wasteValue}</div></div>`;
 }
 
 function renderSparkline() {
@@ -2862,6 +2885,7 @@ async function refreshViz(force = false) {
   renderCostTree();
   renderFailureHeatmap();
   paintWhyCells();
+  renderStatStrip(); // the always-visible Waste tile reads lastViz.waste - update it too
   for (const id of VIZ_PANELS) panelTick(id, true);
   return true;
 }
@@ -3411,13 +3435,15 @@ function renderRouteMachine() {
   parts.push('<defs><marker id="rmArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--accent-alien)"/></marker></defs>');
   for (const { e, d, lx, ly } of g.edges) {
     const tip = `${e.from} -> ${e.to} - ${e.count} navigation(s)`;
-    parts.push(`<g class="rm-edge${e.from === e.to ? ' selfloop' : ''}"><path d="${d}" marker-end="url(#rmArrow)"/><text class="seq-label" x="${lx}" y="${ly}" text-anchor="middle">${e.count > 1 ? `&times;${e.count}` : ''}</text><title>${esc(tip)}</title></g>`);
+    const reveal = e.actionIds?.length ? ` data-reveal="${e.actionIds[e.actionIds.length - 1]}"` : '';
+    parts.push(`<g class="rm-edge${e.from === e.to ? ' selfloop' : ''}"${reveal}><path d="${d}" marker-end="url(#rmArrow)"/><text class="seq-label" x="${lx}" y="${ly}" text-anchor="middle">${e.count > 1 ? `&times;${e.count}` : ''}</text><title>${esc(tip)}</title></g>`);
   }
   m.nodes.forEach((n, i) => {
     const x = g.X(i);
     const cls = ['rm-node', n.id === m.current ? 'current' : ''].filter(Boolean).join(' ');
     const tip = `${n.route} - visited ${n.visits}x - e.g. ${n.sample}`;
-    parts.push(`<g class="${cls}" transform="translate(${x},${g.T})"><rect class="rm-box" width="${RM.nodeW}" height="${RM.nodeH}" rx="3"/><text class="rm-title" x="8" y="18">${esc(clip(n.route, 20))}</text><text class="rm-sub" x="8" y="33">visited ${n.visits}&times;</text>${n.id === m.current ? `<text class="rm-sub" x="${RM.nodeW - 8}" y="18" text-anchor="end" style="fill:var(--accent-predator)">NOW</text>` : ''}<title>${esc(tip)}</title></g>`);
+    const reveal = n.actionIds?.length ? ` data-reveal="${n.actionIds[n.actionIds.length - 1]}"` : '';
+    parts.push(`<g class="${cls}"${reveal} transform="translate(${x},${g.T})"><rect class="rm-box" width="${RM.nodeW}" height="${RM.nodeH}" rx="3"/><text class="rm-title" x="8" y="18">${esc(clip(n.route, 20))}</text><text class="rm-sub" x="8" y="33">visited ${n.visits}&times;</text>${n.id === m.current ? `<text class="rm-sub" x="${RM.nodeW - 8}" y="18" text-anchor="end" style="fill:var(--accent-predator)">NOW</text>` : ''}<title>${esc(tip)}</title></g>`);
   });
   body.innerHTML = parts.join('');
   el('routeMachineStats').innerHTML = [
@@ -3426,6 +3452,10 @@ function renderRouteMachine() {
     m.stats.nonNavClicks ? `<span>${m.stats.nonNavClicks} other click(s) did not change the page</span>` : '',
   ].filter(Boolean).join('');
 }
+el('routeMachineBody').addEventListener('click', (e) => {
+  const t = e.target.closest('[data-reveal]');
+  if (t) jumpToAction(Number(t.dataset.reveal));
+});
 
 // ---- waste and retries ----
 function renderWaste() {
@@ -3494,7 +3524,8 @@ function renderFailureHeatmap() {
       if (!c || c.calls === 0) return `<td class="heat-cell heat-empty" title="${esc(type)} / +${esc(bucketLabel(b))}: no calls">&middot;</td>`;
       const hue = 130 - 130 * c.failRate;
       const alpha = 0.15 + 0.65 * (c.calls / maxCalls);
-      return `<td class="heat-cell" style="background: hsla(${hue.toFixed(0)},70%,40%,${alpha.toFixed(2)})" title="${esc(type)} / +${esc(bucketLabel(b))}: ${c.failed}/${c.calls} failed (${Math.round(c.failRate * 100)}%)">${c.failed || ''}</td>`;
+      const reveal = (c.failedIds?.[0] ?? c.ids?.[0]);
+      return `<td class="heat-cell"${reveal != null ? ` data-reveal="${reveal}"` : ''} style="background: hsla(${hue.toFixed(0)},70%,40%,${alpha.toFixed(2)})" title="${esc(type)} / +${esc(bucketLabel(b))}: ${c.failed}/${c.calls} failed (${Math.round(c.failRate * 100)}%)">${c.failed || ''}</td>`;
     }).join('');
     return `<tr><th style="text-align:left;">${esc(type)}</th>${cells}</tr>`;
   }).join('');
@@ -3504,6 +3535,10 @@ function renderFailureHeatmap() {
     h.worst ? `<span>worst: <b>${esc(h.worst.type)}</b> around +${esc(bucketLabel(h.worst.bucket))} - ${h.worst.failed}/${h.worst.calls} failed</span>` : '',
   ].filter(Boolean).join('');
 }
+el('failureHeatmapBody').addEventListener('click', (e) => {
+  const t = e.target.closest('td[data-reveal]');
+  if (t) jumpToAction(Number(t.dataset.reveal));
+});
 
 // refreshSessionDetail() is called both on an actual session switch AND by
 // the routine 3s poll (refreshAll) for the SAME still-active session - only
@@ -3720,11 +3755,40 @@ function renderMacroHealth(a) {
   }).join('');
 }
 
+// ---------- Waste rate by session (cross-session) ----------
+// Round-2's per-session Waste panel (session-viz.mjs's buildWaste) made visible across every
+// session at once, same ranked-bar look as Duration above - GET /analytics's own wasteBySession
+// (relay.mjs's computeAnalytics), not a separate fetch.
+function openSessionById(sid) {
+  el('sessionPicker').value = String(sid);
+  currentSessionId = sid;
+  refreshSessionDetail();
+}
+function renderWasteBySession(a) {
+  const container = el('wasteBySessionContainer');
+  const rows = a.wasteBySession || [];
+  if (!rows.length) { container.innerHTML = ''; el('wasteBySessionEmpty').hidden = false; return; }
+  el('wasteBySessionEmpty').hidden = true;
+  const maxPct = Math.max(0.01, ...rows.map((r) => r.wastePct));
+  container.innerHTML = rows.map((r) => `<div class="duration-bar-row" data-session-id="${r.sessionId}" style="cursor:pointer;">
+      <div class="duration-bar-label" title="#${r.sessionId} ${esc(r.goal)}">#${r.sessionId} ${esc(clip(r.goal, 26))}</div>
+      <div class="duration-bar-track" title="${r.wastedCalls} of ${r.calls} call(s) bought nothing">
+        <div class="duration-bar-max" style="width:${Math.max(2, (r.wastePct / maxPct) * 100).toFixed(1)}%; background: var(--accent-danger);"></div>
+      </div>
+      <div class="duration-bar-value">${Math.round(r.wastePct * 100)}% (${r.wastedCalls}/${r.calls})</div>
+    </div>`).join('');
+}
+el('wasteBySessionContainer').addEventListener('click', (e) => {
+  const row = e.target.closest('[data-session-id]');
+  if (row) openSessionById(Number(row.dataset.sessionId));
+});
+
 function renderCrossSessionCharts(a) {
   renderHeatmap(a);
   renderSelectorGraph(a);
   renderBurnChart(a);
   renderDurationChart(a);
+  renderWasteBySession(a);
   renderPunchcard(a);
   renderMacroHealth(a);
 }
@@ -4005,10 +4069,7 @@ async function runGlobalSearch() {
       </div>`).join('') + `<div class="muted" style="margin-top:6px;">${count} match(es)${count >= 200 ? ' (capped at 200)' : ''}</div>`;
     resultsEl.querySelectorAll('.search-hit').forEach((hitEl) => {
       hitEl.addEventListener('click', () => {
-        const sid = Number(hitEl.dataset.sessionId);
-        el('sessionPicker').value = String(sid);
-        currentSessionId = sid;
-        refreshSessionDetail();
+        openSessionById(Number(hitEl.dataset.sessionId));
         resultsEl.hidden = true;
       });
     });
@@ -4190,6 +4251,7 @@ const PANEL_ICONS = {
   max: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 4.5v-3h3M7.5 1.5h3v3M10.5 7.5v3h-3M4.5 10.5h-3v-3"/></svg>',
   restore: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 1.5v3h-3M10.5 4.5h-3v-3M7.5 10.5v-3h3M1.5 7.5h3v3"/></svg>',
   height: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 1.5v9M3.5 4 6 1.5 8.5 4M3.5 8 6 10.5 8.5 8"/></svg>',
+  link: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M5 7 7 5"/><path d="M4.3 7.7 3 9a1.9 1.9 0 0 0 2.7 2.7l1.3-1.3"/><path d="M7.7 4.3 9 3a1.9 1.9 0 0 1 2.7 2.7l-1.3 1.3"/></svg>',
 };
 
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
@@ -4208,6 +4270,7 @@ const PANELS = {
   burnSection: { group: 'global', wide: true, label: 'Burn', autoEmpty: true, failLabel: 'over budget', count: () => { const t = lastAnalyticsData?.sessionTokenTotals; return t ? { n: t.filter((s) => s.totalEstTokens > 0).length, fail: t.filter((s) => s.tokenBudget && s.totalEstTokens > s.tokenBudget).length, title: 'sessions with recorded token use' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.sessionTokenTotals ?? []) },
   savingsSection: { group: 'global', wide: true, label: 'Savings', autoEmpty: true, count: () => { const s = lastSavingsReport?.savings; return s?.ledgers ? { n: s.ledgers.filter((l) => l.countedInTotal).length, text: `~${fmtK(s.byKind?.storage?.estTokensSaved ?? 0)} tok-eq.`, title: 'savings mechanisms counted in the totals (disk bytes avoided, not tokens a caller avoided)' } : null; }, refresh: () => refreshSavings(true), exportRows: () => (lastSavingsReport?.savings?.ledgers ?? []).map((l) => ({ mechanism: l.label, kind: l.kind, counted: l.countedInTotal, bytesSaved: l.bytesSaved, estTokensEquivalent: l.estTokensSaved, reductionPct: l.reductionPct, refsTotal: l.refs?.total ?? null, refsStored: l.refs?.unique ?? null })) },
   durationSection: { group: 'global', label: 'Duration', autoEmpty: true, count: () => (lastAnalyticsData ? { n: lastAnalyticsData.durationByType?.length ?? 0, title: 'action types with timing data' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.durationByType ?? []) },
+  wasteBySessionSection: { group: 'global', label: 'Wasteful sessions', autoEmpty: true, failLabel: 'over 30%', count: () => { const w = lastAnalyticsData?.wasteBySession; return w ? { n: w.length, fail: w.filter((r) => r.wastePct > 0.3).length, title: 'sessions ranked by wasted-call share (5+ calls)' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.wasteBySession ?? []) },
   punchcardSection: { group: 'global', label: 'Punchcard', autoEmpty: true, count: () => (lastAnalyticsData ? { n: (lastAnalyticsData.activityPunchcard ?? []).flat().reduce((s, v) => s + v, 0), title: 'sessions started' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => (a.activityPunchcard ?? []).flatMap((hours, day) => hours.map((count, hour) => ({ day: PUNCHCARD_DAY_LABELS[day], hour, count })).filter((r) => r.count))) },
   timelineSection: { group: 'session', label: 'Timeline', autoEmpty: true, pausable: true, count: () => ({ n: timelineTotal(), title: 'events merged from every panel' }), refresh: async () => { renderTimeline(); } },
   actionsSection: { group: 'session', label: 'Actions', autoEmpty: true, failLabel: 'failed', count: () => ({ n: lastActions.length, fail: lastActions.filter((a) => !a.ok).length, title: 'actions recorded' }), refresh: () => refreshActions() },
@@ -4256,6 +4319,7 @@ function panelState(id) {
 const headRefs = {};
 let maximizedId = null;
 let pendingHash = null;
+let pendingSessionId = null; // from #session=<id>[&panel=...] - consumed once by refreshSessionPicker
 let panelUpdateQueued = false;
 
 function panelCount(id) { try { return PANELS[id].count() ?? null; } catch { return null; } }
@@ -4320,7 +4384,7 @@ function panelTickSig(id, sig) {
   return panelTick(id, changed);
 }
 function panelTickAnalytics(a) {
-  const slices = { allSessionsHero: [a.totals, a.failureRateByType], heatmapSection: a.heatmap, selectorsSection: a.topFailedSelectors, burnSection: a.sessionTokenTotals, durationSection: a.durationByType, punchcardSection: a.activityPunchcard };
+  const slices = { allSessionsHero: [a.totals, a.failureRateByType], heatmapSection: a.heatmap, selectorsSection: a.topFailedSelectors, burnSection: a.sessionTokenTotals, durationSection: a.durationByType, wasteBySessionSection: a.wasteBySession, punchcardSection: a.activityPunchcard };
   for (const [id, slice] of Object.entries(slices)) panelTickSig(id, JSON.stringify(slice ?? null));
 }
 
@@ -4438,6 +4502,7 @@ function upgradeSection(id) {
   if (sec.querySelector('.hud-scroll-body')) tools.append((refs.heightBtn = panelBtn(PANEL_ICONS.height, 'Panel height', 'height')));
   if (meta.pausable) tools.append((refs.pauseBtn = panelBtn(PANEL_ICONS.pause, 'Pause live updates', 'pause')));
   if (meta.refresh) tools.append((refs.refreshBtn = panelBtn(PANEL_ICONS.refresh, `Refresh ${meta.title} now`, 'refresh')));
+  tools.append((refs.linkBtn = panelBtn(PANEL_ICONS.link, `Copy link to ${meta.title}`, 'link')));
   tools.append((refs.maxBtn = panelBtn(PANEL_ICONS.max, `Maximize ${meta.title}`, 'max')));
   sec.insertBefore(head, h2);
   head.append(toggle, h2, count, fail, newPill, fresh, tools);
@@ -4466,6 +4531,28 @@ function togglePanel(id) {
 }
 function visiblePanelIds() { return PANEL_IDS.filter((id) => { const s = el(id); return s && !panelPrefs.hidden[id] && s.getClientRects().length > 0; }); }
 
+// The hash carries the panel to jump to as it always did (`#panelId`, a bare bookmark still
+// works), plus - for a session-scoped panel - which session, so a link someone shares actually
+// reopens the same finding instead of whichever session happens to be newest when they click it.
+function panelHash(id) {
+  const meta = PANELS[id];
+  return meta?.group === 'session' && currentSessionId ? `session=${currentSessionId}&panel=${id}` : id;
+}
+function parseHash() {
+  const raw = location.hash.slice(1);
+  if (!raw) return {};
+  if (PANELS[raw]) return { panel: raw };
+  try {
+    const p = new URLSearchParams(raw);
+    const session = p.get('session');
+    const panel = p.get('panel');
+    return { session: session ? Number(session) : null, panel: panel && PANELS[panel] ? panel : null };
+  } catch { return {}; }
+}
+function copyPanelLink(id) {
+  copyText(`${location.origin}${location.pathname}#${panelHash(id)}`, 'panel link');
+}
+
 function goToPanel(id, { updateHash = true } = {}) {
   const sec = el(id);
   if (!sec) return;
@@ -4474,7 +4561,7 @@ function goToPanel(id, { updateHash = true } = {}) {
   applyPanelChrome();
   panelState(id).newCount = 0;
   sec.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
-  if (updateHash) { try { history.replaceState(null, '', `#${id}`); } catch { /* hash is only a convenience */ } }
+  if (updateHash) { try { history.replaceState(null, '', `#${panelHash(id)}`); } catch { /* hash is only a convenience */ } }
   schedulePanelUpdate();
 }
 
@@ -4763,6 +4850,7 @@ function initPanelShell() {
         else if (k === 'height') { const cur = panelPrefs.height[id] || 'normal'; panelPrefs.height[id] = PANEL_HEIGHTS[(PANEL_HEIGHTS.indexOf(cur) + 1) % PANEL_HEIGHTS.length]; savePanelPrefs(); applyPanelChrome(); }
         else if (k === 'pause') setPanelPaused(id, !panelState(id).paused);
         else if (k === 'refresh') refreshPanel(id);
+        else if (k === 'link') copyPanelLink(id);
         return;
       }
       if (e.target.closest('.hud-tools')) return;
@@ -4785,7 +4873,16 @@ function initPanelShell() {
     if (e.key === 'Escape' && maximizedId && !el('settingsDialog').open) setMaximized(maximizedId);
   });
   window.addEventListener('beforeprint', () => { if (maximizedId) setMaximized(maximizedId); });
-  window.addEventListener('hashchange', () => { const id = location.hash.slice(1); if (PANELS[id]) goToPanel(id, { updateHash: false }); });
+  window.addEventListener('hashchange', () => {
+    const parsed = parseHash();
+    if (parsed.session && parsed.session !== currentSessionId) {
+      pendingSessionId = parsed.session;
+      if (parsed.panel) pendingHash = parsed.panel;
+      refreshSessionPicker().then(() => refreshSessionDetail());
+    } else if (parsed.panel) {
+      goToPanel(parsed.panel, { updateHash: false });
+    }
+  });
 
   el('hudCollapseAll').addEventListener('click', () => {
     const ids = visiblePanelIds();
@@ -4826,8 +4923,9 @@ function initPanelShell() {
   syncNavHeight();
   if (window.ResizeObserver) new ResizeObserver(syncNavHeight).observe(nav);
 
-  const hash = location.hash.slice(1);
-  if (PANELS[hash]) pendingHash = hash;
+  const initialHash = parseHash();
+  if (initialHash.session) pendingSessionId = initialHash.session;
+  if (initialHash.panel) pendingHash = initialHash.panel;
   setInterval(() => { if (!document.hidden) updateFreshness(); }, 1000);
   applyPanelChrome();
   schedulePanelUpdate();

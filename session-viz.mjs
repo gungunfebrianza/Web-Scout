@@ -632,12 +632,17 @@ export function buildFailureHeatmap(actions, { buckets = 20, topTypes = 8 } = {}
   if (ranked.length > topTypes) rowTypes.push('other');
   const matrix = new Map();
   let totalFailed = 0;
+  // ids/failedIds (capped) - just enough evidence for a dashboard cell click to jump to a real
+  // action row, same as every other panel here; capped so one dominant type/bucket can't bloat
+  // the payload the way an uncapped per-cell list would on a long session.
+  const CELL_ID_CAP = 20;
   for (const a of rows) {
     const bucket = Math.min(buckets - 1, Math.floor((toMs(a.started_at) - origin) / bucketMs));
     const key = `${rowOf(a.type)}|${bucket}`;
-    const cell = matrix.get(key) ?? { calls: 0, failed: 0 };
+    const cell = matrix.get(key) ?? { calls: 0, failed: 0, ids: [], failedIds: [] };
     cell.calls += 1;
-    if (!a.ok) { cell.failed += 1; totalFailed += 1; }
+    if (cell.ids.length < CELL_ID_CAP) cell.ids.push(a.id);
+    if (!a.ok) { cell.failed += 1; totalFailed += 1; if (cell.failedIds.length < CELL_ID_CAP) cell.failedIds.push(a.id); }
     matrix.set(key, cell);
   }
   let worst = null;
@@ -646,7 +651,7 @@ export function buildFailureHeatmap(actions, { buckets = 20, topTypes = 8 } = {}
     const [type, bucketStr] = key.split('|');
     const bucket = Number(bucketStr);
     const failRate = c.calls ? c.failed / c.calls : 0;
-    cells.push({ type, bucket, calls: c.calls, failed: c.failed, failRate });
+    cells.push({ type, bucket, calls: c.calls, failed: c.failed, failRate, ids: c.ids, failedIds: c.failedIds });
     if (c.calls >= 3 && (!worst || failRate > worst.failRate)) worst = { type, bucket, calls: c.calls, failed: c.failed, failRate };
   }
   return {
@@ -704,18 +709,22 @@ export function buildRouteMachine(clicks = []) {
   if (!navs.length) return { nodes: [], edges: [], path: [], current: null, stats: { navigations: 0, routes: 0, transitions: 0, revisits: 0, nonNavClicks: clicks.length } };
   const nodeByKey = new Map();
   const nodes = [];
-  const ensure = (href) => {
+  const NODE_ID_CAP = 20;
+  const ensure = (href, clickId) => {
     const key = routeOf(href);
     let n = nodeByKey.get(key);
-    if (!n) { n = { id: `r${nodes.length + 1}`, index: nodes.length + 1, route: key, sample: href, visits: 0 }; nodes.push(n); nodeByKey.set(key, n); }
+    if (!n) { n = { id: `r${nodes.length + 1}`, index: nodes.length + 1, route: key, sample: href, visits: 0, actionIds: [] }; nodes.push(n); nodeByKey.set(key, n); }
     n.visits += 1;
+    // Every click that touched this page (arrived at it or left from it) - capped, just enough
+    // evidence for a dashboard click on a node to jump to a real action row.
+    if (clickId != null && !n.actionIds.includes(clickId) && n.actionIds.length < NODE_ID_CAP) n.actionIds.push(clickId);
     return n;
   };
   const edges = new Map();
   const path = [];
   for (const c of navs) {
-    const from = ensure(c.hrefBefore);
-    const to = ensure(c.href);
+    const from = ensure(c.hrefBefore, c.id);
+    const to = ensure(c.href, c.id);
     if (!path.length) path.push(from.id);
     path.push(to.id);
     const key = `${from.id}>${to.id}`;
