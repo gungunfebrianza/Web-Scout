@@ -192,4 +192,35 @@ describe('dashboard in a headless browser', () => {
       await relay.stop();
     }
   });
+
+  test('the savings panel surfaces real usage evidence (never-called action types, help all-vs-sliced)', { skip: browserSkip(), timeout: 90000 }, async () => {
+    const relay = await startTestRelay();
+    let page;
+    let tab;
+    try {
+      const api = async (method, route, body) => (await (await fetch(`http://127.0.0.1:${relay.port}${route}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined })).json()).result;
+      tab = await connectFakeAgent(relay.port, { 'idb.dump': () => ({ rows: [1] }) }, { name: 'default', epoch: 0 });
+      await api('POST', '/sessions', { goal: 'dashboard usage-evidence test', context: 'automated' });
+      await api('POST', '/command', { type: 'idb.dump', params: { store: 's' } });
+      await api('POST', '/help-used', { kind: 'sliced' });
+      await api('POST', '/help-used', { kind: 'sliced' });
+      await api('POST', '/help-used', { kind: 'all' });
+
+      page = await launchBrowser(browser);
+      await page.navigate(`http://127.0.0.1:${relay.port}/dashboard`);
+      let text = '';
+      const deadline = Date.now() + 25000;
+      while (Date.now() < deadline && !/never called/.test(text)) {
+        text = (await page.evaluate(`(() => { const n = document.getElementById('usageEvidenceNote'); return n && !n.hidden ? n.textContent : ''; })()`)) || '';
+        if (!/never called/.test(text)) await sleep(300);
+      }
+      assert.match(text, /action type\(s\) never called/);
+      assert.match(text, /33\.3% of 3 help call\(s\) were "help all"/);
+      assert.deepEqual(page.errors, [], `page errors: ${page.errors.join(' | ')}`);
+    } finally {
+      tab?.close();
+      await page?.close();
+      await relay.stop();
+    }
+  });
 });
