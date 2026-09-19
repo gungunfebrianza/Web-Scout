@@ -62,7 +62,7 @@ const PORT = Number(process.env.WEBSCOUT_PORT || 8973);
 const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 // Bumped alongside docs/web-scout-roadmap.md's latest "## VN" entry - purely
 // informational (the dashboard's About panel), never read by any behavior.
-const WEBSCOUT_VERSION = '0.23.0'; // bumped alongside docs/web-scout-roadmap.md's V36 entry
+const WEBSCOUT_VERSION = '0.24.0'; // bumped alongside docs/web-scout-roadmap.md's V37 entry
 const COMMAND_TIMEOUT_MS = 15000; // interactive dom/net/eval round trips
 const SNAPSHOT_TIMEOUT_MS = 60000; // bulk idb.snapshot reads can be large
 // Short, independent budgets for two round trips that must never inherit

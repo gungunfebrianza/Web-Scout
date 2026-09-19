@@ -1130,3 +1130,59 @@ are in a trace (a cache hit logs nothing), so every replayed read is a fresh dis
 MCP `start`) reads `/health`, and restarts (`restartRelay`) only when `stale_source_files` is
 non-empty and there is no active session; it waits up to 8s for the tabs that were connected to
 reconnect and records an `auto-restart` event.
+
+## Session visualizations (V37)
+
+`session-viz.mjs` is pure: every `build*` function takes plain rows (never a DB handle) and returns
+plain JSON, so each is unit-tested without a relay or a browser. `GET /sessions/:id/viz` is the one
+caller that matters (`buildSessionViz` assembles all ten views from one row set); `report.mjs`'s
+`buildVizSection` (added V37) is the other, folding the same object into a session report's own
+"## Session visualizations" markdown. Both read `dbApi.listActionsForViz` - a deliberately narrower
+query than `listActions()` (no result body, `bytes` computed in SQL via
+`COALESCE(delivered_bytes, LENGTH(result_json), byte_length, 0)`, same figure the token-report
+ledger books) - so running any of these views costs roughly what the Action log's own refresh does,
+never the bytes of every result it derives from.
+
+**Shared filters.** `NOISE_TYPES` (`ping`, `page.epoch`) and `isInternal(a)` (`a.params?.auto ===
+true` - a strict-CRV auto snapshot/diff row) are excluded by `buildSequence`, `buildWaste`,
+`buildCostBreakdown` and `buildFailureHeatmap`, same as `buildEpisodes`/`buildStateMachine` already
+did; `buildSwimlane` alone keeps every row (it draws literally what was dispatched).
+
+**Episodes and causality share one pass.** `buildEpisodes`'s main loop computes, per step, both
+`why` (`inferWhy`, used when no transcript narration exists) and `causedBy: {id, kind}`
+(`causeOf`) from the exact same signals (`prev`, `phase`, `seen`, `lastActStep`) - a second pass
+over the steps was considered and rejected, since both are answering "what made this step run" from
+the same evidence. `buildCausality(episodesResult)` only reshapes the already-computed `causedBy`
+links into a forest (`childrenOf`); a step with no incoming or outgoing causal edge is dropped
+entirely as ordinary, uncaused work already visible in Episodes.
+
+**Route FSM needed new instrumentation.** Every other view above derives from data already
+recorded; this one couldn't, since web-scout otherwise has zero page-navigation tracking. `dom.click`
+(`inject.js`) now resolves `{..., hrefBefore, href}` (restamp with `build-id.mjs --stamp` after
+touching that file); `db.listClickNavigations(sessionId)` reads just the result JSON of a session's
+`dom.click` rows - the one deliberate, narrowly-scoped exception to `listActionsForViz`'s
+no-result-body rule, kept out of that shared query on purpose. `buildRouteMachine(clicks)` keys a
+node by `pathname + hash` (`routeOf`), so a query-string-only change collapses into the same node;
+each node/edge also keeps the (capped) click id(s) that touched it, so a dashboard click on either
+can jump to a real action row - the same evidence shape `buildFailureHeatmap`'s cells keep
+(`ids`/`failedIds`, capped at 20) for the same reason.
+
+**Dashboard wiring.** All ten sections are one more consumer of the existing panel-shell registry
+(`PANELS`, `VIZ_PANELS`, `refreshViz()`) - `refreshViz` fingerprints on
+`` `${lastActionsFp}|${lastSnapshotsFp}|${lastDiffsFp}` `` and re-fetches the whole `/viz` payload
+in one call when any of the three changed, then re-renders all ten from the one response (never a
+per-panel fetch). `dashboard.html`'s own SVG geometry helpers are reused, not reinvented: `rmGeometry`
+(route FSM) is a direct adaptation of the state machine's `smGeometry`/`smNodeSvg`; the failure
+heatmap's cells and the cost breakdown's ranked bars reuse the pre-existing `.heatmap-table`/
+`.heat-cell` and `.duration-bar-*` CSS verbatim (zero new rules for either).
+
+**Deep-linking.** `location.hash` carries either a bare panel id (`#swimlaneSection`, unchanged
+since V5's cross-session search) or, for a session-scoped panel, `session=<id>&panel=<id>`
+(`panelHash`/`parseHash`) - `goToPanel` writes whichever form applies, and both the initial-load
+parse and the `hashchange` listener accept either. A session-scoped panel's header also gained a
+"copy link" button (`copyPanelLink`) next to its existing refresh/pause/maximize controls.
+
+**Cross-session waste.** `GET /analytics`'s `computeAnalytics()` gained `wasteBySession`: `buildWaste`
+run once per session, grouping the SAME `listAllActions()` rows every other Friction Analytics metric
+already scans (no extra query) by `session_id` in JS first. A `WASTE_MIN_CALLS` floor (5) excludes a
+session too small for its wasted-call percentage to mean anything.

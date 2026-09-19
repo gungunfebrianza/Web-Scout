@@ -62,12 +62,25 @@ The core discipline, nicknamed **"CRV"** in this codebase:
 - `idb restore` writes a snapshot's data back into IndexedDB
 - Declarative `session assert` checks against live state (e.g. "store X
   has at least 1 row where field Y equals Z")
-- **Session visualizations** in the dashboard, built from rows already stored:
-  an agent **swimlane** (one lane per agent, bar per action, think time between
-  calls made visible), a **state machine** (nodes are distinct snapshot content,
-  edges are the writes between two snapshots, so a return to an earlier state is
-  a loop and a write that changed nothing is flagged), and an **episode tree**
-  (goal > episode > step > action: explore, change, verify, recover)
+- **Session visualizations** in the dashboard, ten views built from rows
+  already stored (`session viz <id>` for the same data from the CLI,
+  `session report` for a saved copy): an agent **swimlane** (one lane per
+  agent, bar per action, think time between calls made visible), a **state
+  machine** (nodes are distinct snapshot content, edges are the writes
+  between two snapshots, so a return to an earlier state is a loop and a
+  write that changed nothing is flagged), an **episode tree** (goal >
+  episode > step > action: explore, change, verify, recover), a **causality
+  tree** (a retry chains to the failure it followed, a verify to the write
+  it checked), a **sequence diagram** (each agent against "the page", call
+  then return, in call order), a **route/page FSM** (nodes are pages a
+  session navigated between, from `dom.click`'s own before/after URL), a
+  **waste view** (failed calls, unchanged re-reads, no-op writes, one total),
+  a **token cost breakdown** (delivered bytes by type/agent, plus the
+  single most expensive calls), and two **failure heatmaps** (this
+  session's own timeline, and type x the last 15 sessions). Every panel
+  that jumps to a specific action can also copy a link straight back to
+  it (`#session=<id>&panel=<id>`), and Friction Analytics ranks sessions
+  by wasted-call share across all of them
 - A **Why** column on the Action log, filled from the agent's own transcript by
   `session intents <id>` (Claude Code and Codex JSONL, matched by time - the
   agent spends no tokens on it). Actions with no narration get an inferred why,
