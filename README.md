@@ -84,6 +84,11 @@ The core discipline, nicknamed **"CRV"** in this codebase:
 - Named multi-tab support - drive more than one browser tab at once
 
 **Token cost & waste prevention**
+- `token-report`'s all-time form also carries `neverCalled`: dispatchable action
+  types this relay has never logged a single call for - real usage evidence for
+  which MCP actions are candidates to trim from the always-sent tool list; and
+  `helpUsage`: whether `help all` (~16k tokens) still gets called, against the
+  sliced forms it exists to replace
 - `token-report` ranks every action TYPE, TARGET (store/selector), and now
   MACRO (which replayed macro/CRV phase actually cost the tokens, ad-hoc
   calls bucket separately) by estimated tokens spent reading its result
@@ -132,7 +137,15 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   full anyway)
 - `idb verify --expect "notes:+1,tags:same"` is the verify step of baseline -> action
   -> verify in one call: it re-snapshots, diffs and checks the expectations, and
-  answers in a few lines when it passed (rows only for what failed)
+  answers in a few lines when it passed (rows only for what failed); `crv run --stores
+  a,b --type dom.click --params '{"selector":"#save"}' --expect "notes:+1"` is the
+  WHOLE loop in one call - baseline snapshot, the action, verify - instead of three
+  separate round trips each with their own full-body reply
+- `session start --strict-crv --crv-compact` adds a sampled preview of what changed
+  (the same shape `idb verify`'s pass branch returns) to every triggering call's own
+  reply, alongside the existing counts - sparing the separate `idb diff <idA> <idB>`
+  full-body fetch a caller otherwise makes by hand to see what a count alone did not
+  explain. Off by default: an ordinary `--strict-crv` session's reply is unchanged
 - `session start --lean` makes shaping the default for a whole session instead of a
   flag on every call; reads can also be narrowed in the page itself (`dom query --pick`,
   `idb dump --count`, `net log --failed --fields ...`, `console log --level ...`, ...)
@@ -145,14 +158,31 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   byte budget in CI
 - `trace.mjs` exports a real session anonymised and replays it through the reply
   pipeline, so the read strategy is benchmarked on what callers actually read (not only
-  the scripted fixture) and the lean guard threshold is tuned from a sweep
+  the scripted fixture) and the lean guard threshold is tuned from a sweep;
+  `session end --trace` exports the session that just ended the same way, into
+  `traces/auto/` (gitignored) - the corpus grows on its own instead of staying at
+  four traces from one project, without anything being auto-promoted into the
+  committed, benchmarked `traces/*.json.gz`; `trace.mjs rank-auto` ranks that pile by
+  the same leanWorst distrust rate the dashboard shows, so promoting one is picking
+  off a short list instead of eyeballing a folder - `session end --trace` also runs
+  this ranking itself and only speaks up when the trace it just wrote lands in the
+  top 3, so a real candidate gets flagged without a nudge on every export
 - A relay running older code than disk is restarted at `session start` (never
   mid-session); `read-only-contract.test.mjs` proves every read command leaves
   IndexedDB, storage and the DOM exactly as it found them
 - Token estimates carry a labelled error band (`savings.estimator`, with a status:
   uncalibrated / partial / stale / calibrated and `calibrate-tokens.mjs --check`), and
   `token-benchmark.test.mjs` runs a scripted CRV session against a fixture in CI so
-  a change that makes replies bigger fails there
+  a change that makes replies bigger fails there. `transcript-tokens.mjs --write`
+  measures the same ratios from a Claude Code transcript's own token counts instead of
+  the Anthropic `count_tokens` endpoint, needing no API key; a relay with nothing
+  calibrated yet tries this itself, once, the first time a session starts
+  (`WEBSCOUT_AUTO_CALIBRATE=1`, set automatically by `relay start`/`restart` and the
+  client's own autostart - never by a plain `node relay.mjs`, and never overwriting an
+  existing calibration even a stale one); while still uncalibrated, `token-report`'s
+  `savings.estimator.note` says WHY - flag not set on this relay, set but not run yet,
+  still running, or already ran and found nothing (with the reason) - instead of the
+  same generic line regardless of which of those is actually true
 
 **Dashboard**
 - A realtime, no-refresh-needed web dashboard showing every session's
@@ -388,8 +418,10 @@ suite run ./checks/my-suite.json
 token-report                  # all-time byType/byTarget cost ranking + a "savings" block proving
                                # what dedup/cache/compaction/diff-cache actually saved
 token-report --session <id>   # one session's own cost, plus repeated-call loops, redundant
-                               # (same-result) re-checks, and byMacro (which replayed macro/CRV
-                               # phase actually cost the tokens - ad-hoc calls bucket separately)
+                               # (same-result) re-checks, byMacro (which replayed macro/CRV
+                               # phase actually cost the tokens - ad-hoc calls bucket separately),
+                               # and byIntent (which narrated REASON cost the tokens, from the
+                               # agent's own transcript - see "session intents")
 ```
 Read calls (`idb dump/get/list`, `dom query/rect/style`, `net log`,
 `console log`, `react inspect/tree`) are answered from an in-relay cache
@@ -445,9 +477,13 @@ tokens as its shape (repeat the call for the body; `--no-guard` gives it as it i
 `token-report` (`readStrategy.adoption`) counts reads by who chose the shaping. On
 four real CRV sessions replayed with `trace.mjs` a lean session delivered 0.40-0.58 of
 the default's read bytes on three (0.05 on one dominated by a few huge reads) if every
-shape sufficed, and 0.52-0.75 if callers always re-asked for the body: much less than
-the scripted benchmark below, which is a best case. Reads can also be narrowed **in
-the page**, before anything crosses the wire:
+shape sufficed - much less than the scripted benchmark below, which is a best case. If
+callers instead distrust every shaped reply and re-ask for the raw body, it costs 1.01-1.08
+of the default (a small premium, not a saving - the shape is a paid round trip before the
+retry): `readStrategy.shaping.pointer/delta` reports `followedByFull`/`followedByNarrowed`
+live, the same way a distrusted peek already was, so this is measurable in a real session,
+not only in replay. Reads can also be narrowed **in the page**, before anything crosses the
+wire:
 ```bash
 dom query "a.next" --pick attr:href,text    # the href and text, not the markup around them
 react inspect ".row" --pick props.user.id   # one path, not the whole component
@@ -580,6 +616,9 @@ startup unless noted:
 | `WEBSCOUT_REQUIRE_BROWSER` | unset | Set to `1` (CI does) to make the headless-browser tests fail instead of skip when no Chromium/Edge is found. |
 | `WEBSCOUT_PID_PATH` | `<tmpdir>/webscout-relay-<port>.pid` | Where the relay writes its pidfile, used by `relay stop/restart`. |
 | `WEBSCOUT_TEST_LIVE` | unset | Set to `1` to run the relay-touching tests against the already-running relay (needed only for tests that require a connected browser tab). |
+| `WEBSCOUT_AUTO_CALIBRATE` | unset | Opt-in: set to `1` to let a relay with no calibration file try `transcript-tokens.mjs`'s no-key method once, the first time a session starts. Set automatically by `relay start`/`restart` and the client's own autostart - never by a plain `node relay.mjs`, and a test relay never sets it. |
+| `WEBSCOUT_TRANSCRIPT_HOME` | the OS home dir | Where `transcript-tokens.mjs` (and `WEBSCOUT_AUTO_CALIBRATE`) looks for `.claude/projects/` transcripts to calibrate from. |
+| `WEBSCOUT_RELAY_REGISTRY` | `<tmpdir>/webscout-relays.jsonl` | The leaked-relay registry `reapLeakedRelays()` reads/writes - every relay, test or real, registers here on startup. Only a test isolating this behavior should ever need to override it. |
 
 The dashboard's **Settings** menu shows all of the above, plus a
 live-editable AI backend URL.
@@ -703,7 +742,28 @@ MCP tool list (bytes sent to the model on every session) and the size of a help 
 replays the committed anonymised traces in `traces/` and holds their measured lean bands;
 `auto-restart.test.mjs` covers the session-start restart; `token-calibration.test.mjs`
 covers the estimator's status (its last test skips until a measured calibration is
-committed).
+committed); `transcript-tokens.test.mjs` covers calibrating from a Claude Code transcript
+(no API key). `reply-budget.test.mjs` caps actual runtime replies for a few deterministic
+fixtures (an `idb verify` pass, a `session start` briefing, a `--table` dump) - `schema-budget.test.mjs`
+only covers what is static (the tool list, help text); `session-trace-export.test.mjs` covers
+`session end --trace`; `crv-run.test.mjs` covers `crv run` (the action actually running between the
+two snapshots, a failing action failing the whole call, `idb.snapshot` refused as the action).
+`crv-compact.test.mjs` covers `--crv-compact` (a sampled preview alongside strict-crv's counts, and
+that an ordinary strict-crv reply's shape is unchanged without it). `trace-rank-auto.test.mjs`
+covers `trace.mjs rank-auto` (ranking `traces/auto/` by distrust rate). `auto-calibrate.test.mjs`
+covers `transcript-tokens.mjs`'s `autoCalibrateIfMissing` (never overwriting an existing
+calibration, no-transcripts and too-few-samples outcomes, and a real `session start` producing one
+live, plus what `savings.estimator.note` says while still uncalibrated). `relay-import-safety.test.mjs`
+and `relay-self-register.test.mjs` cover `relay.mjs`'s `isMainModule` guard and its self-registration
+into the leaked-relay registry. `token-estimate.test.mjs` also covers `estimatorInfo`'s `autoCalibrate`
+clause (flag off / set but not run yet / running / ran and found nothing, each worded distinctly).
+`viz-endpoint.test.mjs`'s transcript-import tests also cover `token-report`'s `byIntent` (the actions
+one narrated call produced collapse to one row; un-narrated actions bucket separately). A `test()`
+declared before a top-level `await startTestRelay()`, with more `test()` calls added once that
+await resolves, was found to silently run only the pre-await tests under `--test-force-exit` (the
+exact CI command below) - no failure, just tests missing from the count; `reply-budget.test.mjs`,
+`crv-verify.test.mjs` and `trace-replay.test.mjs` had this and are fixed (the await now runs first,
+before any `test()` call) - a new relay-touching test file should do the same.
 See `.github/workflows/web-scout-tests.yml`.
 
 ## Relationship to Verity UI Relay

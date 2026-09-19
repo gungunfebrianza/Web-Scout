@@ -12,6 +12,37 @@ import { startTestRelay, connectFakeAgent } from './test-relay.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 
+// ---------- export from a real relay database ----------
+//
+// Runs FIRST, before any test() call below, even the two pure ones right after it: a test()
+// declared before this top-level await, followed by more test() calls once the await resolves,
+// was found to silently run only the pre-await tests under `--test-force-exit` (the exact CI
+// invocation, CONTRIBUTING.md) - no failure, no skip, just tests missing from the count (this
+// file lost 9 of 11 that way).
+const relay = await startTestRelay();
+const BASE = `http://127.0.0.1:${relay.port}`;
+const skipLive = relay.live ? 'skipped under WEBSCOUT_TEST_LIVE=1' : false;
+let tab;
+let sessionId;
+const rows = Array.from({ length: 60 }, (_, i) => ({ id: i + 1, owner: `person-${i}`, note: 'n'.repeat(80) }));
+
+async function api(method, route, body) {
+  const res = await fetch(`${BASE}${route}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
+  return (await res.json()).result;
+}
+const read = (type, params) => api('POST', '/command', { type, params, agent: 'trace-tab' });
+
+before(async () => {
+  if (relay.live) return;
+  tab = await connectFakeAgent(relay.port, {
+    'idb.dump': (p) => ({ store: p.store, keyPath: 'id', count: rows.length, rows }),
+    'idb.put': () => ({ stored: true }),
+    eval: () => ({ value: 'x'.repeat(300) }),
+  }, { name: 'trace-tab', epoch: 0 });
+  sessionId = (await api('POST', '/sessions', { goal: 'trace-replay.test.mjs', context: 'automated', briefing: false, agent: 'trace-tab' })).id;
+});
+after(async () => { tab?.close(); await relay.stop(); });
+
 test('a stand-in has the same length, is stable, and differs for different strings', () => {
   for (const s of ['a', 'ab', 'open', 'some longer piece of text that is data', 'x'.repeat(500)]) {
     assert.equal(standIn(s).length, s.length);
@@ -37,32 +68,6 @@ test('anonymising keeps structure, numbers and nulls, hides strings, and keeps o
   assert.ok(!JSON.stringify(out).includes('Ann'));
   assert.equal(anonymize(src, { keep: ['store', 'keyPath'] }).store, 'orders');
 });
-
-// ---------- export from a real relay database ----------
-
-const relay = await startTestRelay();
-const BASE = `http://127.0.0.1:${relay.port}`;
-const skipLive = relay.live ? 'skipped under WEBSCOUT_TEST_LIVE=1' : false;
-let tab;
-let sessionId;
-const rows = Array.from({ length: 60 }, (_, i) => ({ id: i + 1, owner: `person-${i}`, note: 'n'.repeat(80) }));
-
-async function api(method, route, body) {
-  const res = await fetch(`${BASE}${route}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
-  return (await res.json()).result;
-}
-const read = (type, params) => api('POST', '/command', { type, params, agent: 'trace-tab' });
-
-before(async () => {
-  if (relay.live) return;
-  tab = await connectFakeAgent(relay.port, {
-    'idb.dump': (p) => ({ store: p.store, keyPath: 'id', count: rows.length, rows }),
-    'idb.put': () => ({ stored: true }),
-    eval: () => ({ value: 'x'.repeat(300) }),
-  }, { name: 'trace-tab', epoch: 0 });
-  sessionId = (await api('POST', '/sessions', { goal: 'trace-replay.test.mjs', context: 'automated', briefing: false, agent: 'trace-tab' })).id;
-});
-after(async () => { tab?.close(); await relay.stop(); });
 
 test('a session exported from a relay database keeps reads shapeable and everything else as a size', { skip: skipLive }, async () => {
   await read('idb.dump', { store: 'secret_orders' });
@@ -117,14 +122,17 @@ test('the guard sweep reports every threshold, and a higher guard peeks no more 
 // ---------- the committed traces of real sessions ----------
 
 // Measured with `node tools/web-scout/trace.mjs replay traces/*.json.gz` at the default guard
-// (V33). Read-bytes ratios of a lean session against the default, best and worst case; each
-// ceiling is the measurement plus a margin, so a change that makes lean replies bigger fails.
-// These four traces are one project's CRV sessions - a small sample, not a promise.
+// (V33, revised: leanWorst now also re-asks a distrusted pointer/delta, not only a peek/guard -
+// see [[web-scout-v33-round]]/[[web-scout-v34-round]] - the old worst-case numbers here were an
+// undercount, since pointer/delta follow-ups were not simulated at all). Read-bytes ratios of a
+// lean session against the default, best and worst case; each ceiling is the measurement plus a
+// margin, so a change that makes lean replies bigger fails. These four traces are one project's
+// CRV sessions - a small sample, not a promise.
 const MEASURED = {
-  'crv-dump-heavy': { best: 0.543, worst: 0.543 },
-  'crv-mutation-verify': { best: 0.395, worst: 0.522 },
-  'crv-monitoring': { best: 0.584, worst: 0.584 },
-  'crv-ai-capture': { best: 0.049, worst: 0.747 },
+  'crv-dump-heavy': { best: 0.543, worst: 1.027 },
+  'crv-mutation-verify': { best: 0.395, worst: 1.075 },
+  'crv-monitoring': { best: 0.584, worst: 1.033 },
+  'crv-ai-capture': { best: 0.049, worst: 1.012 },
 };
 const MARGIN = 0.03;
 
@@ -136,7 +144,10 @@ for (const [name, expected] of Object.entries(MEASURED)) {
     assert.ok(r.reads >= 10, 'a real session, not a stub');
     assert.ok(r.readRatio.leanBest <= expected.best + MARGIN, `lean best case ${r.readRatio.leanBest} > ${expected.best} + ${MARGIN}`);
     assert.ok(r.readRatio.leanWorst <= expected.worst + MARGIN, `lean worst case ${r.readRatio.leanWorst} > ${expected.worst} + ${MARGIN}`);
-    assert.ok(r.readRatio.leanWorst < 1, 'even when callers always re-ask, lean must not cost more than the default here');
+    // Distrusting every shaped reply now costs slightly MORE than never shaping at all (the shape
+    // itself is a paid round trip before the retry) - a small, bounded premium, not the free
+    // worst case the old, undercounted simulation reported. See the MEASURED comment above.
+    assert.ok(r.readRatio.leanWorst < 1.15, `a fully-distrusted lean session should not cost much more than the default: ${r.readRatio.leanWorst}`);
   });
 }
 

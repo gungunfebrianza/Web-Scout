@@ -83,7 +83,7 @@ async function autostartRelay() {
   if (Date.now() - lastAutostartAt < AUTOSTART_COOLDOWN_MS) return null;
   lastAutostartAt = Date.now();
   try {
-    const started = await startRelay({ port: PORT, host: HOST });
+    const started = await startRelay({ port: PORT, host: HOST, env: { WEBSCOUT_AUTO_CALIBRATE: '1' } });
     if (started.started) {
       recordRelayEvent(PORT, { kind: 'autostart', pid: started.pid ?? null });
       return started;
@@ -116,7 +116,7 @@ export async function ensureFreshRelayForNewSession() {
   if (!stale.length) return { checked: true, restarted: false };
   if (health.active_session) return { checked: true, restarted: false, stale, reason: 'a session is active - restarting now would drop its read cache' };
   const tabs = health.agents_connected ?? [];
-  const result = await restartRelay({ port: PORT, host: HOST });
+  const result = await restartRelay({ port: PORT, host: HOST, env: { WEBSCOUT_AUTO_CALIBRATE: '1' } });
   if (!result.restarted) {
     emitNote(`WARNING: the relay is running code older than what is on disk (${stale.join(', ')}) and restarting it failed (${result.start?.reason ?? result.stop?.reason ?? 'unknown'}). Run: node tools/web-scout/cli.mjs relay restart`, 'relay-autorestart');
     return { checked: true, restarted: false, stale };

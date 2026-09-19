@@ -178,6 +178,12 @@ ensureColumn('sessions', 'token_budget', 'token_budget INTEGER');
 // `session start --lean`: reads in this session are shaped by default (rows as tables, repeats
 // as pointers/deltas, large bodies as their shape) instead of only when a call asks. NULL/0 = off.
 ensureColumn('sessions', 'lean', 'lean INTEGER');
+// `session start --strict-crv --crv-compact`: the auto before/after/diff block's own reply
+// includes a sampled preview of what changed (same shape "idb verify"'s pass branch already
+// uses) instead of only counts - sparing the separate `GET /state/diffs/:id` full-body fetch a
+// caller otherwise makes by hand to see what a count alone did not explain. Off by default (NULL)
+// so an existing strict-crv session's reply shape never changes underneath it.
+ensureColumn('sessions', 'strict_crv_compact', 'strict_crv_compact INTEGER');
 // Content-addressed dedup for actions.result_json (see result_blobs table
 // below) - NULL means this row's result was byte-identical to an earlier
 // one already stored in result_blobs, so this row's own result_json is left
@@ -715,6 +721,10 @@ export function getReadStrategyStats() {
   const table = total('tabular');
   const peekFull = total('peekThenFull');
   const peekNarrow = total('peekThenNarrowed');
+  const pointerFull = total('pointerThenFull');
+  const pointerNarrow = total('pointerThenNarrowed');
+  const deltaFull = total('deltaThenFull');
+  const deltaNarrow = total('deltaThenNarrowed');
   const hintScope = total('hintScope');
   const hintReuse = total('hintReuse');
   const hintAdopted = total('hintAdopted');
@@ -723,15 +733,24 @@ export function getReadStrategyStats() {
   const explicit = total('readExplicit');
   const lean = total('readLean');
   const peekCalls = peek.calls + guard.calls;
-  // Bytes each shaping mode kept off the caller's screen. A peek only defers the
-  // body: when the same read then came back in full, those bytes were spent after
-  // all, so they are taken back out of the peek's saving.
+  // Bytes each shaping mode kept off the caller's screen. A peek only defers the body, and a
+  // pointer/delta only asks the caller to trust what it already holds: when the same target then
+  // came back as a raw full read, that trust (or the peek) did not hold and those bytes were
+  // spent after all, so they are taken back out of each mode's own saving.
   const grossPeekBytes = peek.bytes + guard.bytes;
-  const netBytesSaved = pointer.bytes + delta.bytes + table.bytes + Math.max(0, grossPeekBytes - peekFull.bytes);
+  const netBytesSaved = Math.max(0, pointer.bytes - pointerFull.bytes) + Math.max(0, delta.bytes - deltaFull.bytes) + table.bytes + Math.max(0, grossPeekBytes - peekFull.bytes);
   return {
     shaping: {
-      pointer: { calls: pointer.calls, bytesSaved: pointer.bytes },
-      delta: { calls: delta.calls, bytesSaved: delta.bytes },
+      pointer: {
+        calls: pointer.calls, bytesSaved: pointer.bytes, bytesSpentAfterwards: pointerFull.bytes,
+        followedByFull: pointerFull.calls, followedByNarrowed: pointerNarrow.calls,
+        fullRatePct: pct(pointerFull.calls, pointer.calls), narrowedRatePct: pct(pointerNarrow.calls, pointer.calls),
+      },
+      delta: {
+        calls: delta.calls, bytesSaved: delta.bytes, bytesSpentAfterwards: deltaFull.bytes,
+        followedByFull: deltaFull.calls, followedByNarrowed: deltaNarrow.calls,
+        fullRatePct: pct(deltaFull.calls, delta.calls), narrowedRatePct: pct(deltaNarrow.calls, delta.calls),
+      },
       table: { calls: table.calls, bytesSaved: table.bytes },
       peek: {
         calls: peekCalls, guardedCalls: guard.calls, grossBytesSaved: grossPeekBytes, bytesSpentAfterwards: peekFull.bytes,
@@ -774,6 +793,15 @@ export function getReadStrategyStats() {
   };
 }
 
+// Does "help all" (~16k tokens) still get called, against the sliced forms it exists to
+// replace? Bumped by the CLI itself (relay.mjs's POST /help-used, cli.mjs's noteHelpUsage) -
+// help is served locally from usage.txt and never otherwise reaches the relay.
+export function getHelpUsage() {
+  const all = stmtSavingsDailyTotal.get('helpAll').calls;
+  const sliced = stmtSavingsDailyTotal.get('helpSliced').calls;
+  return { all, sliced, allRatePct: pct(all, all + sliced) };
+}
+
 export function getScopedReadSavings() {
   const row = stmtSavingsDailyTotal.get('scopedReads');
   return { calls: row.calls, bytesSaved: row.bytes, estTokensSaved: Math.round(row.bytes / CHARS_PER_TOKEN_ESTIMATE) };
@@ -798,7 +826,7 @@ export function getSavingsTrend(days = 14) {
     if (r.key === 'readCache') { s.cacheHits = r.calls; s.cacheBytes = r.bytes; }
     if (r.key === 'reReadAfterScoped') s.reReads = r.calls;
     if (SHAPING_SAVING_KEYS.has(r.key)) s.shapedBytes += r.bytes;
-    if (r.key === 'peekThenFull') s.shapedBytes -= r.bytes;
+    if (r.key === 'peekThenFull' || r.key === 'pointerThenFull' || r.key === 'deltaThenFull') s.shapedBytes -= r.bytes;
   }
   let previousStorage = null;
   for (const r of stmtSnapshotsByKind.all('storage')) {
@@ -818,7 +846,7 @@ export function getSavingsTrend(days = 14) {
 
 // ---------- sessions ----------
 
-const stmtInsertSession = db.prepare('INSERT INTO sessions (goal, context, status, started_at, strict_crv, strict_crv_stores, tags, token_budget, lean) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+const stmtInsertSession = db.prepare('INSERT INTO sessions (goal, context, status, started_at, strict_crv, strict_crv_stores, tags, token_budget, lean, strict_crv_compact) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
 const stmtGetCurrentSession = db.prepare("SELECT * FROM sessions WHERE status = 'active' LIMIT 1");
 const stmtGetSession = db.prepare('SELECT * FROM sessions WHERE id = ?');
 const stmtEndSession = db.prepare("UPDATE sessions SET status = 'ended', ended_at = ? WHERE id = ? AND status = 'active'");
@@ -829,6 +857,7 @@ function hydrateSession(row) {
   return {
     ...row,
     strict_crv: !!row.strict_crv,
+    strict_crv_compact: !!row.strict_crv_compact,
     lean: !!row.lean,
     strict_crv_stores: row.strict_crv_stores ? JSON.parse(row.strict_crv_stores) : null,
     tags: row.tags ? JSON.parse(row.tags) : [],
@@ -839,7 +868,7 @@ export function getCurrentSession() {
   return hydrateSession(stmtGetCurrentSession.get() ?? null);
 }
 
-export function startSession({ goal, context, strictCrv, strictCrvStores, tags, tokenBudget, lean }) {
+export function startSession({ goal, context, strictCrv, strictCrvStores, tags, tokenBudget, lean, strictCrvCompact }) {
   if (!goal || typeof goal !== 'string' || !goal.trim()) {
     throw new Error('a non-empty goal is required to start a session');
   }
@@ -849,7 +878,7 @@ export function startSession({ goal, context, strictCrv, strictCrvStores, tags, 
   }
   const startedAt = new Date().toISOString();
   const storesJson = Array.isArray(strictCrvStores) && strictCrvStores.length ? JSON.stringify(strictCrvStores) : null;
-  const info = stmtInsertSession.run(goal, context ?? null, 'active', startedAt, strictCrv ? 1 : 0, storesJson, JSON.stringify(tags ?? []), Number.isFinite(tokenBudget) ? Number(tokenBudget) : null, lean ? 1 : 0);
+  const info = stmtInsertSession.run(goal, context ?? null, 'active', startedAt, strictCrv ? 1 : 0, storesJson, JSON.stringify(tags ?? []), Number.isFinite(tokenBudget) ? Number(tokenBudget) : null, lean ? 1 : 0, strictCrvCompact ? 1 : 0);
   return hydrateSession(stmtGetSession.get(Number(info.lastInsertRowid)));
 }
 
@@ -981,9 +1010,16 @@ export function listActionsSummary(sessionId, { limit } = {}) {
 // result body is read or parsed (only its hash, for "did this re-read change"), so building the
 // swimlane / episode tree / state machine for a long session never pays for the multi-KB dumps
 // listActionsSummary has to parse. Oldest-first, and `limit` keeps the NEWEST N rows.
+// `bytes` is the same delivered-bytes estimate the token-report ledger books (COALESCE real
+// delivered_bytes, else the stored result's own length, else result_blobs.byte_length for a
+// deduped one) - computed in SQL from an int column and LENGTH(), so it costs nothing extra to
+// carry: no result body is read into JS just to size it.
 const stmtListActionsForViz = db.prepare(`
-  SELECT id, session_id, type, params_json, params_hash, result_hash, ok, error, started_at, ended_at, duration_ms, agent_name, intent, intent_source, intent_call
-  FROM actions WHERE session_id = ? ORDER BY id DESC LIMIT ?
+  SELECT a.id, a.session_id, a.type, a.params_json, a.params_hash, a.result_hash, a.ok, a.error,
+         a.started_at, a.ended_at, a.duration_ms, a.agent_name, a.intent, a.intent_source, a.intent_call,
+         COALESCE(a.delivered_bytes, LENGTH(a.result_json), rb.byte_length, 0) AS bytes
+  FROM actions a LEFT JOIN result_blobs rb ON a.result_hash = rb.hash
+  WHERE a.session_id = ? ORDER BY a.id DESC LIMIT ?
 `);
 export function listActionsForViz(sessionId, { limit } = {}) {
   const lim = Number.isFinite(limit) && limit > 0 ? Number(limit) : -1;
@@ -1291,6 +1327,41 @@ export function getActionCostByMacro(sessionId) {
         estTokens: Math.round((r.resultBytes + r.paramsBytes) / CHARS_PER_TOKEN_ESTIMATE),
       };
     })
+    .sort((a, b) => b.estTokens - a.estTokens);
+}
+
+// ---------- token cost by narrated intent (which REASON cost the most) ----------
+//
+// byType/byTarget/byMacro all rank WHAT was called; neither says WHY. intent-import.mjs already
+// recovers the agent's own narration from its transcript and writes it onto the actions it
+// produced (see the intent/intent_source columns above) - one narrated call's window can cover
+// several logged actions (a strict-CRV click logs a before snapshot, the click, an after snapshot
+// and a diff, all under one narration), so grouping by the exact intent text collapses those into
+// one row, and collapses a repeated verification narration ("checking the save wrote a row") back
+// to one line too. Actions with no intent (predates import, or the transcript never covered them)
+// bucket under intent: null - same shape as byMacro's null-macroId bucket. Session-scoped only:
+// a narrated reason is inherently one session's own words, not a cross-session category.
+const stmtActionsForIntentCost = db.prepare(
+  "SELECT a.intent AS intent, LENGTH(COALESCE(a.result_json, rb.json, '')) AS resultBytes, LENGTH(COALESCE(a.params_json, pb.json, '')) AS paramsBytes FROM actions a LEFT JOIN result_blobs rb ON a.result_hash = rb.hash LEFT JOIN params_blobs pb ON a.params_hash = pb.hash WHERE a.session_id = ? ORDER BY a.id ASC",
+);
+
+export function getActionCostByIntent(sessionId) {
+  const rows = stmtActionsForIntentCost.all(Number(sessionId));
+  const byIntent = new Map(); // intent text (or null) -> accumulator
+  for (const r of rows) {
+    const intent = r.intent || null;
+    const cur = byIntent.get(intent) || { intent, calls: 0, resultBytes: 0, paramsBytes: 0 };
+    cur.calls += 1;
+    cur.resultBytes += r.resultBytes;
+    cur.paramsBytes += r.paramsBytes;
+    byIntent.set(intent, cur);
+  }
+  return [...byIntent.values()]
+    .map((r) => ({
+      intent: r.intent ?? '(no narrated intent - action predates transcript import, or the transcript did not cover it)',
+      calls: r.calls,
+      estTokens: Math.round((r.resultBytes + r.paramsBytes) / CHARS_PER_TOKEN_ESTIMATE),
+    }))
     .sort((a, b) => b.estTokens - a.estTokens);
 }
 

@@ -149,6 +149,16 @@ describe('transcript import', () => {
     assert.equal(rows.filter((r) => r.intent).length, 4);
   });
 
+  test('token-report byIntent groups the actions one narrated call produced under one row', async () => {
+    const { result: report } = await api('GET', `/sessions/${sessionId}/token-report`);
+    const narratedRow = report.byIntent.find((r) => r.intent === 'Adding a row to skills to see whether the save works.');
+    assert.ok(narratedRow, JSON.stringify(report.byIntent));
+    assert.equal(narratedRow.calls, 4, 'before-snapshot, click, after-snapshot and diff share one narration');
+    const unnarratedRow = report.byIntent.find((r) => r.intent.startsWith('(no narrated intent'));
+    assert.ok(unnarratedRow, JSON.stringify(report.byIntent));
+    assert.equal(narratedRow.calls + unnarratedRow.calls, actions.length);
+  });
+
   test('refuses a path that is not a .jsonl transcript', async () => {
     const res = await api('POST', `/sessions/${sessionId}/intents/import`, { transcriptPath: path.join(tmp, 'notes.txt') });
     assert.equal(res.status, 400);

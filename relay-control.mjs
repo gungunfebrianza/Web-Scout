@@ -19,7 +19,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Files the relay process loads once at boot. An edit to any of them is
 // invisible to a running relay until it restarts.
-export const RELAY_SOURCE_FILES = ['relay.mjs', 'db.mjs', 'ai.mjs', 'report.mjs', 'command-registry.mjs', 'build-id.mjs', 'relay-control.mjs', 'read-pipeline.mjs', 'read-shape.mjs', 'token-estimate.mjs', 'crv-verify.mjs', 'session-viz.mjs', 'intent-import.mjs'];
+export const RELAY_SOURCE_FILES = ['relay.mjs', 'db.mjs', 'ai.mjs', 'report.mjs', 'command-registry.mjs', 'build-id.mjs', 'relay-control.mjs', 'read-pipeline.mjs', 'read-shape.mjs', 'token-estimate.mjs', 'crv-verify.mjs', 'session-viz.mjs', 'intent-import.mjs', 'trace.mjs', 'transcript-tokens.mjs'];
 
 export function pidfilePath(port) {
   return process.env.WEBSCOUT_PID_PATH || path.join(os.tmpdir(), `webscout-relay-${port}.pid`);
@@ -180,4 +180,82 @@ export async function restartRelay(opts) {
   if (!stopped.stopped && !/nothing is listening/.test(stopped.reason || '')) return { restarted: false, stop: stopped };
   const started = await startRelay(opts);
   return { restarted: !!started.started, stop: stopped, start: started };
+}
+
+// ---------- leaked-relay registry + reaper ----------
+//
+// Any relay process - the real one, or an ephemeral one the test harness spawned - registers
+// itself here on startup and removes itself on a clean shutdown. A hard kill (Ctrl-C twice, a
+// crashed CI runner, a `node relay.mjs` someone forgot about) skips the clean-shutdown path
+// entirely, orphaning the process (and, for a test relay, its temp dir too). Confirmed real
+// twice: 15 orphaned test relays/48 temp dirs in one session, then another 10 orphaned relays/
+// ~200 temp dirs predating this mechanism in a later one - and a real relay accidentally started
+// by `node -e "import('./relay.mjs')"` (a plain syntax-check attempt that actually ran the whole
+// module) went unnoticed because nothing was tracking relays outside the test harness at all.
+//
+// reapLeakedRelays runs automatically once per process: the test harness runs it from the first
+// startTestRelay() call in a run (test-relay.mjs), and a real relay runs it once from its own
+// startup (relay.mjs's isMainModule block) - so a stray relay on some other port gets found and
+// cleaned up the next time ANYONE starts a relay, not only the next `node --test` run. It NEVER
+// touches port 8973 (the real, expected-to-be-always-on relay) even if a stale entry somehow
+// named it, and only reaps an entry older than REAP_AGE_MS - a relay genuinely still starting up
+// must never be mistaken for a leak.
+// A function, not a frozen constant, so WEBSCOUT_RELAY_REGISTRY (read fresh on every call, same
+// convention as pidfilePath() above) lets a test isolate the registry entirely - relay.mjs's own
+// registerRelay/reapLeakedRelays calls take no explicit registryPath, so this is the only way a
+// test spawning a REAL relay.mjs process can verify self-registration without ever touching the
+// real, shared default (every OTHER relay, test or real, that might be starting up concurrently).
+function defaultRegistryPath() { return process.env.WEBSCOUT_RELAY_REGISTRY || path.join(os.tmpdir(), 'webscout-relays.jsonl'); }
+const REAP_AGE_MS = 30 * 60 * 1000; // longer than any real test run, or a relay's own startup, should ever take
+export const REAL_RELAY_PORT = 8973;
+
+function readRegistry(registryPath) {
+  try {
+    return fs.readFileSync(registryPath, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function writeRegistry(entries, registryPath) {
+  try { fs.writeFileSync(registryPath, entries.map((e) => JSON.stringify(e)).join('\n') + (entries.length ? '\n' : '')); } catch { /* best-effort ledger */ }
+}
+
+// `dir` is the relay's own throwaway temp dir (test relays only) - null for the real relay, which
+// has nothing of its own to remove on reap, only itself to never touch (see REAL_RELAY_PORT above).
+export function registerRelay(entry, registryPath = defaultRegistryPath()) {
+  try { fs.appendFileSync(registryPath, `${JSON.stringify(entry)}\n`); } catch { /* best-effort ledger */ }
+}
+
+export function unregisterRelay(pid, dir, registryPath = defaultRegistryPath()) {
+  writeRegistry(readRegistry(registryPath).filter((e) => !(e.pid === pid && e.dir === dir)), registryPath);
+}
+
+function pidAliveLocal(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+// Exported so a developer can run it on demand (`node tools/web-scout/reap-test-relays.mjs`)
+// without waiting for the next automatic pass, and so test-relay-reaper.test.mjs can drive it
+// against an ISOLATED registryPath - the real, default one is shared with every OTHER relay
+// (test or real) that might be starting up concurrently in the same run, and a test exercising an
+// aggressive ageMs must never risk treating one of those as a leak.
+export function reapLeakedRelays({ ageMs = REAP_AGE_MS, verbose = false, registryPath = defaultRegistryPath() } = {}) {
+  const entries = readRegistry(registryPath);
+  const kept = [];
+  let killedRelays = 0;
+  let removedDirs = 0;
+  for (const e of entries) {
+    const age = Date.now() - Date.parse(e.startedAt ?? 0);
+    const stale = Number.isFinite(age) && age > ageMs;
+    if (e.port === REAL_RELAY_PORT || !stale || !pidAliveLocal(e.pid)) {
+      if (stale && !pidAliveLocal(e.pid) && e.dir) { try { fs.rmSync(e.dir, { recursive: true, force: true }); removedDirs += 1; } catch { /* already gone, or in use */ } }
+      if (!stale || e.port === REAL_RELAY_PORT) kept.push(e);
+      continue;
+    }
+    try { process.kill(e.pid); killedRelays += 1; if (verbose) console.error(`reapLeakedRelays: killed orphaned relay pid ${e.pid} on port ${e.port} (${Math.round(age / 60000)}min old)`); } catch { /* already gone */ }
+    if (e.dir) { try { fs.rmSync(e.dir, { recursive: true, force: true }); removedDirs += 1; } catch { /* Windows may still hold it briefly - next reap gets it */ } }
+  }
+  writeRegistry(kept, registryPath);
+  return { killedRelays, removedDirs, remaining: kept.length };
 }

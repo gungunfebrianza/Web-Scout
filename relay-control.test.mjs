@@ -31,7 +31,12 @@ before(async () => {
   port = await freePort();
   opts = {
     port, script, logPath: path.join(tmp, 'relay.log'),
-    env: { WEBSCOUT_DB_PATH: path.join(tmp, 'test.db'), WEBSCOUT_NO_AUTOOPEN: '1', WEBSCOUT_PID_PATH: pidPath },
+    // WEBSCOUT_AUTO_CALIBRATE is opt-in and relay.mjs defaults it off, so this relay (started
+    // directly, not through client.mjs's real autostart/restart call sites - the only places that
+    // set it) never auto-calibrates on its own; WEBSCOUT_TOKEN_CALIBRATION is still redirected
+    // here as defense in depth, since this exact test once wrote a real token-calibration.json
+    // into the project tree before that opt-in flip (see [[web-scout-v35-round]]).
+    env: { WEBSCOUT_DB_PATH: path.join(tmp, 'test.db'), WEBSCOUT_NO_AUTOOPEN: '1', WEBSCOUT_PID_PATH: pidPath, WEBSCOUT_TOKEN_CALIBRATION: path.join(tmp, 'token-calibration.json') },
   };
 });
 

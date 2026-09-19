@@ -42,12 +42,12 @@ export const CLI_SPEC = [
   { cmd: 'relay status', pos: [0, 0], mcp: null, mcpExempt: NOMCP_PROCESS },
 
   {
-    cmd: 'session start', pos: [1, 2], bool: ['--strict-crv', '--auto-snapshot', '--no-briefing', '--lean'], val: ['--tags', '--stores', '--token-budget', '--agent'],
+    cmd: 'session start', pos: [1, 2], bool: ['--strict-crv', '--auto-snapshot', '--no-briefing', '--lean', '--crv-compact'], val: ['--tags', '--stores', '--token-budget', '--agent'],
     mcp: 'webscout_session.start',
-    params: { '--strict-crv': 'strictCrv', '--stores': 'strictCrvStores', '--tags': 'tags', '--token-budget': 'tokenBudget', '--no-briefing': 'noBriefing', '--lean': 'lean' },
+    params: { '--strict-crv': 'strictCrv', '--stores': 'strictCrvStores', '--tags': 'tags', '--token-budget': 'tokenBudget', '--no-briefing': 'noBriefing', '--lean': 'lean', '--crv-compact': 'crvCompact' },
     cliOnly: { '--auto-snapshot': 'convenience wrapper - an MCP caller takes an explicit webscout_idb snapshot action' },
   },
-  { cmd: 'session end', pos: [0, 1], mcp: 'webscout_session.end' },
+  { cmd: 'session end', pos: [0, 1], bool: ['--trace'], mcp: 'webscout_session.end', params: { '--trace': 'trace' } },
   { cmd: 'session current', pos: [0, 0], mcp: 'webscout_session.current' },
   { cmd: 'session list', pos: [0, 0], mcp: 'webscout_session.list' },
   { cmd: 'session show', pos: [1, 1], mcp: 'webscout_session.show' },
@@ -98,6 +98,11 @@ export const CLI_SPEC = [
   {
     cmd: 'idb verify', pos: [0, 1], bool: ['--allow-extra', '--verbose'], val: ['--stores', '--expect', '--expect-file', '--samples', '--agent'], mcp: 'webscout_idb.verify',
     params: { '--stores': 'stores', '--expect': 'expect', '--allow-extra': 'allowExtra', '--samples': 'samples', '--verbose': 'verbose' },
+    cliOnly: { '--expect-file': 'shell-quoting workaround - an MCP caller passes expect inline as a string or JSON' },
+  },
+  {
+    cmd: 'crv run', pos: [0, 0], bool: ['--allow-extra', '--verbose'], val: ['--stores', '--type', '--params', '--expect', '--expect-file', '--samples', '--agent'], mcp: 'webscout_idb.crv_run',
+    params: { '--stores': 'stores', '--type': 'type', '--params': 'params', '--expect': 'expect', '--allow-extra': 'allowExtra', '--samples': 'samples', '--verbose': 'verbose' },
     cliOnly: { '--expect-file': 'shell-quoting workaround - an MCP caller passes expect inline as a string or JSON' },
   },
   { cmd: 'idb diff', pos: [2, 2], mcp: 'webscout_idb.diff' },

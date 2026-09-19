@@ -111,8 +111,9 @@ function runStrategy(trace, strategy, leanGuardTokens) {
     out.reads += 1;
     out.readBytes += shaped.outBytes;
     out.modes[shaped.mode] = (out.modes[shaped.mode] ?? 0) + 1;
-    // leanWorst: a caller handed only the shape asks again, with --no-guard, for the body it needed
-    if (strategy === 'leanWorst' && (shaped.mode === 'guard' || shaped.mode === 'peek')) {
+    // leanWorst: a caller handed only the shape, or told only "unchanged"/"here's what changed",
+    // trusts none of it and asks again with --no-guard for the raw body it needed.
+    if (strategy === 'leanWorst' && (shaped.mode === 'guard' || shaped.mode === 'peek' || shaped.mode === 'pointer' || shaped.mode === 'delta')) {
       const again = pipeline.shape({ sessionId: sid, type: e.type, agentName: 'default', params: e.params ?? {}, cacheKey, full: e.result, hit: true, entry: { cachedAt: 'trace', actionId: i + 1 }, actionId: i + 1, opts: { noGuard: true }, budget: null, lean });
       out.readBytes += again.outBytes;
       out.followUps += 1;
@@ -151,6 +152,44 @@ export function sweepGuard(trace, guards = SWEEP_GUARDS) {
   });
 }
 
+// ---------- ranking traces/auto/ ----------
+//
+// "session end --trace" grows traces/auto/ on its own (relay.mjs's POST /sessions/:id/trace), but
+// nothing ever looks at what piles up there - promoting one into the committed, benchmarked
+// traces/*.json.gz set (trace-replay.test.mjs's MEASURED numbers) stays a human choosing a good
+// session, on purpose (see the roadmap's own note on why that was scoped out of "the corpus grows
+// on its own"). This turns the pile into ranked CANDIDATES instead of a pile: the same
+// distrust-rate signal read-pipeline.mjs and the dashboard already surface (how often a shaped
+// reply got re-asked for in full) is what makes a trace interesting to benchmark against - a
+// session where nothing was ever distrusted proves little a committed trace does not already.
+export function rankAutoTraces({ dir, leanGuardTokens } = {}) {
+  const base = dir || process.env.WEBSCOUT_TRACE_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), 'traces', 'auto');
+  let names = [];
+  try { names = fs.readdirSync(base).filter((f) => f.endsWith('.json.gz') || f.endsWith('.json')); } catch { return { dir: base, candidates: [], broken: [] }; }
+  const candidates = [];
+  const broken = [];
+  for (const name of names) {
+    const file = path.join(base, name);
+    try {
+      const trace = readTrace(file);
+      const r = replayTrace(trace, leanGuardTokens ? { leanGuardTokens } : {});
+      const worst = r.strategies.leanWorst;
+      candidates.push({
+        file: name,
+        events: r.events,
+        reads: r.reads,
+        distrustRatePct: worst.reads ? Math.round((worst.followUps / worst.reads) * 1000) / 10 : 0,
+        totalBytes: worst.totalBytes,
+        readRatioLeanWorst: r.readRatio.leanWorst,
+      });
+    } catch (err) {
+      broken.push({ file: name, error: err.message });
+    }
+  }
+  candidates.sort((a, b) => (b.distrustRatePct - a.distrustRatePct) || (b.totalBytes - a.totalBytes));
+  return { dir: base, candidates, broken };
+}
+
 // ---------- CLI ----------
 
 function flag(args, name) {
@@ -185,7 +224,17 @@ async function main() {
     }
     return;
   }
-  console.log('usage: trace.mjs export <sessionId> --out <file.json[.gz]> [--db <webscout.db>] [--keep a,b]\n       trace.mjs replay <file...> [--guard N] [--sweep]');
+  if (cmd === 'rank-auto') {
+    const dirArg = args.find((a, i) => !a.startsWith('--') && args[i - 1] !== '--top');
+    const top = Number(flag(args, '--top')) || 10;
+    const { dir, candidates, broken } = rankAutoTraces({ dir: dirArg });
+    if (!candidates.length && !broken.length) { console.log(`${dir}: no auto-exported traces found ("session end --trace" writes here).`); return; }
+    console.log(`${dir}: ${candidates.length} trace(s), ranked by leanWorst distrust rate (highest first - the most interesting to promote into a committed benchmark trace):`);
+    for (const c of candidates.slice(0, top)) console.log(`  ${c.file}  ${c.events} events, ${c.reads} reads, ${c.distrustRatePct}% distrusted, ${c.totalBytes} bytes (leanWorst ratio ${c.readRatioLeanWorst})`);
+    if (broken.length) console.log(`  (${broken.length} unreadable, skipped: ${broken.map((b) => b.file).join(', ')})`);
+    return;
+  }
+  console.log('usage: trace.mjs export <sessionId> --out <file.json[.gz]> [--db <webscout.db>] [--keep a,b]\n       trace.mjs replay <file...> [--guard N] [--sweep]\n       trace.mjs rank-auto [dir] [--top N]');
   process.exitCode = 1;
 }
 

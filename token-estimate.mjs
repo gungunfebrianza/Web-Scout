@@ -40,7 +40,7 @@ function loadCalibration() {
       const m = parsed.kinds?.[k];
       if (m && [m.ratio, m.low, m.high].every((n) => Number.isFinite(n) && n > 0) && m.low <= m.ratio && m.ratio <= m.high) kinds[k] = { ratio: m.ratio, low: m.low, high: m.high };
     }
-    return { kinds, meta: { model: parsed.model ?? null, sampledAt: parsed.sampledAt ?? null, path: CALIBRATION_PATH } };
+    return { kinds, meta: { model: parsed.model ?? null, sampledAt: parsed.sampledAt ?? null, method: parsed.method ?? 'count_tokens', path: CALIBRATION_PATH } };
   } catch {
     return { kinds: {}, meta: null };
   }
@@ -80,18 +80,39 @@ export function baselineBand(chars, kind = 'json') {
   return { baseline: baselineTokens(chars), low: e.low, high: e.high };
 }
 
+// relay.mjs's own maybeAutoCalibrate() can try transcript-tokens.mjs's no-key method by itself on
+// "session start" (WEBSCOUT_AUTO_CALIBRATE=1) - but this module has no way to know, by itself,
+// whether THAT already happened for the relay asking. "no usable calibration" reads identically
+// whether auto-calibrate is off, hasn't run yet, or already ran and found nothing - three very
+// different situations for an operator to act on. A caller (relay.mjs) that knows its own
+// process's answer passes it in; this stays a pure function either way.
+function autoCalibrateClause(autoCalibrate) {
+  if (!autoCalibrate) return '';
+  if (!autoCalibrate.enabled) return ' WEBSCOUT_AUTO_CALIBRATE is not set on this relay, so it never tried by itself - set it (client.mjs/cli.mjs already do for a real session), or run the command above by hand.';
+  if (!autoCalibrate.scheduled) return ' WEBSCOUT_AUTO_CALIBRATE=1 is set but has not run yet on this relay - it runs once, shortly after the first "session start".';
+  if (!autoCalibrate.outcome) return ' WEBSCOUT_AUTO_CALIBRATE=1 already started; still finishing.';
+  if (!autoCalibrate.outcome.written) return ` WEBSCOUT_AUTO_CALIBRATE=1 already tried once on this relay and did not write one: ${autoCalibrate.outcome.reason}.`;
+  return '';
+}
+
 // status: 'uncalibrated' (no usable file) | 'partial' (some kinds measured) | 'stale' (measured, but
 // older than STALE_AFTER_DAYS or undated) | 'calibrated'. `now` is a parameter for tests.
-export function estimatorInfo({ now = Date.now() } = {}) {
+// `autoCalibrate` (optional, relay.mjs only): { enabled, scheduled, outcome } describing the
+// asking relay's own maybeAutoCalibrate() state - see autoCalibrateClause above.
+export function estimatorInfo({ now = Date.now(), autoCalibrate } = {}) {
   const { kinds, meta } = state();
   const calibrated = Object.keys(kinds);
   const complete = calibrated.length === Object.keys(DEFAULT_KINDS).length;
   const sampled = meta?.sampledAt ? Date.parse(meta.sampledAt) : NaN;
   const ageDays = Number.isFinite(sampled) ? Math.max(0, Math.floor((now - sampled) / 86400000)) : null;
   const status = !calibrated.length ? 'uncalibrated' : !complete ? 'partial' : ageDays === null || ageDays > STALE_AFTER_DAYS ? 'stale' : 'calibrated';
-  const rerun = 'Run "node tools/web-scout/calibrate-tokens.mjs --write" (needs ANTHROPIC_API_KEY)';
+  // Two ways to measure: the Anthropic count_tokens endpoint (exact, needs a key and credits) or
+  // this tool's own transcripts (an estimate, needs neither) - "node transcript-tokens.mjs --write".
+  const rerun = meta?.method === 'transcripts'
+    ? 'Run "node tools/web-scout/transcript-tokens.mjs --write" again (no API key needed), or "calibrate-tokens.mjs --write" (needs ANTHROPIC_API_KEY) for an exact cross-check'
+    : 'Run "node tools/web-scout/transcript-tokens.mjs --write" (no API key needed) or "node tools/web-scout/calibrate-tokens.mjs --write" (needs ANTHROPIC_API_KEY)';
   const notes = {
-    uncalibrated: `no usable token-calibration.json - ranges are rule-of-thumb defaults. ${rerun} to measure them; ledgers keep reporting chars/4 either way`,
+    uncalibrated: `no usable token-calibration.json - ranges are rule-of-thumb defaults. ${rerun} to measure them; ledgers keep reporting chars/4 either way.${autoCalibrateClause(autoCalibrate)}`,
     partial: `only ${calibrated.join(', ')} are measured; the other kinds still use rule-of-thumb defaults. ${rerun} to measure all three`,
     stale: `the calibration is ${ageDays === null ? 'undated' : `${ageDays} days old (limit ${STALE_AFTER_DAYS})`}. ${rerun} to refresh it`,
     calibrated: 'ranges come from token-calibration.json; every ledger still reports chars/4 so numbers stay comparable across versions',
@@ -103,8 +124,9 @@ export function estimatorInfo({ now = Date.now() } = {}) {
     ageDays,
     staleAfterDays: STALE_AFTER_DAYS,
     calibratedKinds: calibrated,
+    method: meta?.method ?? null,
     kinds: kindsInUse(),
-    source: meta && calibrated.length ? `measured (${meta.model ?? 'unknown model'}, ${meta.sampledAt ?? 'unknown date'})` : 'uncalibrated rule-of-thumb defaults',
+    source: meta && calibrated.length ? `measured (${meta.method === 'transcripts' ? 'from session transcripts, an estimate' : (meta.model ?? 'unknown model')}, ${meta.sampledAt ?? 'unknown date'})` : 'uncalibrated rule-of-thumb defaults',
     note: notes[status],
   };
 }

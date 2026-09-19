@@ -38,7 +38,7 @@ import {
 } from './client.mjs';
 
 const SERVER_NAME = 'web-scout';
-const SERVER_VERSION = '0.21.0'; // bumped alongside docs/web-scout-roadmap.md's V33 entry
+const SERVER_VERSION = '0.24.0'; // bumped alongside docs/web-scout-roadmap.md's V36 entry
 
 // ---------- stdio JSON-RPC framing ----------
 //
@@ -96,7 +96,7 @@ const TOOLS = [
       + '  db_version_check {agent?, dbJsPath?} - js/db.js\'s DB_VERSION (default "js/db.js") vs the tab\'s LIVE IndexedDB version; on drift also probes whether opening at the source version is blocked now, and by what\n'
       + '  dashboard_url {} - the realtime dashboard URL (does not open a browser)\n'
       + '  ping {agent?} - fast liveness probe (no DOM/IndexedDB work) -> {alive, ...}\n'
-      + '  token_report {sessionId?} - estimated tokens per command type (+ byTarget/loops/redundantCalls/byMacro with sessionId); without it the ALL-TIME report incl. savings ledgers\n'
+      + '  token_report {sessionId?} - estimated tokens per command type (+ byTarget/byIntent/loops/redundantCalls/byMacro with sessionId); without it the ALL-TIME report incl. savings ledgers\n'
       + '  debug_state {agent?} - the in-page runtime\'s live state (WebSocket, queues, reconnect backoff)',
     actions: {
       status: () => request('GET', '/health', undefined, { autostart: false }),
@@ -114,8 +114,8 @@ const TOOLS = [
     name: 'webscout_session',
     description: 'Session lifecycle and evidence. A goal MUST be declared (start) before any dom/idb/net/console/eval/page action is accepted; exactly one session is active at a time.\n'
       + 'Actions:\n'
-      + '  start {goal, context?, strictCrv?, strictCrvStores?, tags?, tokenBudget?, noBriefing?, lean?} - declare a session; becomes the active one. strictCrvStores scopes every strictCrv auto-snapshot (omitting it on a real-size db WILL time out). tokenBudget arms a read guard: past 60% of it reads over ~3000 estimated tokens return their shape (noGuard overrides), past 85% ~1000, rows as {columns, rows}. lean makes read shaping the DEFAULT (tables; a pointer/delta for a repeat of a result you hold; the shape of a body over ~4000 tokens; noGuard gives the body). The reply carries a `briefing` (stores + counts, DB version, tab freshness) unless noBriefing\n'
-      + '  end {id?} - end a session (default: the active one)\n'
+      + '  start {goal, context?, strictCrv?, strictCrvStores?, crvCompact?, tags?, tokenBudget?, noBriefing?, lean?} - declare a session; becomes the active one. strictCrvStores scopes every strictCrv auto-snapshot (omitting it on a real-size db WILL time out). crvCompact adds a change preview to every strictCrv reply (verify\'s pass shape), not just counts.tokenBudget arms a read guard: past 60% of it reads over ~3000 estimated tokens return their shape (noGuard overrides), past 85% ~1000, rows as {columns, rows}. lean makes read shaping the DEFAULT (tables; a pointer/delta for a repeat of a result you hold; the shape of a body over ~4000 tokens; noGuard gives the body). The reply carries a `briefing` (stores + counts, DB version, tab freshness) unless noBriefing\n'
+      + '  end {id?, trace?} - end a session (default: the active one); trace also exports it (anonymised) to grow the trace.mjs replay corpus, result.trace: {file, events, reads}\n'
       + '  current {} - the active session, or {active:false}\n'
       + '  list {} - every session, newest first\n'
       + '  show {id} - full detail: actions, snapshots, diffs, qa, console, net\n'
@@ -130,6 +130,7 @@ const TOOLS = [
         const session = await request('POST', '/sessions', {
           goal: requireField(p, 'goal'), context: p.context, strict_crv: !!p.strictCrv,
           strict_crv_stores: Array.isArray(p.strictCrvStores) ? p.strictCrvStores : undefined,
+          crv_compact: !!p.crvCompact,
           tags: p.tags ?? [],
           token_budget: p.tokenBudget !== undefined ? Number(p.tokenBudget) : undefined,
           briefing: p.noBriefing ? false : undefined,
@@ -150,7 +151,11 @@ const TOOLS = [
           if (!health.active_session) throw new Error('no active session to end - pass params.id');
           id = health.active_session.id;
         }
-        return request('POST', `/sessions/${id}/end`);
+        const ended = await request('POST', `/sessions/${id}/end`);
+        if (p?.trace) {
+          try { ended.trace = await request('POST', `/sessions/${ended.id}/trace`); } catch (err) { ended.trace = { error: err.message }; }
+        }
+        return ended;
       },
       current: async () => (await request('GET', '/health')).active_session ?? { active: false },
       list: () => request('GET', '/sessions'),
@@ -261,6 +266,7 @@ const TOOLS = [
       + '  get {store, key, fields?, +shape} - single-key lookup (store.get), not a scan; fields: keep only those keys\n'
       + '  snapshot {stores?, golden?, where?, since?} - capture + PERSIST -> {id, counts}; golden names it a regression baseline; where scopes every store to matching rows (partial by construction). since: a baseline id - fresh snapshot of that baseline\'s stores returning ONLY what changed\n'
       + '  verify {baseline?, stores?, expect?, allowExtra?, samples?, verbose?} - the verify step of baseline -> action -> verify in ONE call: re-snapshots the baseline\'s stores, diffs, checks expect, replies pass/fail plus rows only for what failed. expect: "notes:+1,tags:same" (+N added, +N+ at least N, -N removed, ~N changed, same) or a JSON array; a changed store not named is "unexpected" and fails unless allowExtra; no expect = nothing may change. baseline: snapshot id, golden name, or omitted for the session\'s newest snapshot\n'
+      + '  crv_run {stores, type, params?, expect?, allowExtra?, samples?, verbose?} - snapshot, dispatch {type,params} (not idb.snapshot), verify (above) in one call; action failure fails the call\n'
       + '  diff {idA, idB} - persisted diff of two snapshots\n'
       + '  diff_golden {name, idB} - diff a named golden snapshot (any session) against idB\n'
       + '  restore {snapshotId?, golden?} - PUT a snapshot\'s rows back (never deletes)\n'
@@ -282,6 +288,10 @@ const TOOLS = [
       verify: (p) => request('POST', '/state/verify', {
         agent: p?.agent, baseline: p?.baseline, stores: p?.stores, expect: p?.expect, allowExtra: p?.allowExtra || undefined,
         verbose: p?.verbose || undefined, samples: numOrUndef(p?.samples),
+      }),
+      crv_run: (p) => request('POST', '/crv/run', {
+        agent: p?.agent, stores: requireField(p, 'stores'), type: requireField(p, 'type'), params: p?.params ?? {},
+        expect: p?.expect, allowExtra: p?.allowExtra || undefined, verbose: p?.verbose || undefined, samples: numOrUndef(p?.samples),
       }),
       diff: (p) => request('POST', '/state/diff', { idA: Number(requireField(p, 'idA')), idB: Number(requireField(p, 'idB')) }),
       diff_golden: (p) => request('POST', '/state/diff', { golden: requireField(p, 'name'), idB: Number(requireField(p, 'idB')) }),
