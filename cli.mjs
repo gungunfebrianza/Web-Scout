@@ -286,6 +286,19 @@ async function handleSession(sub, rawArgs) {
     printResult(await request('POST', `/sessions/${id}/cleanup`, { confirm, sinceSnapshotId: sinceSnapshotId !== undefined ? Number(sinceSnapshotId) : undefined, summary }));
     return;
   }
+  if (sub === 'intents') {
+    let args = rawArgs;
+    let transcript;
+    let format;
+    ({ args, value: transcript } = extractFlag(args, '--transcript'));
+    ({ args, value: format } = extractFlag(args, '--format'));
+    const id = args[0];
+    if (!id) throw new Error('session intents requires a session id');
+    if (format !== undefined && !['auto', 'claude', 'codex'].includes(format)) throw new Error('--format must be auto, claude or codex');
+    // The relay may run from another directory - hand it an absolute path.
+    printResult(await request('POST', `/sessions/${id}/intents/import`, { transcriptPath: transcript ? path.resolve(transcript) : undefined, format }));
+    return;
+  }
   if (sub === 'assert') {
     let args = rawArgs;
     ({ args, value: agentFlag } = extractFlag(args, '--agent'));

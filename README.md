@@ -62,6 +62,16 @@ The core discipline, nicknamed **"CRV"** in this codebase:
 - `idb restore` writes a snapshot's data back into IndexedDB
 - Declarative `session assert` checks against live state (e.g. "store X
   has at least 1 row where field Y equals Z")
+- **Session visualizations** in the dashboard, built from rows already stored:
+  an agent **swimlane** (one lane per agent, bar per action, think time between
+  calls made visible), a **state machine** (nodes are distinct snapshot content,
+  edges are the writes between two snapshots, so a return to an earlier state is
+  a loop and a write that changed nothing is flagged), and an **episode tree**
+  (goal > episode > step > action: explore, change, verify, recover)
+- A **Why** column on the Action log, filled from the agent's own transcript by
+  `session intents <id>` (Claude Code and Codex JSONL, matched by time - the
+  agent spends no tokens on it). Actions with no narration get an inferred why,
+  always labelled as inferred
 - Session cleanup tools that find and remove synthetic/test data you wrote
   during a session - `--summary` collapses a large diff to per-store counts
   plus an estBytes/estTokens size estimate, instead of a full row dump
@@ -458,6 +468,12 @@ rule of thumb until `node tools/web-scout/calibrate-tokens.mjs --write` (needs
 `ANTHROPIC_API_KEY`) measures real ratios from your own sessions;
 `calibrate-tokens.mjs --check` says offline whether the committed file is complete and
 fresh (this repository has not been measured yet, so the band is still a rule of thumb).
+
+> **Open item:** the calibration run is pending Anthropic API credits. When available:
+> run `calibrate-tokens.mjs --write`, check with `--check`, commit `token-calibration.json`,
+> then set `WEBSCOUT_REQUIRE_CALIBRATION=1` in CI. The key must be an Anthropic one: the
+> estimator predicts Claude tokens, and another provider's tokenizer would give ratios
+> that are wrong for it. Details in `docs/web-scout-roadmap.md` (V33, item 10).
 
 The dashboard's **Token savings** panel shows the all-time ledgers behind
 `token-report`, split into what they actually measure: bytes never stored

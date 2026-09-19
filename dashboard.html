@@ -217,12 +217,99 @@
   @keyframes act-flash { from { background: var(--warn-bg); } to { background: transparent; } }
   .actions-toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; font-size: 11px; }
   .actions-toolbar button, .actions-toolbar select { font-size: 11px; padding: 2px 8px; }
+  .actions-toolbar label.inline { display: inline-flex; align-items: center; gap: 4px; color: var(--ink-muted); cursor: pointer; }
+  .actions-toolbar input[type="checkbox"] { width: auto; padding: 0; margin: 0; }
   .actions-pill { background: var(--warn-bg); color: var(--warn-fg); border: 1px solid var(--accent-predator); border-radius: 10px; padding: 1px 10px; cursor: pointer; font-size: 11px; }
   .kbd-hint { color: var(--ink-muted); font-size: 10px; margin-left: auto; }
   .kbd-hint kbd { border: 1px solid var(--border-hud); border-radius: 2px; padding: 0 3px; font-family: var(--font-mono); }
   .empty code { display: inline-block; margin-top: 4px; padding: 2px 6px; background: var(--bg-panel-inset); border-radius: 2px; font-style: normal; color: var(--ink-primary); }
   #wsToast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--bg-panel-raised); color: var(--ink-primary); border: 1px solid var(--accent-predator); border-radius: 3px; padding: 6px 14px; font-size: 12px; z-index: 9999; opacity: 0; pointer-events: none; transition: opacity .2s; }
   #wsToast.show { opacity: 1; }
+
+  /* ---- Why column (Action log) ---- */
+  #actionsTable td.col-why { max-width: 200px; min-width: 90px; }
+  .act-why { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 11px; line-height: 1.35; color: var(--ink-primary); word-break: break-word; }
+  .act-why.inferred { color: var(--ink-muted); font-style: italic; }
+  .act-why.thinking { color: var(--accent-info); }
+  .act-why.carried, .ep-step-why.carried, .ep-title.carried { opacity: .78; }
+  .why-status { font-size: 11px; color: var(--ink-muted); }
+
+  /* ---- session visualizations: swimlane, state machine, episode tree ---- */
+  .viz-note { font-size: 11px; color: var(--ink-muted); margin: 0 0 6px; }
+  .viz-scroll { overflow-x: auto; overflow-y: hidden; padding-bottom: 4px; }
+  .viz-toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; font-size: 11px; }
+  .viz-toolbar button, .viz-toolbar select { font-size: 11px; padding: 2px 8px; }
+  .viz-stats { display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 11px; color: var(--ink-muted); margin-top: 6px; }
+  .viz-stats b { color: var(--ink-primary); font-weight: 600; }
+  .viz-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .viz-svg { display: block; }
+  .viz-svg text { font-family: var(--font-mono); font-size: 10px; fill: var(--ink-muted); }
+  .viz-svg .viz-axis { stroke: var(--border-hud); stroke-width: 1; }
+  .viz-svg .sw-lane-bg { fill: rgba(124,255,60,.025); }
+  .viz-svg .sw-lane-label { fill: var(--ink-primary); font-size: 11px; }
+  .viz-svg .sw-bar { cursor: pointer; }
+  .viz-svg .sw-bar:hover { filter: brightness(1.5); }
+  .viz-svg .sw-bar.fail { stroke: var(--accent-danger); stroke-width: 1.5; fill: var(--fail-bg) !important; }
+  .viz-svg .sw-gap { stroke: var(--ink-muted); stroke-width: 1; stroke-dasharray: 2 3; }
+  .viz-svg .sw-gap.long { stroke: var(--accent-predator); }
+  .viz-svg .sw-gap-label { fill: var(--accent-predator); }
+  .viz-svg .sw-idle text { fill: var(--ink-muted); }
+  .viz-svg .sw-idle rect { fill: url(#swHatch); stroke: var(--border-hud); }
+  .sm-node { cursor: pointer; }
+  .sm-node rect.sm-box { fill: var(--bg-panel-raised); stroke: var(--accent-info); stroke-width: 1.2; }
+  .sm-node.current rect.sm-box { stroke: var(--accent-predator); stroke-width: 2; filter: drop-shadow(0 0 4px rgba(255,157,0,.45)); }
+  .sm-node.hl rect.sm-box, .sm-node.selected rect.sm-box { fill: var(--active-bg); }
+  .sm-node.selected rect.sm-box { stroke: var(--accent-alien); stroke-width: 2; }
+  .sm-node:hover rect.sm-box { stroke: var(--accent-alien); }
+  .viz-svg .sm-title { fill: var(--ink-primary); font-size: 12px; font-weight: 600; }
+  .viz-svg .sm-sub { fill: var(--ink-muted); font-size: 10px; }
+  .viz-svg .sm-gold { fill: var(--accent-predator); }
+  .viz-svg .sm-now { fill: var(--accent-predator); font-size: 9px; letter-spacing: .06em; }
+  .sm-edge { cursor: pointer; }
+  .sm-edge path.sm-line { fill: none; stroke: var(--accent-info); stroke-width: 1.4; }
+  .sm-edge path.sm-hit { fill: none; stroke: transparent; stroke-width: 12; }
+  .sm-edge.nochange path.sm-line { stroke: var(--accent-predator); stroke-dasharray: 4 3; }
+  .sm-edge.fail path.sm-line { stroke: var(--accent-danger); }
+  .sm-edge:hover path.sm-line, .sm-edge.selected path.sm-line { stroke-width: 2.6; }
+  .viz-svg .sm-edge text { fill: var(--ink-primary); paint-order: stroke; stroke: var(--bg-panel); stroke-width: 3px; stroke-linejoin: round; }
+  .viz-svg .sm-edge text.muted { fill: var(--ink-muted); }
+  .sm-trail { display: flex; flex-wrap: wrap; gap: 2px 4px; align-items: center; margin-top: 6px; font-size: 11px; color: var(--ink-muted); }
+  .sm-trail button { font-size: 10px; padding: 0 6px; border-radius: 9px; }
+  .sm-trail button.current { border-color: var(--accent-predator); color: var(--accent-predator); }
+  .sm-insights { margin: 6px 0 0; padding-left: 16px; font-size: 11px; color: var(--accent-predator); }
+  .sm-detail { margin-top: 8px; padding: 6px 8px; border: 1px solid var(--border-hud); border-radius: 3px; background: var(--bg-panel-inset); font-size: 11px; }
+  .sm-detail h3 { margin: 0 0 4px; font-family: var(--font-display); font-size: 11px; letter-spacing: .08em; color: var(--accent-info); text-transform: uppercase; }
+  .sm-detail table { font-size: 11px; width: auto; }
+  .sm-detail a, .sm-detail button.linklike { color: var(--accent-info); cursor: pointer; text-decoration: underline; background: none; border: none; padding: 0; font: inherit; text-transform: none; letter-spacing: 0; box-shadow: none; }
+  .ep-list { display: flex; flex-direction: column; gap: 4px; max-height: 560px; overflow-y: auto; }
+  details.ep { border: 1px solid var(--border-hud); border-left: 3px solid var(--accent-info); border-radius: 2px; background: var(--bg-panel-inset); }
+  details.ep.outcome-ok { border-left-color: var(--accent-alien); }
+  details.ep.outcome-recovered { border-left-color: var(--accent-predator); }
+  details.ep.outcome-failed { border-left-color: var(--accent-danger); }
+  details.ep.hl { background: var(--active-bg); }
+  details.ep > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; padding: 4px 8px; cursor: pointer; list-style: none; }
+  details.ep > summary::-webkit-details-marker { display: none; }
+  details.ep > summary::before { content: '\25B8'; color: var(--ink-muted); font-size: 10px; }
+  details.ep[open] > summary::before { content: '\25BE'; }
+  .ep-id { font-size: 10px; color: var(--ink-muted); }
+  .ep-kind { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; padding: 0 6px; border-radius: 8px; border: 1px solid var(--border-hud); color: var(--accent-info); }
+  .ep-title { flex: 1; min-width: 120px; color: var(--ink-primary); }
+  .ep-title.inferred { color: var(--ink-muted); font-style: italic; }
+  .ep-title.thinking, .ep-step-why.thinking { color: var(--accent-info); }
+  .ep-meta { font-size: 10px; color: var(--ink-muted); white-space: nowrap; }
+  .ep-steps { padding: 2px 8px 6px 20px; display: flex; flex-direction: column; gap: 1px; }
+  .ep-step { display: grid; grid-template-columns: 52px minmax(90px, 170px) 1fr auto; gap: 8px; align-items: baseline; padding: 1px 4px; border-radius: 2px; cursor: pointer; font-size: 11px; }
+  .ep-step:hover { background: var(--bg-panel-raised); }
+  .ep-step.fail { color: var(--accent-danger); }
+  .ep-phase { font-size: 9px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-muted); }
+  .ep-phase.act { color: var(--accent-predator); }
+  .ep-phase.verify { color: var(--accent-alien); }
+  .ep-phase.recover { color: var(--accent-danger); }
+  .ep-step-type { color: var(--ink-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ep-step-why { color: var(--ink-primary); word-break: break-word; }
+  .ep-step-why.inferred { color: var(--ink-muted); font-style: italic; }
+  .ep-step-ms { color: var(--ink-muted); font-size: 10px; }
+  .ep-err { grid-column: 3 / -1; color: var(--accent-danger); font-size: 10px; }
 
   /* ---- cross-session viz block ---- */
   .heatmap-table { border-collapse: collapse; font-size: 11px; }
@@ -702,6 +789,9 @@
   <div class="actions-toolbar">
     <button type="button" id="actionsPauseBtn" title="Freeze the table so it stops rebuilding while you read a long result">Pause live</button>
     <span id="actionsNewPill" class="actions-pill" hidden></span>
+    <label class="inline" title="Show the Why column: the agent's own narration before each call (from its transcript), or a marked-inferred guess"><input type="checkbox" id="actionsShowWhy"> Why</label>
+    <button type="button" data-import-why title="Read the agent's transcript (Claude Code / Codex) and fill in why each call was made. Costs the agent no tokens.">Import why</button>
+    <span data-why-status class="why-status"></span>
     <select id="actionExport" title="Download the currently filtered rows">
       <option value="">Export view...</option>
       <option value="json">JSON</option>
@@ -710,10 +800,52 @@
     <span class="kbd-hint"><kbd>j</kbd>/<kbd>k</kbd> move &middot; <kbd>Enter</kbd> expand &middot; <kbd>c</kbd> copy CLI</span>
   </div>
   <div id="actionsFailStrip" class="fail-burst-strip"></div>
-  <div class="hud-scroll-body"><table id="actionsTable"><thead><tr><th>Time</th><th>Agent</th><th>Type</th><th>Target / result</th><th id="actionDurationHeader" class="sortable" title="Click to sort by duration">ms</th></tr></thead><tbody></tbody></table></div>
+  <div class="hud-scroll-body"><table id="actionsTable"><thead><tr><th>Time</th><th>Agent</th><th>Type</th><th class="col-why" title="Why the agent ran this. Plain text = its own words from its transcript; italic with a leading ≈ = inferred from the call sequence.">Why</th><th>Target / result</th><th id="actionDurationHeader" class="sortable" title="Click to sort by duration">ms</th></tr></thead><tbody></tbody></table></div>
   <div id="actionsEmpty" class="empty" hidden>No actions recorded yet.</div>
   </section>
   </div>
+
+  <section class="hud-section" id="swimlaneSection">
+  <h2>Agent swimlane</h2>
+  <div class="viz-note">one lane per agent, one bar per action; the dashed line between two bars is time the agent spent away before its next call (thinking, or waiting on you). Long absences are collapsed. Click a bar to jump to its row.</div>
+  <div class="viz-toolbar">
+    <button type="button" id="swimZoomOut" title="Zoom out">&minus;</button>
+    <button type="button" id="swimZoomIn" title="Zoom in">+</button>
+    <button type="button" id="swimZoomFit" title="Fit to width">Fit</button>
+  </div>
+  <div class="viz-scroll" id="swimlaneBody"></div>
+  <div id="swimlaneStats" class="viz-stats"></div>
+  <div id="swimlaneEmpty" class="empty" hidden>No actions recorded yet.</div>
+  </section>
+
+  <section class="hud-section" id="stateMachineSection">
+  <h2>State machine</h2>
+  <div class="viz-note">each box is a distinct database state (snapshots with identical content are one box); each arrow is what ran between two snapshots. An arrow back to an earlier box means the session returned to a state it had already been in; a dashed arrow is a write that changed nothing. Click a box or an arrow for detail.</div>
+  <div class="viz-scroll" id="stateMachineBody"></div>
+  <div id="stateMachineTrail" class="sm-trail"></div>
+  <div id="stateMachineStats" class="viz-stats"></div>
+  <ul id="stateMachineInsights" class="sm-insights"></ul>
+  <div id="stateMachineDetail" class="sm-detail" hidden></div>
+  <div id="stateMachineEmpty" class="empty" hidden>No snapshots yet - the state graph is built from them. Take one with <code>idb snapshot</code>, or start the session with <code>--strict-crv</code> so every write is snapshotted before and after.</div>
+  </section>
+
+  <section class="hud-section" id="episodesSection">
+  <h2>Episodes</h2>
+  <div class="viz-note">goal &gt; episode &gt; step &gt; action. Consecutive calls are grouped by what the agent was doing: looking around, changing something, checking it took, recovering from a failure. Plain text is the agent's own words; italic with a leading &asymp; is inferred.</div>
+  <div class="viz-toolbar">
+    <select id="episodeFilter" title="Which episodes to list">
+      <option value="all">all episodes</option>
+      <option value="problem">failed or recovered</option>
+      <option value="change">changes only</option>
+    </select>
+    <button type="button" data-import-why title="Read the agent's transcript (Claude Code / Codex) and fill in why each call was made. Costs the agent no tokens.">Import why from transcript</button>
+    <span data-why-status class="why-status"></span>
+  </div>
+  <div id="episodesGoal" class="viz-note"></div>
+  <div id="episodesSummary" class="viz-stats" style="margin: 0 0 6px;"></div>
+  <div id="episodesList" class="ep-list"></div>
+  <div id="episodesEmpty" class="empty" hidden>No actions recorded yet.</div>
+  </section>
 
   <div class="hud-grid-2">
   <section class="hud-section hud-scroll-col" id="tokenSection">
@@ -1348,7 +1480,7 @@ function actionMatchesFilters(a) {
   if (okFilter === 'ok' && !a.ok) return false;
   if (okFilter === 'fail' && a.ok) return false;
   if (text) {
-    const haystack = [a.type, JSON.stringify(a.params), JSON.stringify(a.result), a.error].filter(Boolean).join(' ').toLowerCase();
+    const haystack = [a.type, JSON.stringify(a.params), JSON.stringify(a.result), a.error, whyInfo(a)?.text].filter(Boolean).join(' ').toLowerCase();
     if (!haystack.includes(text)) return false;
   }
   return true;
@@ -1374,7 +1506,7 @@ function tickPendingRows() {
     const startedAt = tr.dataset.startedAt;
     if (!startedAt) continue;
     const elapsed = ((Date.now() - new Date(startedAt).getTime()) / 1000).toFixed(1);
-    tr.children[4].textContent = `${elapsed}s`;
+    tr.lastElementChild.textContent = `${elapsed}s`;
   }
 }
 
@@ -1385,7 +1517,7 @@ function renderPendingRows(tbody) {
     const tr = document.createElement('tr');
     tr.className = 'pending-row';
     tr.dataset.startedAt = p.startedAt;
-    tr.innerHTML = `<td>${fmtTime(p.startedAt)}</td><td>${agentChipHtml(p.agentName)}</td><td>${esc(p.type)}</td><td><span class="spinner"></span>running...</td><td>${elapsed}s</td>`;
+    tr.innerHTML = `<td>${fmtTime(p.startedAt)}</td><td>${agentChipHtml(p.agentName)}</td><td>${esc(p.type)}</td>${showWhy ? '<td class="col-why"></td>' : ''}<td><span class="spinner"></span>running...</td><td>${elapsed}s</td>`;
     tbody.insertBefore(tr, tbody.firstChild);
   }
   if (!pendingTickTimer) pendingTickTimer = setInterval(() => { if (pendingActions.size) tickPendingRows(); }, 500);
@@ -1494,7 +1626,7 @@ function appendActionRow(a, body, scrollTops) {
   const durMs = a.duration_ms;
   const durPct = durMs != null && actionDurP95 > 0 ? Math.min(100, Math.round((durMs / actionDurP95) * 100)) : 0;
   const durSlow = durMs != null && actionDurP95 > 0 && durMs >= actionDurP95 && durMs >= 500;
-  tr.innerHTML = `<td class="${actionTypeAccentClass(a.type)}" title="${esc(fmtAgo(a.started_at))}"><span class="chevron">&#9656;</span>${fmtTime(a.started_at)}${gap >= 1000 ? `<span class="act-gap" title="idle since the previous action finished">+${esc(fmtDur(gap))}</span>` : ''}</td><td>${agentChipHtml(a.agent_name)}</td><td>${esc(a.type)}</td><td class="act-result"><span class="badge ${a.ok ? 'badge-ok' : 'badge-fail'}">${a.ok ? 'ok' : 'fail'}</span>${target ? `<span class="act-target" title="${esc(target)}">${esc(clip(target, 120))}</span>` : ''}${tokHtml}${errHtml}</td><td><div class="dur-cell${durSlow ? ' dur-slow' : ''}" ${durMs != null ? `title="${durSlow ? 'at or above this session\'s p95' : 'bar = share of this session\'s p95'} (${esc(fmtDur(actionDurP95))})"` : ''}><span class="dur-fill" style="width:${durPct}%"></span><span class="dur-num">${durMs ?? ''}</span></div></td>`;
+  tr.innerHTML = `<td class="${actionTypeAccentClass(a.type)}" title="${esc(fmtAgo(a.started_at))}"><span class="chevron">&#9656;</span>${fmtTime(a.started_at)}${gap >= 1000 ? `<span class="act-gap" title="idle since the previous action finished">+${esc(fmtDur(gap))}</span>` : ''}</td><td>${agentChipHtml(a.agent_name)}</td><td>${esc(a.type)}</td>${showWhy ? `<td class="col-why" data-why-for="${a.id}">${whyCellHtml(a)}</td>` : ''}<td class="act-result"><span class="badge ${a.ok ? 'badge-ok' : 'badge-fail'}">${a.ok ? 'ok' : 'fail'}</span>${target ? `<span class="act-target" title="${esc(target)}">${esc(clip(target, 120))}</span>` : ''}${tokHtml}${errHtml}</td><td><div class="dur-cell${durSlow ? ' dur-slow' : ''}" ${durMs != null ? `title="${durSlow ? 'at or above this session\'s p95' : 'bar = share of this session\'s p95'} (${esc(fmtDur(actionDurP95))})"` : ''}><span class="dur-fill" style="width:${durPct}%"></span><span class="dur-num">${durMs ?? ''}</span></div></td>`;
   tr.addEventListener('click', async () => {
     kbdFocusKey = tr.dataset.kbd;
     const existing = tr.nextElementSibling;
@@ -1533,13 +1665,47 @@ function saveActionPrefs() {
   try {
     localStorage.setItem(ACTION_PREFS_KEY, JSON.stringify({
       type: savedTypeFilter, ok: el('actionOkFilter').value,
-      search: el('actionSearch').value, sortDuration: actionsSortByDuration,
+      search: el('actionSearch').value, sortDuration: actionsSortByDuration, why: showWhy,
     }));
   } catch { /* prefs just won't persist */ }
 }
 const initialActionPrefs = loadActionPrefs();
 let savedTypeFilter = initialActionPrefs.type || '';
 let actionsSortByDuration = !!initialActionPrefs.sortDuration;
+// The Why column is on unless the viewer turned it off.
+let showWhy = initialActionPrefs.why !== false;
+// Column count of the Action log right now - rows that span the whole table need it.
+function actionColCount() { return showWhy ? 6 : 5; }
+
+// Why an action ran. The agent's own words (actions.intent, imported from its transcript) win;
+// otherwise the relay's inferred guess from the call sequence (GET /viz -> episodes.why). Each
+// carries its source so an inference is never shown as the agent's reasoning.
+let vizWhy = {};
+function whyInfo(a) {
+  if (a.intent) return { text: a.intent, source: a.intent_source || 'transcript' };
+  const v = vizWhy[a.id];
+  return v ? { text: v[0], source: v[1] } : null;
+}
+function whyCellHtml(a) {
+  const w = whyInfo(a);
+  if (!w) return '';
+  if (w.source === 'inferred') return `<span class="act-why inferred" title="${esc(w.text)} - inferred from the call sequence, not the agent's own words">&asymp; ${esc(clip(w.text, 140))}</span>`;
+  const thinking = w.source === 'transcript-thinking';
+  const carried = w.source === 'transcript-carried';
+  const how = thinking ? 'from the agent\'s reasoning block, no narration preceded this call'
+    : (carried ? 'the agent\'s narration a call or two earlier, still in force - not said right before this call' : 'the agent\'s own narration, from its transcript');
+  return `<span class="act-why${thinking ? ' thinking' : ''}${carried ? ' carried' : ''}" title="${esc(w.text)} - ${how}">${carried ? '&crarr; ' : '&ldquo;'}${esc(clip(w.text, 140))}${carried ? '' : '&rdquo;'}</span>`;
+}
+// Refreshes the Why cells of rows already on screen - the viz fetch usually lands after the table
+// rendered, and a full rebuild would tear down anything the viewer just expanded.
+function paintWhyCells() {
+  if (!showWhy) return;
+  for (const td of document.querySelectorAll('#actionsTable td[data-why-for]')) {
+    const a = actionById(Number(td.dataset.whyFor));
+    const html = a ? whyCellHtml(a) : '';
+    if (td.innerHTML !== html) td.innerHTML = html;
+  }
+}
 
 let actionsPaused = false;
 let pausedLatest = null;
@@ -1608,7 +1774,7 @@ function revealAction(id) {
   kbdFocusKey = `a${id}`;
   renderActions(lastActions);
   const tr = document.querySelector(`#actionsTable tr[data-kbd="a${id}"]`);
-  if (!tr) return;
+  if (!tr) { toast(`#${id} is not in the Action log view - filtered out or past the row cap`); return; }
   tr.scrollIntoView({ block: 'center', behavior: 'smooth' });
   tr.classList.remove('act-flash');
   void tr.offsetWidth;
@@ -1670,14 +1836,14 @@ function renderActions(actions) {
       const tr = document.createElement('tr');
       tr.className = 'expandable';
       tr.dataset.kbd = `g${first.id}`;
-      tr.innerHTML = `<td colspan="5"><span class="badge badge-crv">${esc(first.type)} &times;${group.length} (collapsed)</span> <span class="muted">${fmtTime(last.started_at)} &rarr; ${fmtTime(first.started_at)} - click to expand</span></td>`;
+      tr.innerHTML = `<td colspan="${actionColCount()}"><span class="badge badge-crv">${esc(first.type)} &times;${group.length} (collapsed)</span> <span class="muted">${fmtTime(last.started_at)} &rarr; ${fmtTime(first.started_at)} - click to expand</span></td>`;
       tr.addEventListener('click', () => { kbdFocusKey = tr.dataset.kbd; expandedGroupIds.add(group[0].id); renderActions(lastActions); });
       body.appendChild(tr);
       continue;
     }
     if (group.length >= groupMin) {
       const collapseTr = document.createElement('tr');
-      collapseTr.innerHTML = `<td colspan="5" class="muted" style="cursor:pointer;">&uarr; collapse ${group.length} &times; ${esc(group[0].type)}</td>`;
+      collapseTr.innerHTML = `<td colspan="${actionColCount()}" class="muted" style="cursor:pointer;">&uarr; collapse ${group.length} &times; ${esc(group[0].type)}</td>`;
       collapseTr.addEventListener('click', () => { expandedGroupIds.delete(group[0].id); renderActions(lastActions); });
       body.appendChild(collapseTr);
     }
@@ -1685,7 +1851,7 @@ function renderActions(actions) {
   }
   if (filtered.length > settings.actionsRenderCap) {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td colspan="5" class="muted">... ${filtered.length - settings.actionsRenderCap} earlier row(s) not shown (capped at ${settings.actionsRenderCap} most recent - adjust in Settings) - narrow with the type/status/search filters above to see older rows</td>`;
+    tr.innerHTML = `<td colspan="${actionColCount()}" class="muted">... ${filtered.length - settings.actionsRenderCap} earlier row(s) not shown (capped at ${settings.actionsRenderCap} most recent - adjust in Settings) - narrow with the type/status/search filters above to see older rows</td>`;
     body.appendChild(tr);
   }
   renderPendingRows(body);
@@ -2448,7 +2614,7 @@ let lastActionsFp = null, lastSnapshotsFp = null, lastDiffsFp = null, lastConsol
 function showSkeletonRows(tableId, rows) {
   const table = document.getElementById(tableId);
   if (!table) return;
-  const cols = table.querySelector('thead tr').children.length;
+  const cols = [...table.querySelector('thead tr').children].filter((c) => !c.hidden).length;
   const tbody = table.querySelector('tbody');
   tbody.innerHTML = new Array(rows).fill(
     `<tr class="skeleton-row"><td colspan="${cols}"><div class="skeleton-bar"></div></td></tr>`
@@ -2537,6 +2703,436 @@ async function refreshVerityRuns() {
   return panelTick('veritySection', true);
 }
 
+// ---------- Session visualizations: swimlane, state machine, episode tree ----------
+// All three are derived server-side from rows already stored (GET /sessions/:id/viz, see
+// session-viz.mjs) and re-fetched only when the action / snapshot / diff fingerprints move, so an
+// idle tick costs nothing. They share one payload so they always describe the same moment.
+let lastViz = null;
+let lastVizFp = null;
+let vizSeq = 0;
+const VIZ_PANELS = ['swimlaneSection', 'stateMachineSection', 'episodesSection'];
+
+async function refreshViz(force = false) {
+  if (!currentSessionId) return false;
+  const fp = `${lastActionsFp}|${lastSnapshotsFp}|${lastDiffsFp}`;
+  if (!force && fp === lastVizFp) { for (const id of VIZ_PANELS) panelTick(id, false); return false; }
+  const sid = currentSessionId;
+  const seq = ++vizSeq;
+  const viz = await api('GET', `/sessions/${sid}/viz?limit=1500`);
+  // A slower earlier request must not overwrite a newer one, nor a session the viewer left.
+  if (seq !== vizSeq || sid !== currentSessionId) return false;
+  lastVizFp = fp;
+  lastViz = viz;
+  vizWhy = viz.episodes?.why ?? {};
+  renderSwimlane();
+  renderStateMachine();
+  renderEpisodes();
+  paintWhyCells();
+  for (const id of VIZ_PANELS) panelTick(id, true);
+  return true;
+}
+const debouncedVizRefresh = debounce(() => { refreshViz().catch(() => { /* derived view - the panels keep their last render */ }); }, 400);
+
+function resetViz() {
+  lastViz = null;
+  lastVizFp = null;
+  vizWhy = {};
+  vizSeq += 1;
+  smSel = null;
+  smHighlight = new Set();
+  epUser.clear();
+  epRendered.clear();
+  epHighlightId = null;
+}
+
+// Jump from any visualization to the Action log row it stands for.
+function jumpToAction(id) {
+  goToPanel('actionsSection', { updateHash: false });
+  revealAction(id);
+}
+
+// ---- transcript import ("Why") ----
+let whyImporting = false;
+async function importWhy() {
+  if (!currentSessionId || whyImporting) return;
+  whyImporting = true;
+  const buttons = document.querySelectorAll('[data-import-why]');
+  const setStatus = (text) => document.querySelectorAll('[data-why-status]').forEach((s) => { s.textContent = text; });
+  buttons.forEach((b) => { b.disabled = true; });
+  setStatus('reading transcripts...');
+  try {
+    const r = await api('POST', `/sessions/${currentSessionId}/intents/import`, {});
+    const total = r.matchedActions + r.unmatchedActions;
+    setStatus(r.matchedActions
+      ? `${r.matchedActions} of ${total} action(s) matched from ${r.transcripts.length} transcript(s)`
+      : `0 of ${total} matched - none of the ${r.transcripts.length} transcript(s) narrated a web-scout call during this session`);
+    toast(`why imported for ${r.matchedActions} action(s)`);
+    // Rows changed under an unchanged fingerprint: force both views to re-read them.
+    lastActionsFp = 'stale';
+    await refreshActions();
+    await refreshViz(true);
+  } catch (err) {
+    setStatus(`nothing imported: ${err.message}`);
+  } finally {
+    whyImporting = false;
+    buttons.forEach((b) => { b.disabled = false; });
+  }
+}
+document.addEventListener('click', (e) => { if (e.target.closest('[data-import-why]')) importWhy(); });
+
+function applyWhyColumn() {
+  el('actionsShowWhy').checked = showWhy;
+  document.querySelectorAll('#actionsTable th.col-why').forEach((th) => { th.hidden = !showWhy; });
+}
+
+// ---- swimlane ----
+let swimZoom = 1;
+const SW = { gutter: 96, laneH: 32, barH: 16, axisH: 22, idleW: 46, minBar: 3, pad: 14 };
+const SW_TICK_STEPS = [100, 250, 500, 1000, 2000, 5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000, 1800000];
+
+// Piecewise time axis: live segments scale with the zoom, collapsed idle gaps stay a fixed width.
+function swimLayout(model, width) {
+  const segs = model.segments;
+  const idleCount = segs.filter((s) => s.collapsed).length;
+  const liveMs = segs.filter((s) => !s.collapsed).reduce((n, s) => n + (s.t1 - s.t0), 0) || 1;
+  const avail = Math.max(360, width - SW.gutter - SW.pad - idleCount * SW.idleW);
+  const pxPerMs = (avail / liveMs) * swimZoom;
+  const starts = [];
+  let x = SW.gutter;
+  for (const s of segs) { starts.push(x); x += s.collapsed ? SW.idleW : (s.t1 - s.t0) * pxPerMs; }
+  const xOf = (t) => {
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      if (t <= s.t1 || i === segs.length - 1) {
+        const span = s.t1 - s.t0 || 1;
+        return starts[i] + (s.collapsed ? Math.min(1, Math.max(0, (t - s.t0) / span)) * SW.idleW : Math.max(0, t - s.t0) * pxPerMs);
+      }
+    }
+    return SW.gutter;
+  };
+  return { xOf, width: x + SW.pad, starts, pxPerMs };
+}
+
+function whyLine(id) {
+  const w = vizWhy[id];
+  return w ? `${w[1] === 'inferred' ? '≈ ' : ''}${w[0]}` : '';
+}
+
+function renderSwimlane() {
+  const model = lastViz?.swimlane;
+  const body = el('swimlaneBody');
+  const has = !!model && model.bars.length > 0;
+  el('swimlaneEmpty').hidden = has;
+  if (!has) { body.innerHTML = ''; el('swimlaneStats').innerHTML = ''; return; }
+  const lay = swimLayout(model, body.clientWidth || 800);
+  const lanesH = model.lanes.length * SW.laneH;
+  const H = SW.axisH + lanesH + 6;
+  const parts = [`<svg class="viz-svg" width="${Math.ceil(lay.width)}" height="${H}" role="img" aria-label="Agent swimlane: ${model.bars.length} actions across ${model.lanes.length} agent(s)">`];
+  parts.push('<defs><pattern id="swHatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--border-hud)" stroke-width="2"/></pattern></defs>');
+  model.lanes.forEach((lane, i) => {
+    const y = SW.axisH + i * SW.laneH;
+    if (i % 2 === 0) parts.push(`<rect class="sw-lane-bg" x="0" y="${y}" width="${Math.ceil(lay.width)}" height="${SW.laneH}"/>`);
+    parts.push(`<text class="sw-lane-label" x="6" y="${y + SW.laneH / 2 + 4}"><title>${esc(lane.agent)}: ${lane.actions} action(s), ${lane.failed} failed</title>${esc(clip(lane.agent, 11))}${lane.failed ? ` <tspan style="fill:var(--accent-danger)">${lane.failed}!</tspan>` : ''}</text>`);
+  });
+  // Collapsed idle gaps.
+  model.segments.forEach((s, i) => {
+    if (!s.collapsed) return;
+    const x = lay.starts[i];
+    parts.push(`<g class="sw-idle"><rect x="${x}" y="${SW.axisH}" width="${SW.idleW}" height="${lanesH}"><title>nobody called anything for ${esc(fmtDur(s.t1 - s.t0))} - collapsed</title></rect><text transform="rotate(-90 ${x + SW.idleW / 2 + 3} ${SW.axisH + lanesH / 2})" x="${x + SW.idleW / 2 + 3}" y="${SW.axisH + lanesH / 2}" text-anchor="middle">idle ${esc(fmtDur(s.t1 - s.t0))}</text></g>`);
+  });
+  // Time axis: relative to the first action, ticks only over live segments.
+  parts.push(`<line class="viz-axis" x1="${SW.gutter}" y1="${SW.axisH}" x2="${Math.ceil(lay.width)}" y2="${SW.axisH}"/>`);
+  const step = SW_TICK_STEPS.find((s) => s * lay.pxPerMs >= 70) ?? SW_TICK_STEPS[SW_TICK_STEPS.length - 1];
+  model.segments.forEach((s) => {
+    if (s.collapsed) return;
+    for (let t = Math.ceil(s.t0 / step) * step; t <= s.t1; t += step) {
+      const x = lay.xOf(t);
+      parts.push(`<line class="viz-axis" x1="${x}" y1="${SW.axisH - 4}" x2="${x}" y2="${SW.axisH}"/><text x="${x + 2}" y="${SW.axisH - 7}">+${esc(fmtDur(t))}</text>`);
+    }
+  });
+  // Time the agent spent away, then the bars on top of it.
+  for (const g of model.gaps) {
+    if (g.kind !== 'think') continue;
+    const y = SW.axisH + g.lane * SW.laneH + SW.laneH / 2;
+    const x1 = lay.xOf(g.t0);
+    const x2 = lay.xOf(g.t1);
+    parts.push(`<line class="sw-gap${g.ms >= 10000 ? ' long' : ''}" x1="${x1}" y1="${y}" x2="${x2}" y2="${y}"><title>away ${esc(fmtDur(g.ms))} between #${g.fromId} and #${g.toId}</title></line>`);
+    if (g.ms >= 2000 && x2 - x1 > 34) parts.push(`<text class="sw-gap-label" x="${(x1 + x2) / 2}" y="${y - 10}" text-anchor="middle">${esc(fmtDur(g.ms))}</text>`);
+  }
+  for (const b of model.bars) {
+    const y = SW.axisH + b.lane * SW.laneH + (SW.laneH - SW.barH) / 2;
+    const x = lay.xOf(b.t0);
+    const w = Math.max(SW.minBar, lay.xOf(b.t1) - x);
+    const why = whyLine(b.id);
+    parts.push(`<rect class="sw-bar${b.ok ? '' : ' fail'}" data-id="${b.id}" x="${x}" y="${y}" width="${w}" height="${SW.barH}" rx="2" style="fill:${actionTypeAccentColor(b.type)}"><title>#${b.id} ${esc(b.type)} - ${esc(fmtDur(b.ms))} - ${b.ok ? 'ok' : 'FAILED'}${why ? ` - why: ${esc(why)}` : ''}</title></rect>`);
+  }
+  parts.push('</svg>');
+  body.innerHTML = parts.join('');
+
+  const st = model.stats;
+  const pct = Math.round((st.thinkShare ?? 0) * 100);
+  const longest = st.longestGaps?.[0];
+  const swatch = (color, label) => `<span><span class="viz-swatch" style="background:${color}"></span>${label}</span>`;
+  el('swimlaneStats').innerHTML = [
+    `<span><b>${model.bars.length}</b> actions, <b>${model.lanes.length}</b> agent(s)</span>`,
+    `<span><b>${esc(fmtDur(st.busyMs))}</b> inside calls</span>`,
+    `<span><b>${esc(fmtDur(st.thinkMs))}</b> away between calls (${pct}%)</span>`,
+    st.idleMs ? `<span><b>${esc(fmtDur(st.idleMs))}</b> idle, collapsed</span>` : '',
+    longest ? `<span>longest absence <a href="#" data-reveal="${longest.toId}">#${longest.fromId} &rarr; #${longest.toId}</a> ${esc(fmtDur(longest.ms))}</span>` : '',
+    swatch('var(--accent-info)', 'dom'), swatch('var(--accent-alien)', 'idb'), swatch('var(--accent-predator)', 'page'), swatch('#c084ff', 'session'), swatch('var(--ink-muted)', 'other'), swatch('var(--fail-bg)', 'failed'),
+    lastViz.truncated ? '<span>showing the newest 1500 actions</span>' : '',
+  ].filter(Boolean).join('');
+}
+
+el('swimlaneBody').addEventListener('click', (e) => {
+  const bar = e.target.closest('.sw-bar');
+  if (bar) jumpToAction(Number(bar.dataset.id));
+});
+el('swimlaneStats').addEventListener('click', (e) => {
+  const link = e.target.closest('[data-reveal]');
+  if (link) { e.preventDefault(); jumpToAction(Number(link.dataset.reveal)); }
+});
+const swimSetZoom = (z) => { swimZoom = Math.min(24, Math.max(1, z)); renderSwimlane(); };
+el('swimZoomIn').addEventListener('click', () => swimSetZoom(swimZoom * 1.6));
+el('swimZoomOut').addEventListener('click', () => swimSetZoom(swimZoom / 1.6));
+el('swimZoomFit').addEventListener('click', () => swimSetZoom(1));
+// A panel that was collapsed when data arrived has no width to lay out against.
+new ResizeObserver(debounce(() => { if (lastViz && swimZoom === 1) renderSwimlane(); }, 150)).observe(el('swimlaneBody'));
+
+// ---- state machine ----
+const SM = { nodeW: 132, nodeH: 60, gap: 124, padX: 22 };
+let smSel = null; // { kind: 'node' | 'edge', id }
+let smHighlight = new Set(); // snapshot ids belonging to the episode the viewer has open
+
+function smTypesText(types) {
+  const top = Object.entries(types ?? {}).sort((a, b) => b[1] - a[1]);
+  const shown = top.slice(0, 2).map(([t, n]) => (n > 1 ? `${t} ×${n}` : t)).join(', ');
+  return top.length > 2 ? `${shown} …` : shown;
+}
+function smTotalsText(e) {
+  if (e.noChange) return 'no state change';
+  const t = e.totals;
+  const bits = [t.added ? `+${t.added}` : '', t.removed ? `-${t.removed}` : '', t.changed ? `~${t.changed}` : ''].filter(Boolean);
+  const stores = Object.keys(e.summary);
+  const estimated = e.summarySource === 'counts' || e.summarySource === 'mixed';
+  return `${estimated ? '≈ ' : ''}${bits.join(' ') || 'changed'}${stores.length ? ` ${stores[0]}${stores.length > 1 ? ` +${stores.length - 1}` : ''}` : ''}`;
+}
+function smEdgeLabel(e) {
+  const types = smTypesText(e.mutationTypes);
+  const times = e.count > 1 ? `×${e.count} ` : '';
+  const failed = e.failedMutations ? `${e.failedMutations} failed · ` : '';
+  if (e.noChange && !types) return [`${times}re-snapshot`.trim(), 'state unchanged'];
+  if (!types) return [`${times}no logged write`.trim(), smTotalsText(e)];
+  return [`${times}${types}`, failed ? `${failed}${e.noChange ? 'no change' : smTotalsText(e)}` : smTotalsText(e)];
+}
+
+// Draws each edge as a straight arrow between neighbours, an arc above for a return to an earlier
+// state, an arc below for a skip forward, and a small loop over the node for a self-transition.
+function smGeometry(m) {
+  const idx = new Map(m.nodes.map((n, i) => [n.id, i]));
+  const X = (i) => SM.padX + i * (SM.nodeW + SM.gap);
+  let topH = m.edges.some((e) => e.from === e.to) ? 66 : 24;
+  let botH = 24;
+  for (const e of m.edges) {
+    const span = idx.get(e.to) - idx.get(e.from);
+    if (span < 0) topH = Math.max(topH, 50 + 18 * (-span - 1) + 34);
+    else if (span > 1) botH = Math.max(botH, 34 + 18 * (span - 2) + 38);
+  }
+  const T = topH;
+  const B = T + SM.nodeH;
+  const cx = SM.nodeW / 2;
+  const edges = m.edges.map((e) => {
+    const i = idx.get(e.from);
+    const j = idx.get(e.to);
+    const ax = X(i);
+    const bx = X(j);
+    let d; let lx; let ly1; let ly2;
+    if (i === j) {
+      const x1 = ax + SM.nodeW * 0.28;
+      const x2 = ax + SM.nodeW * 0.72;
+      d = `M${x1},${T} C${x1 - 10},${T - 34} ${x2 + 10},${T - 34} ${x2},${T - 1}`;
+      lx = ax + cx; ly1 = T - 47; ly2 = T - 36;
+    } else if (j === i + 1) {
+      const y = T + SM.nodeH / 2;
+      d = `M${ax + SM.nodeW},${y} L${bx - 3},${y}`;
+      lx = (ax + SM.nodeW + bx) / 2; ly1 = y - 15; ly2 = y - 4;
+    } else if (j < i) {
+      const h = 50 + 18 * (i - j - 1);
+      const x1 = ax + cx + 6;
+      const x2 = bx + cx - 6;
+      d = `M${x1},${T} Q${(x1 + x2) / 2},${T - 2 * h} ${x2},${T - 2}`;
+      lx = (x1 + x2) / 2; ly1 = T - h - 14; ly2 = T - h - 3;
+    } else {
+      const h = 34 + 18 * (j - i - 2);
+      const x1 = ax + cx + 6;
+      const x2 = bx + cx - 6;
+      d = `M${x1},${B} Q${(x1 + x2) / 2},${B + 2 * h} ${x2},${B + 2}`;
+      lx = (x1 + x2) / 2; ly1 = B + h + 12; ly2 = B + h + 23;
+    }
+    return { e, d, lx, ly1, ly2 };
+  });
+  return { X, T, width: X(m.nodes.length - 1) + SM.nodeW + SM.padX, height: B + botH, edges };
+}
+
+function smNodeSvg(n, g, m) {
+  const x = g.X(m.nodes.indexOf(n));
+  const hl = n.snapshotIds.some((id) => smHighlight.has(id));
+  const cls = ['sm-node', n.id === m.current ? 'current' : '', hl ? 'hl' : '', smSel?.kind === 'node' && smSel.id === n.id ? 'selected' : ''].filter(Boolean).join(' ');
+  const line2 = `#${n.firstSnapshotId}${n.snapshotIds.length > 1 ? `…#${n.lastSnapshotId}` : ''} · ${n.totalRows} row${n.totalRows === 1 ? '' : 's'}`;
+  const line3 = n.golden.length ? `<text class="sm-sub sm-gold" x="8" y="49">★ ${esc(clip(n.golden[0], 13))}</text>` : (n.reads.count ? `<text class="sm-sub" x="8" y="49">${n.reads.count} read${n.reads.count === 1 ? '' : 's'}</text>` : '');
+  const tip = `S${n.index} - snapshot(s) ${n.snapshotIds.map((id) => `#${id}`).join(', ')} - ${n.totalRows} rows${n.golden.length ? ` - golden: ${n.golden.join(', ')}` : ''}${n.reads.count ? ` - ${n.reads.count} read(s) ran in this state` : ''}${n.visits > 1 ? ` - entered ${n.visits} times` : ''}`;
+  return `<g class="${cls}" data-node="${n.id}" transform="translate(${x},${g.T})"><rect class="sm-box" width="${SM.nodeW}" height="${SM.nodeH}" rx="3"/><text class="sm-title" x="8" y="18">S${n.index}</text>${n.visits > 1 ? `<text class="sm-sub" x="${SM.nodeW - 8}" y="18" text-anchor="end">×${n.visits}</text>` : ''}<text class="sm-sub" x="8" y="34">${esc(line2)}</text>${line3}${n.id === m.current ? `<text class="sm-now" x="${SM.nodeW - 8}" y="49" text-anchor="end">NOW</text>` : ''}<title>${esc(tip)}</title></g>`;
+}
+
+function renderStateMachine() {
+  const m = lastViz?.stateMachine;
+  const has = !!m && m.nodes.length > 0;
+  el('stateMachineEmpty').hidden = has;
+  if (!has) {
+    for (const id of ['stateMachineBody', 'stateMachineTrail', 'stateMachineStats', 'stateMachineInsights']) el(id).innerHTML = '';
+    el('stateMachineDetail').hidden = true;
+    return;
+  }
+  const g = smGeometry(m);
+  const parts = [`<svg class="viz-svg" width="${g.width}" height="${g.height}" role="img" aria-label="State machine: ${m.nodes.length} distinct states, ${m.edges.length} transitions">`];
+  parts.push('<defs>' + [['Info', 'var(--accent-info)'], ['Warn', 'var(--accent-predator)'], ['Fail', 'var(--accent-danger)']].map(([k, c]) => `<marker id="smArrow${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:${c}"/></marker>`).join('') + '</defs>');
+  for (const { e, d, lx, ly1, ly2 } of g.edges) {
+    const kind = e.failedMutations ? 'fail' : (e.noChange ? 'nochange' : '');
+    const marker = e.failedMutations ? 'Fail' : (e.noChange ? 'Warn' : 'Info');
+    const [l1, l2] = smEdgeLabel(e);
+    const key = `${e.from}>${e.to}`;
+    const sel = smSel?.kind === 'edge' && smSel.id === key;
+    const tip = `${key.replace(/n(\d+)/g, 'S$1').replace('>', ' → ')} - ${e.count} transition(s) - ${l1} - ${l2}${e.failedMutations ? ` - ${e.failedMutations} write(s) FAILED` : ''}`;
+    parts.push(`<g class="sm-edge ${kind}${sel ? ' selected' : ''}" data-edge="${key}"><path class="sm-hit" d="${d}"/><path class="sm-line" d="${d}" marker-end="url(#smArrow${marker})"/><text x="${lx}" y="${ly1}" text-anchor="middle">${esc(clip(l1, 24))}</text><text class="${e.summarySource === 'counts' || e.summarySource === 'mixed' ? 'muted' : ''}" x="${lx}" y="${ly2}" text-anchor="middle">${esc(clip(l2, 24))}</text><title>${esc(tip)}</title></g>`);
+  }
+  for (const n of m.nodes) parts.push(smNodeSvg(n, g, m));
+  parts.push('</svg>');
+  el('stateMachineBody').innerHTML = parts.join('');
+
+  const trail = m.path.length > 30 ? m.path.slice(-30) : m.path;
+  const numOf = new Map(m.nodes.map((n) => [n.id, n.index]));
+  el('stateMachineTrail').innerHTML = `<span>path:</span>${m.path.length > trail.length ? '<span>…</span>' : ''}${trail.map((id, i) => `${i ? '<span>›</span>' : ''}<button type="button" data-node="${id}" class="${i === trail.length - 1 ? 'current' : ''}">S${numOf.get(id) ?? '?'}</button>`).join('')}`;
+  const s = m.stats;
+  el('stateMachineStats').innerHTML = [
+    `<span><b>${s.snapshots}</b> snapshots</span>`, `<span><b>${s.nodes}</b> distinct states</span>`, `<span><b>${s.edges}</b> transitions</span>`,
+    `<span><b>${s.revisits}</b> return(s) to a seen state</span>`, `<span><b>${s.noChangeTransitions}</b> with no change</span>`,
+    m.preSnapshotActions ? `<span>${m.preSnapshotActions} action(s) ran before the first snapshot</span>` : '',
+    m.truncatedNodes ? `<span>${m.truncatedNodes} older state(s) not drawn</span>` : '',
+    `<span>arrow labels: <b>≈</b> = estimated from row counts (a replaced row is invisible); otherwise measured by a saved diff</span>`,
+  ].filter(Boolean).join('');
+  el('stateMachineInsights').innerHTML = m.insights.map((t) => `<li>${esc(t)}</li>`).join('');
+  renderSmDetail();
+}
+
+function renderSmDetail() {
+  const box = el('stateMachineDetail');
+  const m = lastViz?.stateMachine;
+  if (!m || !smSel) { box.hidden = true; return; }
+  const num = (id) => `S${m.nodes.find((n) => n.id === id)?.index ?? '?'}`;
+  if (smSel.kind === 'node') {
+    const n = m.nodes.find((x) => x.id === smSel.id);
+    if (!n) { smSel = null; box.hidden = true; return; }
+    const stores = Object.entries(n.counts ?? {}).filter(([, c]) => c > 0);
+    box.hidden = false;
+    box.innerHTML = `<h3>State S${n.index}</h3>
+      <div>snapshot(s) ${n.snapshotIds.map((id) => `#${id}`).join(', ')} &middot; entered ${n.visits}&times; &middot; first ${esc(fmtTime(n.firstAt))}, last ${esc(fmtTime(n.lastAt))}${n.golden.length ? ` &middot; golden: ${esc(n.golden.join(', '))}` : ''}${n.where ? ` &middot; scoped: <code>${esc(JSON.stringify(n.where))}</code>` : ''}</div>
+      ${stores.length ? `<table><thead><tr><th>store</th><th>rows</th></tr></thead><tbody>${stores.map(([k, c]) => `<tr><td>${esc(k)}</td><td>${c}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">every store empty</div>'}
+      <div>${n.reads.count ? `${n.reads.count} read(s) ran while the session was in this state: ${esc(smTypesText(n.reads.types))}. ` : ''}<button type="button" class="linklike" data-goto="snapshotsSection">open Snapshots</button></div>`;
+    return;
+  }
+  const e = m.edges.find((x) => `${x.from}>${x.to}` === smSel.id);
+  if (!e) { smSel = null; box.hidden = true; return; }
+  const rows = Object.entries(e.summary);
+  const src = { diff: 'measured by a saved diff', counts: 'estimated from row counts - a row replaced by another is invisible; run <code>idb diff</code> for a measured one', mixed: 'part measured, part estimated', identical: 'identical snapshot content', none: 'no measurement' }[e.summarySource];
+  box.hidden = false;
+  box.innerHTML = `<h3>${num(e.from)} &rarr; ${num(e.to)} <span class="muted">&times;${e.count}</span></h3>
+    ${e.mutations.length ? `<div>writes between the snapshots: ${e.mutations.map((x) => `<a data-reveal="${x.id}">#${x.id} ${esc(x.type)}${x.target ? ` ${esc(clip(x.target, 30))}` : ''}</a>${x.ok ? '' : ' <span style="color:var(--accent-danger)">FAILED</span>'}`).join(' &middot; ')}</div>` : `<div class="muted">${e.noChange ? 'no writes - the state was simply re-read' : 'the state changed with no write logged by this session (the page itself, another tab, or you)'}</div>`}
+    ${rows.length ? `<table><thead><tr><th>store</th><th>+</th><th>&minus;</th><th>~</th></tr></thead><tbody>${rows.map(([k, c]) => `<tr><td>${esc(k)}</td><td>${c.added}</td><td>${c.removed}</td><td>${c.changed}</td></tr>`).join('')}</tbody></table>` : ''}
+    <div class="muted">${src}</div>`;
+}
+
+el('stateMachineBody').addEventListener('click', (e) => {
+  const node = e.target.closest('.sm-node');
+  const edge = e.target.closest('.sm-edge');
+  if (node) smSel = { kind: 'node', id: node.dataset.node };
+  else if (edge) smSel = { kind: 'edge', id: edge.dataset.edge };
+  else return;
+  renderStateMachine();
+});
+el('stateMachineTrail').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-node]');
+  if (!b) return;
+  smSel = { kind: 'node', id: b.dataset.node };
+  renderStateMachine();
+});
+el('stateMachineDetail').addEventListener('click', (e) => {
+  const rev = e.target.closest('[data-reveal]');
+  if (rev) { e.preventDefault(); jumpToAction(Number(rev.dataset.reveal)); return; }
+  const go = e.target.closest('[data-goto]');
+  if (go) goToPanel(go.dataset.goto, { updateHash: false });
+});
+
+// ---- episode tree ----
+const epUser = new Map(); // episode id -> open/closed, only where the viewer chose
+const epRendered = new Map(); // episode id -> open state as last drawn (to tell a click from a re-render)
+let epHighlightId = null;
+const EP_LIST_CAP = 150;
+
+function epWhyHtml(why) {
+  if (!why?.text) return '';
+  if (why.source === 'inferred') return `<span class="ep-step-why inferred" title="inferred from the call sequence, not the agent's own words">&asymp; ${esc(why.text)}</span>`;
+  const carried = why.source === 'transcript-carried';
+  const how = why.source === 'transcript-thinking' ? 'from the agent\'s reasoning block - no narration preceded this call'
+    : (carried ? 'the agent\'s narration a call or two earlier, still in force - not said right before this call' : 'the agent\'s own narration');
+  return `<span class="ep-step-why${why.source === 'transcript-thinking' ? ' thinking' : ''}${carried ? ' carried' : ''}" title="${how}">${carried ? '&crarr; ' : '&ldquo;'}${esc(why.text)}${carried ? '' : '&rdquo;'}</span>`;
+}
+
+function renderEpisodes() {
+  const data = lastViz?.episodes;
+  const all = data?.episodes ?? [];
+  el('episodesEmpty').hidden = all.length > 0;
+  el('episodesGoal').innerHTML = data?.goal ? `<b>Goal:</b> ${esc(data.goal)}` : '';
+  if (!all.length) { el('episodesList').innerHTML = ''; el('episodesSummary').innerHTML = ''; return; }
+  const s = data.stats;
+  el('episodesSummary').innerHTML = [
+    `<span><b>${s.episodes}</b> episodes</span>`, `<span><b>${s.steps}</b> steps</span>`, `<span><b>${s.actions}</b> actions</span>`,
+    `<span><b>${s.failedEpisodes}</b> ended failed</span>`, `<span><b>${s.recoveredEpisodes}</b> recovered</span>`,
+    `<span><b>${s.stepsWithTranscriptWhy}</b> of ${s.steps} steps in the agent's own words</span>`,
+  ].join('');
+  const filter = el('episodeFilter').value;
+  const shown = all.filter((ep) => filter === 'problem' ? ep.outcome !== 'ok' : (filter === 'change' ? ep.kind.startsWith('change') : true)).slice().reverse();
+  const list = shown.slice(0, EP_LIST_CAP);
+  const lastIndex = all[all.length - 1].index;
+  el('episodesList').innerHTML = list.map((ep) => {
+    const open = epUser.has(ep.id) ? epUser.get(ep.id) : (ep.index === lastIndex || ep.outcome === 'failed');
+    epRendered.set(ep.id, open);
+    const steps = ep.steps.map((st) => {
+      const extra = st.actionIds.length > 1 ? ` <span class="muted">+${st.actionIds.length - 1}</span>` : '';
+      return `<div class="ep-step${st.ok ? '' : ' fail'}" data-reveal="${st.id}" title="jump to #${st.id} in the Action log"><span class="ep-phase ${st.phase}">${esc(st.phase)}</span><span class="ep-step-type">${esc(st.type)}${st.target ? ` ${esc(clip(st.target, 28))}` : ''}${extra}</span>${epWhyHtml(st.why) || '<span></span>'}<span class="ep-step-ms">${esc(fmtDur(st.ms))}</span>${st.ok ? '' : `<div class="ep-err">${esc(st.error ?? 'failed')}</div>`}</div>`;
+    }).join('');
+    return `<details class="ep outcome-${ep.outcome}${ep.id === epHighlightId ? ' hl' : ''}" data-ep="${ep.id}"${open ? ' open' : ''}><summary><span class="ep-id">E${ep.index}</span><span class="ep-kind">${esc(ep.label)}</span><span class="ep-title${ep.titleSource === 'inferred' ? ' inferred' : (ep.titleSource === 'transcript-thinking' ? ' thinking' : '')}${ep.titleSource === 'transcript-carried' ? ' carried' : ''}">${ep.titleSource === 'inferred' ? '&asymp; ' : '&ldquo;'}${esc(clip(ep.title, 110))}${ep.titleSource === 'inferred' ? '' : '&rdquo;'}</span><span class="ep-meta">${ep.counts.steps} step${ep.counts.steps === 1 ? '' : 's'} &middot; ${esc(fmtDur(ep.ms))} &middot; ${esc(ep.agent)}</span><span class="badge ${ep.outcome === 'failed' ? 'badge-fail' : (ep.outcome === 'recovered' ? 'badge-crv' : 'badge-ok')}">${ep.outcome}</span></summary><div class="ep-steps">${steps}</div></details>`;
+  }).join('') + (shown.length > EP_LIST_CAP ? `<div class="muted" style="padding:4px 8px;">${shown.length - EP_LIST_CAP} older episode(s) not listed</div>` : '') || '<div class="muted" style="padding:4px 8px;">no episode matches this filter</div>';
+}
+
+// A real click on a summary (not the re-render setting `open` back) selects the episode's states.
+el('episodesList').addEventListener('toggle', (e) => {
+  const d = e.target;
+  if (!(d instanceof HTMLDetailsElement) || !d.dataset.ep) return;
+  if (epRendered.get(d.dataset.ep) === d.open) return;
+  epRendered.set(d.dataset.ep, d.open);
+  epUser.set(d.dataset.ep, d.open);
+  const ep = lastViz?.episodes?.episodes.find((x) => x.id === d.dataset.ep);
+  if (d.open && ep) { epHighlightId = ep.id; smHighlight = new Set(ep.snapshotIds); }
+  else if (epHighlightId === d.dataset.ep) { epHighlightId = null; smHighlight = new Set(); }
+  document.querySelectorAll('#episodesList details.ep').forEach((x) => x.classList.toggle('hl', x.dataset.ep === epHighlightId));
+  renderStateMachine();
+}, true);
+el('episodesList').addEventListener('click', (e) => {
+  const step = e.target.closest('.ep-step[data-reveal]');
+  if (step) jumpToAction(Number(step.dataset.reveal));
+});
+el('episodeFilter').addEventListener('change', renderEpisodes);
+
 // refreshSessionDetail() is called both on an actual session switch AND by
 // the routine 3s poll (refreshAll) for the SAME still-active session - only
 // the former should reset per-session UI state. Clearing on every call
@@ -2556,6 +3152,8 @@ async function refreshSessionDetail() {
     kbdFocusKey = null;
     panelsResetForSession();
     lastActionsFp = lastSnapshotsFp = lastDiffsFp = lastConsoleFp = lastNetFp = lastQaFp = lastVerityFp = null;
+    resetViz();
+    document.querySelectorAll('[data-why-status]').forEach((s) => { s.textContent = ''; });
     lastDetailSessionId = currentSessionId;
   }
   await refreshSessionMeta();
@@ -2564,6 +3162,9 @@ async function refreshSessionDetail() {
   // re-rendering identical data every 3s (see currentSessionStatus above).
   if (!isSwitch && currentSessionStatus === 'ended') return;
   const changed = await Promise.all([refreshActions(), refreshSnapshots(), refreshDiffs(), refreshConsole(), refreshNet(), refreshQA(), refreshVerityRuns(), refreshTokenReport()]);
+  // Derived from the same rows, so it must run after their fingerprints settle - and a failure
+  // here (an older relay with no /viz) must never take the rest of the detail view down with it.
+  await refreshViz().catch(() => false);
   if (isSwitch || changed.some(Boolean)) renderTimeline();
   if (!isSwitch) triggerSweep(changed);
 }
@@ -2853,15 +3454,15 @@ async function refreshAll() {
 // arrives), just uncoalesced rebuild churn. Collapsing a burst into one
 // trailing refresh per 250ms fixes it.
 const debouncedPendingRerender = debounce(() => { if (!actionsPaused) renderActions(lastActions); }, 100);
-const debouncedActionRefresh = debounce(async () => { await refreshActions(); await refreshTokenReport(); renderTimeline(); debouncedSavingsRefresh(); }, 250);
+const debouncedActionRefresh = debounce(async () => { await refreshActions(); await refreshTokenReport(); renderTimeline(); debouncedSavingsRefresh(); debouncedVizRefresh(); }, 250);
 const debouncedConsoleRefresh = debounce(async () => { await refreshConsole(); renderTimeline(); }, 250);
 const debouncedNetRefresh = debounce(async () => { await refreshNet(); renderTimeline(); }, 250);
 const KIND_REFRESH = {
   session: async () => { await refreshSessionPicker(); await refreshHealth(); },
   agent: refreshHealth,
   action: debouncedActionRefresh,
-  snapshot: async () => { await refreshSnapshots(); renderTimeline(); },
-  diff: async () => { await refreshDiffs(); renderTimeline(); },
+  snapshot: async () => { await refreshSnapshots(); renderTimeline(); debouncedVizRefresh(); },
+  diff: async () => { await refreshDiffs(); renderTimeline(); debouncedVizRefresh(); },
   console: debouncedConsoleRefresh,
   net: debouncedNetRefresh,
   qa: refreshQA,
@@ -2910,6 +3511,8 @@ el('actionOkFilter').value = initialActionPrefs.ok || '';
 el('actionSearch').value = initialActionPrefs.search || '';
 if (actionsSortByDuration) el('actionDurationHeader').textContent = 'ms ▼';
 
+applyWhyColumn();
+el('actionsShowWhy').addEventListener('change', () => { showWhy = el('actionsShowWhy').checked; saveActionPrefs(); applyWhyColumn(); renderActions(lastActions); });
 el('actionsPauseBtn').addEventListener('click', () => setActionsPaused(!actionsPaused));
 el('actionsNewPill').addEventListener('click', () => setActionsPaused(false));
 
@@ -2968,11 +3571,12 @@ el('actionExport').addEventListener('change', () => {
   if (!rows.length) { toast('nothing to export'); return; }
   const base = `web-scout-session-${currentSessionId}-actions`;
   if (fmt === 'json') {
-    downloadFile(`${base}.json`, JSON.stringify(rows.map((a) => ({ id: a.id, started_at: a.started_at, agent: a.agent_name ?? 'default', type: a.type, ok: !!a.ok, duration_ms: a.duration_ms, params: a.params, result: a.result, error: a.error ?? null })), null, 2), 'application/json');
+    downloadFile(`${base}.json`, JSON.stringify(rows.map((a) => ({ id: a.id, started_at: a.started_at, agent: a.agent_name ?? 'default', type: a.type, ok: !!a.ok, duration_ms: a.duration_ms, why: whyInfo(a)?.text ?? null, why_source: whyInfo(a)?.source ?? null, params: a.params, result: a.result, error: a.error ?? null })), null, 2), 'application/json');
   } else {
     const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
-    const lines = [`# Session ${currentSessionId} - action log (${rows.length} row(s))`, '', '| Time | Agent | Type | Target | Status | ms |', '| --- | --- | --- | --- | --- | --- |'];
-    for (const a of rows) lines.push(`| ${cell(a.started_at)} | ${cell(a.agent_name ?? 'default')} | ${cell(a.type)} | ${cell(clip(actionTarget(a), 100))} | ${a.ok ? 'ok' : 'FAIL'} | ${cell(a.duration_ms)} |`);
+    const whyCell = (a) => { const w = whyInfo(a); return w ? cell(clip(w.source === 'inferred' ? `(inferred) ${w.text}` : w.text, 140)) : ''; };
+    const lines = [`# Session ${currentSessionId} - action log (${rows.length} row(s))`, '', '| Time | Agent | Type | Why | Target | Status | ms |', '| --- | --- | --- | --- | --- | --- | --- |'];
+    for (const a of rows) lines.push(`| ${cell(a.started_at)} | ${cell(a.agent_name ?? 'default')} | ${cell(a.type)} | ${whyCell(a)} | ${cell(clip(actionTarget(a), 100))} | ${a.ok ? 'ok' : 'FAIL'} | ${cell(a.duration_ms)} |`);
     const fails = rows.filter((a) => !a.ok);
     if (fails.length) {
       lines.push('', '## Failures', '');
@@ -3235,6 +3839,9 @@ const PANELS = {
   punchcardSection: { group: 'global', label: 'Punchcard', autoEmpty: true, count: () => (lastAnalyticsData ? { n: (lastAnalyticsData.activityPunchcard ?? []).flat().reduce((s, v) => s + v, 0), title: 'sessions started' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => (a.activityPunchcard ?? []).flatMap((hours, day) => hours.map((count, hour) => ({ day: PUNCHCARD_DAY_LABELS[day], hour, count })).filter((r) => r.count))) },
   timelineSection: { group: 'session', label: 'Timeline', autoEmpty: true, pausable: true, count: () => ({ n: timelineTotal(), title: 'events merged from every panel' }), refresh: async () => { renderTimeline(); } },
   actionsSection: { group: 'session', label: 'Actions', autoEmpty: true, failLabel: 'failed', count: () => ({ n: lastActions.length, fail: lastActions.filter((a) => !a.ok).length, title: 'actions recorded' }), refresh: () => refreshActions() },
+  swimlaneSection: { group: 'session', wide: true, label: 'Swimlane', autoEmpty: true, failLabel: 'failed', count: () => { const s = lastViz?.swimlane; return s ? { n: s.bars.length, fail: s.bars.filter((b) => !b.ok).length, title: 'actions drawn across every agent lane' } : null; }, refresh: () => refreshViz(true), exportRows: () => lastViz?.swimlane?.bars ?? null },
+  stateMachineSection: { group: 'session', wide: true, label: 'State machine', autoEmpty: true, count: () => { const m = lastViz?.stateMachine; return m ? { n: m.nodes.length, title: `distinct database states reached (${m.stats.edges} transitions)` } : null; }, refresh: () => refreshViz(true), exportRows: () => lastViz?.stateMachine?.edges?.map((e) => ({ from: e.from, to: e.to, count: e.count, no_change: e.noChange, writes: Object.entries(e.mutationTypes).map(([t, n]) => `${t}x${n}`).join(' '), failed_writes: e.failedMutations, added: e.totals.added, removed: e.totals.removed, changed: e.totals.changed, measured_by: e.summarySource })) ?? null },
+  episodesSection: { group: 'session', label: 'Episodes', autoEmpty: true, failLabel: 'failed', count: () => { const s = lastViz?.episodes?.stats; return s ? { n: s.episodes, fail: s.failedEpisodes, title: `${s.steps} steps across ${s.episodes} episodes` } : null; }, refresh: () => refreshViz(true), exportRows: () => lastViz?.episodes?.episodes?.map((e) => ({ id: e.id, agent: e.agent, kind: e.kind, outcome: e.outcome, title: e.title, title_source: e.titleSource, steps: e.counts.steps, actions: e.counts.actions, failed: e.counts.failed, started_at: e.startedAt, ms: e.ms })) ?? null },
   tokenSection: { group: 'session', label: 'Tokens', autoEmpty: true, failLabel: 'over budget', count: () => { const r = lastTokenReport; if (!r) return null; const budget = lastSessionFull?.token_budget; return { n: r.totalCalls, text: `~${fmtK(r.totalEstTokens)} tok`, fail: budget && r.totalEstTokens > budget ? 1 : 0, title: `${r.totalCalls} call(s), ~${r.totalEstTokens} estimated tokens` }; }, refresh: () => refreshTokenReport(), exportRows: () => lastTokenReport?.byType ?? null },
   assertSection: { group: 'session', label: 'Asserts', autoEmpty: true, failLabel: 'failing', count: () => { const runs = assertRuns(); return { n: runs.length, fail: runs.filter((a) => !a.result.every((c) => c.pass)).length, title: 'session assert runs' }; }, refresh: () => refreshActions(), exportRows: () => assertRuns().map((a) => ({ time: a.started_at, passed: a.result.every((c) => c.pass), checks: a.result.length, failing: a.result.filter((c) => !c.pass).map((c) => c.detail).join('; ') })) },
   snapshotsSection: { group: 'session', label: 'Snapshots', autoEmpty: true, pausable: true, count: () => ({ n: lastSnapshots.length, title: 'state snapshots' }), refresh: () => refreshSnapshots(), exportRows: () => lastSnapshots },
