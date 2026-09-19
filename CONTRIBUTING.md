@@ -145,7 +145,10 @@ process or a liveness probe in a test, use `spawnClean` and `isUp` from
 `spawnAsync` instead of `spawnClean` for a CLI command that needs a same-process
 `connectFakeAgent()` tab to answer anything: `spawnClean` blocks the event loop the
 fake agent's WebSocket callback needs to fire, which is a real deadlock, not just slow
-(confirmed live writing `crv run`'s own CLI test). `docs-drift.test.mjs` requires your
+(confirmed live writing `crv run`'s own CLI test). A live-relay test that polls with `fetch`
+can hit that libuv assertion under `--test-force-exit` on Windows (`auto-calibrate.test.mjs`
+did, in 7-10 of 10 runs) - use `node:http` with `agent: false` there (see its `httpJson`).
+`docs-drift.test.mjs` requires your
 new command and flags to appear in `usage.txt` (and the command in the README).
 
 **Put a file's top-level `await startTestRelay()` before every `test()` call in the

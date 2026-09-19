@@ -11,10 +11,11 @@
 // calibration path runs in its OWN fresh child process (same pattern token-estimate.test.mjs and
 // transcript-tokens.test.mjs already use), never by mutating process.env in this process and
 // calling the already-imported function directly.
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnClean, startTestRelay } from './test-relay.mjs';
@@ -56,6 +57,21 @@ function buildTranscript({ ratio = 3, n = 12 } = {}) {
   return lines.join('\n');
 }
 
+// node:http with agent:false, not fetch: this file's live case ran into the libuv-at-exit assertion
+// test-relay.mjs's isUp() documents for fetch under --test-force-exit (10 of 10 runs before the switch).
+function httpJson(method, url, body) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(url, { method, agent: false, headers: body ? { 'content-type': 'application/json' } : {} }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { text += c; });
+      res.on('end', () => { try { resolve(JSON.parse(text)); } catch (err) { reject(err); } });
+    });
+    req.on('error', reject);
+    req.end(body ? JSON.stringify(body) : undefined);
+  });
+}
+
 function fixtureHome(transcriptText) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-autocal-home-'));
   if (transcriptText !== null) {
@@ -75,6 +91,15 @@ function run({ homeDir, calFile, existingCalibration, minSamples = 8 }) {
   assert.equal(r.status, 0, r.stderr);
   return JSON.parse(r.stdout);
 }
+
+// The live-relay case's relay starts here, before every test() call (see CONTRIBUTING.md: a top-level await
+// after a test() silently drops tests under --test-force-exit) and stops in after(), like every other
+// relay-touching file - starting it inside the test with t.after() tripped a libuv assertion at exit.
+const liveCalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-autocal-live-'));
+const liveCalFile = path.join(liveCalDir, 'token-calibration.json');
+const liveHome = fixtureHome(buildTranscript({ ratio: 3 }));
+const relay = await startTestRelay({ env: { WEBSCOUT_AUTO_CALIBRATE: '1', WEBSCOUT_TRANSCRIPT_HOME: liveHome, WEBSCOUT_TOKEN_CALIBRATION: liveCalFile } });
+after(async () => { await relay.stop(); fs.rmSync(liveCalDir, { recursive: true, force: true }); fs.rmSync(liveHome, { recursive: true, force: true }); });
 
 test('writes a calibration file when uncalibrated and enough clean samples exist', () => {
   const calDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-autocal-cal-'));
@@ -145,24 +170,20 @@ test('not enough clean samples: attempted, not written, never throws', () => {
 // picked up by a LATER token-report's estimator info without restarting the relay
 // (resetCalibrationCache runs in the same process that wrote the file).
 test('a real "session start" auto-calibrates once, live, on a relay with nothing calibrated', async (t) => {
-  const calDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-autocal-live-'));
-  const calFile = path.join(calDir, 'token-calibration.json');
-  const home = fixtureHome(buildTranscript({ ratio: 3 }));
-  const relay = await startTestRelay({ env: { WEBSCOUT_AUTO_CALIBRATE: '1', WEBSCOUT_TRANSCRIPT_HOME: home, WEBSCOUT_TOKEN_CALIBRATION: calFile } });
-  t.after(async () => { await relay.stop(); fs.rmSync(calDir, { recursive: true, force: true }); fs.rmSync(home, { recursive: true, force: true }); });
   if (relay.live) { t.skip('WEBSCOUT_TEST_LIVE=1 - cannot force a fresh, uncalibrated relay'); return; }
+  const calFile = liveCalFile;
   const base = `http://127.0.0.1:${relay.port}`;
-  const before = await (await fetch(`${base}/token-report`)).json();
+  const before = await httpJson('GET', `${base}/token-report`);
   assert.equal(before.result.savings.estimator.status, 'uncalibrated');
   // WEBSCOUT_AUTO_CALIBRATE=1 is set on this relay, but no session has started yet, so
   // maybeAutoCalibrate() has not even been scheduled - the note should say so specifically,
   // not just "no usable token-calibration.json" (see token-estimate.mjs's autoCalibrateClause).
   assert.match(before.result.savings.estimator.note, /has not run yet on this relay/);
-  await fetch(`${base}/sessions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ goal: 'auto-calibrate smoke test', briefing: false }) });
+  await httpJson('POST', `${base}/sessions`, { goal: 'auto-calibrate smoke test', briefing: false });
   // setImmediate-deferred and disk-bound - poll briefly rather than assume it lands on the first tick.
   let after;
   for (let i = 0; i < 30; i += 1) {
-    after = await (await fetch(`${base}/token-report`)).json();
+    after = await httpJson('GET', `${base}/token-report`);
     if (after.result.savings.estimator.status !== 'uncalibrated') break;
     await new Promise((r) => setTimeout(r, 100));
   }
