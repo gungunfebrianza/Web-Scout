@@ -299,7 +299,6 @@ same gap the round before had just closed for the live routes. (2) Verity runs (
 [--limit] [--session]` (mirrors `net history`/`console history`, metadata + pass/fail counts only)
 and `verity show <id>` (one run's full per-step result) close it, plus `webscout_session.
 verity_history`/`verity_show` on the MCP side.
-
 ## When the caller's own environment blocks a CRV command
 
 A caller (an AI coding agent, a CI runner, a sandboxed shell) may have its OWN permission or

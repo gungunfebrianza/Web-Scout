@@ -21,6 +21,10 @@
 //   buildRouteMachine(clicks)         - like buildStateMachine, but nodes are pages/routes the
 //                                       session navigated between (see db.listClickNavigations)
 //   buildSessionViz(...)              - all of the above, from one row set
+//   buildRecordedRepairEdges(actions) - self-repair loop's own fixed_by/confirmed_by edges (ground
+//                                       truth the loop declared, NOT inferred - see webscout2.md)
+//   diffCausality(actionsA, actionsB) - two sessions' causality trees diffed by edge identity, for
+//                                       the self-repair loop's confirm-fix step
 //
 // Inputs are the lightweight rows db.listActionsForViz / listSnapshots / listDiffs / listClickNavigations
 // return. A "why" is either the agent's own words (actions.intent, imported from its transcript -
@@ -691,6 +695,62 @@ export function buildCausality(episodesResult) {
     edges, roots,
     childrenOf: Object.fromEntries([...childrenOf.entries()].map(([k, v]) => [k, v.sort((a, b) => a - b)])),
     stats: { linkedActions: linkedIds.size, chains: roots.length, edges: edges.length },
+  };
+}
+
+// -------------------------------------------------------------- self-repair loop: recorded edges + causal diff
+
+// buildCausality's edges above are ALL pattern-inferred (causeOf() matches on paramsKey/phase/
+// ordering signals, never ground truth) - confirmed there is no recorded-edge concept anywhere in
+// this file before this addition (see webscout2.md's "recorded vs inferred" gap). These two edges
+// are different in kind: the self-repair loop's own patch/verify actions explicitly DECLARE what
+// they fix/confirm (fixesActionId on an 'fs.patch' action, patchActionId on a 'repair.verify'
+// action - see self-repair.mjs / relay.mjs's /repair/* routes) - that is ground truth the loop
+// itself asserted, not a guessed pattern match. Deliberately kept in a SEPARATE list rather than
+// merged into buildCausality's edges: those are keyed by episode STEP id, these by raw ACTION id -
+// mixing the two id spaces in one edge list would silently mean two different things by the same
+// field name. Never call this "inferred" or fold it into a causality tree render without the
+// distinction staying visible.
+export function buildRecordedRepairEdges(actions = []) {
+  const edges = [];
+  for (const a of actions) {
+    if (a.type === 'fs.patch' && a.ok && a.params?.fixesActionId !== undefined && a.params?.fixesActionId !== null) {
+      edges.push({ from: Number(a.params.fixesActionId), to: a.id, kind: 'fixed_by', recorded: true });
+    }
+    if (a.type === 'repair.verify' && a.params?.patchActionId !== undefined && a.params?.patchActionId !== null) {
+      edges.push({ from: Number(a.params.patchActionId), to: a.id, kind: 'confirmed_by', recorded: true });
+    }
+  }
+  return edges;
+}
+
+function inferredEdgeKey(e) { return `${e.from}->${e.to}:${e.kind}`; }
+
+// Two sessions' own causality trees, diffed by edge identity (from/to/kind) - added/removed/kept.
+// A self-repair loop's confirm-fix step reads this to see whether the patch actually removed the
+// failing causal chain, not just "the session ended without an error" - e.g. session A is the
+// witnessing run that hit a flagged/failing action, session B is the post-patch confirm run;
+// `removed` shows exactly which inferred chain no longer forms. `recorded` is reported separately
+// per session (see buildRecordedRepairEdges above) - never diffed against `inferred`, since a
+// recorded edge in B proves nothing about whether an inferred chain from A actually went away.
+export function diffCausality(actionsA = [], actionsB = []) {
+  const causalA = buildCausality(buildEpisodes(actionsA));
+  const causalB = buildCausality(buildEpisodes(actionsB));
+  const byKeyA = new Map(causalA.edges.map((e) => [inferredEdgeKey(e), e]));
+  const byKeyB = new Map(causalB.edges.map((e) => [inferredEdgeKey(e), e]));
+  const removed = causalA.edges.filter((e) => !byKeyB.has(inferredEdgeKey(e)));
+  const added = causalB.edges.filter((e) => !byKeyA.has(inferredEdgeKey(e)));
+  const kept = causalA.edges.filter((e) => byKeyB.has(inferredEdgeKey(e))).length;
+  return {
+    inferred: {
+      a: { nodes: causalA.nodes.length, edges: causalA.edges.length },
+      b: { nodes: causalB.nodes.length, edges: causalB.edges.length },
+      added, removed, kept,
+    },
+    recorded: {
+      a: buildRecordedRepairEdges(actionsA),
+      b: buildRecordedRepairEdges(actionsB),
+    },
   };
 }
 

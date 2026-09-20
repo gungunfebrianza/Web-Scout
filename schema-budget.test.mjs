@@ -32,7 +32,10 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 // (webscout_session) - verity runs had durable routes (already read internally by session
 // report) but no cross-session-callable read verb of their own, same gap round 8 closed for
 // console. Raised to 18200, same commit, same convention.
-const MCP_TOTAL_MAX_BYTES = 18200;
+// Measured 19,632 when merging in the self-repair loop's webscout_repair (status/enable/
+// disable/patch/verify/causal_diff - see self-repair.mjs, webscout2.md) on top of the round-10
+// baseline above - raised to 19700, same commit, same convention.
+const MCP_TOTAL_MAX_BYTES = 19700;
 // Raised to 3550 when V38 added crv_preflight/crv_seed/crv_cleanup to webscout_idb (already the
 // biggest single tool, from crv_run) - same commit-with-the-text convention as above.
 // Raised to 3650 when V39 extended crv_preflight's one-line description (webscout_idb measured 3,606).
