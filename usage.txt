@@ -74,6 +74,16 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    --if-stale-min N: if another session is already active and started at least N
                                    minutes ago, end it first (says so) and start this one; a younger one still
                                    refuses (probably in flight). Omitted = always refuse. 0 = end any conflict.
+                                   Also computes this session's own friction snapshot ONCE, from the
+                                   same project-wide analytics as "analytics" itself (risky selectors
+                                   that failed 3+ times before across any session, macros recorded but
+                                   never run) - consulted on every later /command in this session as a
+                                   plain lookup, never a fresh analytics call, so it can never go stale
+                                   or poison the shared analytics cache mid-session. Warns BEFORE a
+                                   known-risky selector fails again (x-webscout-selector-risk header)
+                                   and nudges when this session's own recent action TYPES match a
+                                   never-run macro's own steps (x-webscout-macro-match header) -
+                                   frozen for the session's duration by design.
   session start ... --auto-snapshot --stores a,b,c
                                    also takes+persists a scoped idb.snapshot right at session
                                    start (unscoped is refused - same 60s timeout risk as an
@@ -124,6 +134,12 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    was never saved as one - real repeatable shapes (seed/verify/
                                    cleanup) were confirmed hand-rolled from scratch every later
                                    phase despite "macro record" already existing for this.
+                                   Also reports emergentFriction: a type or selector whose ENTIRE
+                                   historical failure count (project-wide) is exactly what THIS
+                                   session just produced - the first session ever to see it fail
+                                   (or, for a selector, fail more than once) - flagged the moment
+                                   it happens instead of only after it quietly repeats enough to
+                                   rank in "analytics"' own topFrictionItems digest.
                                    --trace also exports the session (anonymised, same as
                                    "trace.mjs export") into traces/auto/ (gitignored) - grows the
                                    replay benchmark's corpus of real sessions past the four
@@ -374,7 +390,11 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    since this page load; agents[] (all connected agents, tabCollision =
                                    two tabs took one name in the last 5 min); knownIssueMatches (from an
                                    optional local known-issues.json, see CONTRIBUTING.md; [] none, null
-                                   unchecked). Never requires an active session, never mutates anything.
+                                   unchecked); knownFriction - the same ranked topFrictionItems digest
+                                   "analytics" returns (worst failing type/selector, a macro that never
+                                   once succeeds, ...) - front-load the riskiest known-bad selectors
+                                   into the pass about to run instead of hitting each one live first.
+                                   Never requires an active session, never mutates anything.
   crv seed <store> <rows-json> [--manifest <path>] [--agent <name>]
                                    "idb put-many", plus records every stored row's real key into a
                                    manifest file (default: .webscout-crv-manifest.json in the CWD) -
@@ -618,6 +638,14 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    explicitly (e.g. tag seeded rows with a distinct field and
                                    return the tag+ids together) so later cleanup doesn't need a
                                    full store dump to recover what this call created.
+                                   KNOWN GOTCHA: a dynamic `import(...)` inside expr always fails
+                                   with a generic "Failed to fetch dynamically imported module" -
+                                   this is a CDP/Runtime.evaluate limitation (the eval'd script has
+                                   no module context to resolve a relative specifier against), not
+                                   a real app/module bug. Confirmed against an already-loaded,
+                                   known-good module path. Read the module's exports off an object
+                                   the page already put on window instead (e.g. a debug hook), or
+                                   inspect state via dom/idb commands rather than importing fresh.
 
   macro record "<name>" <sessionId> [--all]
                                    save that session's own replayable actions (dom.click/fill/
@@ -647,6 +675,11 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    type/ok/skipped/durationMs only) - a FAILED step still carries
                                    its full error/result; pass --full to get every step's full
                                    result back, same shape as before this existed.
+                                   On a fresh run (--from-step 0 or omitted), if "analytics" own
+                                   macrosNeverSucceeding already shows this macro has run before
+                                   and never once succeeded, a WARNING prints before the replay -
+                                   the signal already existed, it just was never checked at the
+                                   one point it could save an attempt.
   macro delete <id>               delete a saved macro
   macro export-verity <id> [--out <path>]
                                    best-effort skeleton Verity scenario JSON from a
@@ -680,10 +713,29 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    (type/params/result/error) - which session/action touched X
 
   analytics                       "Friction Analytics" - recurring failure patterns across
-                                   EVERY session: failure rate by action type, selectors that
-                                   failed more than once, macros never run or never succeeding,
-                                   Verity labels whose latest import is still FAIL. Run this
-                                   before starting new work, not only after hitting a wall.
+                                   EVERY session: failure rate by action type (each type also
+                                   carries a `trend` - recent-window vs prior-window failure
+                                   rate, once 4+ sessions of history exist - so you can tell
+                                   "improving" from "still broken"), selectors that failed more
+                                   than once (each with `lastFailedAt`, so a long-dead failure
+                                   doesn't rank next to one still happening this week), macros
+                                   never run or never succeeding, Verity labels whose latest
+                                   import is still FAIL, and macroAdoption (sessions that hit
+                                   the "consider macro record" nudge and never recorded one).
+                                   `topFrictionItems` is a single ranked digest (top 5) pulling
+                                   the single worst entry from each of the above, for "what do I
+                                   fix first" without reading every array. When a known-issues.json
+                                   registry is set up (see "crv preflight" above, and
+                                   CONTRIBUTING.md), a matching failure's type/selector entry (and
+                                   topFrictionItems) also carries `knownIssues` (id/description/
+                                   remediation) - the same already-diagnosed bug, not a new
+                                   mystery. Run this before starting new work, not only after
+                                   hitting a wall. A matching failure is ALSO named the moment it
+                                   happens: any /command that fails with a message matching a
+                                   registered signature gets a `knownIssue` (id/description/
+                                   remediation) folded straight into that command's own error
+                                   reply (cli.mjs prints it as "Known issue: ..."), no separate
+                                   "analytics" call needed.
 
   ask [--session <id>] "<question>"   ask the AI backend about the (current, or given) session's
                                        recorded actions/snapshots/diffs - persisted to the session's Q&A log
@@ -836,6 +888,16 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   relay are current) unless you pass --no-briefing - it replaces the idb list / db version-check
   calls that open most sessions. Output is compact JSON when piped (the indentation is tokens
   you pay for); a terminal, --pretty, or WEBSCOUT_PRETTY=1 gets the indented form.
+  It also prints a `macroAdoptionNote` (NOTE: on stderr, same as the autoEndedSession
+  note above) when this project has crossed the mid-session "consider macro record" nudge
+  threshold (>=5 replayable actions, see "macro record" below) in 3+ sessions and never once
+  recorded a macro - the same fact "analytics"'s own macroAdoption section carries, surfaced
+  again at the one moment a new session can still act on it instead of only appearing once,
+  mid an old session, in stderr that already scrolled by.
+  A second note, `frictionNote`, prints the single top-ranked entry from "analytics"'s
+  topFrictionItems digest (worst failing type/selector, a macro that never once succeeds, a
+  stuck-FAIL verity label, or the worst-waste session) unless it would just repeat the
+  macroAdoptionNote above - same "surface it where it can still be acted on" reasoning.
   Token counts everywhere are chars/4. That is one ratio for very different text: token-report's
   `savings.estimator` gives a low..high band per kind (json / html / prose) and `spend.estTokensBand`
   brackets the total. The band is a rule of thumb until you run either

@@ -159,10 +159,23 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   check: agent connectivity/origin/staleness, DB version drift, whether `--stores`
   exist, whether a target selector is present, and recent console errors since the
   page last loaded. Also lists every connected agent (`agents[]`, with `tabCollision` when
-  two tabs took one agent name from each other in the last 5 minutes) and any
+  two tabs took one agent name from each other in the last 5 minutes), any
   `knownIssueMatches` from an optional, untracked `known-issues.json` you maintain per
-  checkout (`known-issues.example.json` is the template; see CONTRIBUTING.md). Never
+  checkout (`known-issues.example.json` is the template; see CONTRIBUTING.md), and
+  `knownFriction` - the same ranked `topFrictionItems` digest `analytics` returns, so a
+  pass can front-load the riskiest known-bad selectors/types before it starts. Never
   requires an active session
+- Friction analytics is not just something you go read - it reaches an agent live, at the
+  moment it matters: a failed command whose error matches `known-issues.json` gets a
+  `knownIssue` (id/remediation) folded straight into that failure's own reply; a selector
+  that has failed 3+ times before gets an `x-webscout-selector-risk` warning header before
+  it fails again; a session whose own recent action types match a recorded-but-never-run
+  macro gets an `x-webscout-macro-match` nudge; and `session end` reports
+  `emergentFriction` - a type/selector failing for the first time ever, flagged before it
+  has accumulated enough history to rank in the global `topFrictionItems` digest. The
+  per-session checks are read from a snapshot frozen at `session start` (from the same
+  analytics `analytics` itself reads), never a live per-command analytics call, so they
+  can never go stale mid-session or poison the shared 5s analytics cache
 - `crv seed <store> <rows-json>` writes rows (`idb put-many`) and records every
   stored row's real key into a manifest file, so `crv cleanup` can delete exactly
   those ids later (`idb delete-many`, one call per store) without hand-tracking ids

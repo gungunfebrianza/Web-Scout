@@ -3797,22 +3797,13 @@ let frictionDismissed = false;
 
 function renderFriction(a) {
   if (frictionDismissed) return;
-  const items = [];
-  for (const t of a.failureRateByType.slice(0, 3)) {
-    items.push(`<strong>${esc(t.type)}</strong> fails ${(t.failureRate * 100).toFixed(0)}% of the time (${t.failed}/${t.total} across all sessions)`);
-  }
-  for (const s of a.topFailedSelectors.slice(0, 3)) {
-    items.push(`selector <code>${esc(s.selector)}</code> failed ${s.failCount}x on <strong>${esc(s.type)}</strong> across ${s.sessionCount} session(s)`);
-  }
-  for (const m of a.macrosNeverRun.slice(0, 3)) {
-    items.push(`macro <strong>${esc(m.name)}</strong> (#${m.id}) recorded but never run`);
-  }
-  for (const m of a.macrosNeverSucceeding.slice(0, 3)) {
-    items.push(`macro <strong>${esc(m.name)}</strong> (#${m.id}) has been run but never succeeded on any step`);
-  }
-  for (const v of a.verityLabelsStillFailing.slice(0, 3)) {
-    items.push(`Verity check <strong>${esc(v.label)}</strong> still FAIL as of its latest import (${v.importCount} import(s) so far)`);
-  }
+  // Was its own independent unranked top-3-per-category picker over the same
+  // computeAnalytics() payload the big cross-session panels above already render -
+  // two places answering "what's broken" differently from identical data, and this one
+  // never knew about macroAdoption at all. Now just renders the server's own ranked
+  // digest (topFrictionItems, already top-5 across every category) so there is exactly
+  // one "what to fix first" ranking in this dashboard, not two.
+  const items = (a.topFrictionItems ?? []).map((f) => esc(f.summary));
   // A malformed row is now SKIPPED, not a silent global outage of this
   // whole banner (see db.mjs's listAllActions) - surfaced here rather than
   // swallowed, so "friction analytics itself has a data-quality problem"
