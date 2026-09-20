@@ -282,6 +282,29 @@ export async function netHistory({ sessionId, filter, minDuration, sort, limit }
   return { sessionId: id, count: entries.length, entries };
 }
 
+// ---------- Console history (durable console_entries, client-side filter) ----------
+//
+// Same gap netHistory (above) closed for network entries, mirrored for console: the DURABLE
+// console_entries table and its GET /sessions/:id/console route already existed (session
+// show/report reads it internally) but had no filtered, cross-session-callable verb of its
+// own - only the live capped ring buffer (console.log, evicted within minutes of real use,
+// same caveat as net.log) or the full unfiltered dump buried inside `session show`'s combined
+// payload. Filter/limit applied here, client-side, after the fetch - identical logic for
+// cli.mjs's `console history` and mcp-server.mjs's `webscout_console {action:"history"}`.
+export async function consoleHistory({ sessionId, contains, level, limit } = {}) {
+  let id = sessionId;
+  if (!id) {
+    const health = await request('GET', '/health');
+    if (!health.active_session) throw new Error('no active session - pass sessionId, or start one');
+    id = health.active_session.id;
+  }
+  let entries = await request('GET', `/sessions/${id}/console`);
+  if (contains) entries = entries.filter((e) => (e.message ?? '').includes(contains));
+  if (level) entries = entries.filter((e) => level.split(',').includes(e.level));
+  if (limit !== undefined) entries = entries.slice(0, Number(limit));
+  return { sessionId: id, count: entries.length, entries };
+}
+
 // ---------- Snapshot delta (idb snapshot --since) ----------
 //
 // Takes a fresh snapshot scoped to the baseline's own stores, diffs it

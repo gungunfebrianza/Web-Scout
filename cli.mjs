@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import {
-  request, BASE, HOST, PORT, netHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, ensureFreshRelayForNewSession,
+  request, BASE, HOST, PORT, netHistory, consoleHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, ensureFreshRelayForNewSession,
   manifestPath, readManifest, writeManifest,
 } from './client.mjs';
 import { validateArgs, findMsysMangledArgs, findSpec } from './cli-spec.mjs';
@@ -1304,6 +1304,11 @@ async function main() {
       // can race the app's own (often async) console.error call, reading as
       // "nothing logged yet" even though the entry lands a moment later.
       wait: () => send('console.wait', { substr: subArgs[0], timeoutMs: timeoutValue !== undefined ? Number(timeoutValue) : undefined, graceMs: graceValue !== undefined ? Number(graceValue) : undefined }),
+      // Queries the DURABLE, already-persisted console_entries table (via the relay's
+      // /sessions/:id/console) instead of the in-page live ring buffer (console.log, evicted
+      // by real page noise within minutes) - the same gap "net history" already closed for
+      // network entries, mirrored here. Defaults to the current active session.
+      history: () => consoleHistory({ sessionId: sessionValue, contains: containsValue, level: levelValue, limit: limitValue }),
     },
     debug: {
       // Introspection shortcut for THIS tool's own runtime state (WebSocket

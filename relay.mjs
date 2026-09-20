@@ -1497,7 +1497,66 @@ function computeAnalytics() {
       : {}),
   };
 
-  // 11. Top friction items - everything above is ~10 separate arrays; this is a single
+  // 11. Golden-diff dirt still failing - structurally the same gap verityLabelsStillFailing
+  // (above) closes for Verity imports: a "diff-golden" comparison (POST /state/diff with a
+  // golden name, logged as an 'idb.diff' action with params.golden) whose most recent result
+  // came back non-clean (summary has keys - something changed) had zero cross-session
+  // visibility before this - you'd only notice by re-running that exact diff-golden call
+  // again. "Clean" uses the same test runSuite's own diff-golden step already applies
+  // (Object.keys(summary).length === 0).
+  const isDiffClean = (a) => Object.keys(a.result?.summary || {}).length === 0;
+  const byGolden = new Map();
+  for (const a of actions) {
+    if (a.type !== 'idb.diff' || !a.params?.golden) continue;
+    const arr = byGolden.get(a.params.golden) ?? [];
+    arr.push(a);
+    byGolden.set(a.params.golden, arr);
+  }
+  const goldenDiffsStillFailing = [...byGolden.entries()]
+    .map(([golden, runs]) => ({ golden, runs: runs.sort((x, y) => x.id - y.id) }))
+    .filter(({ runs }) => !isDiffClean(runs[runs.length - 1]))
+    .map(({ golden, runs }) => ({ golden, diffCount: runs.length, lastDiffedAt: runs[runs.length - 1].started_at }));
+
+  // 12. Repeating network/console failures - matchKnownIssuesFor (above) only ever ran
+  // against actions.error (a dom/idb/eval dispatch failure logged through dispatchTracked).
+  // net_entries/console_entries are captured passively, batched straight from the page (see
+  // inject.js), and never contributed to a failure-rate ranking or the known-issues
+  // cross-reference - a repeating HTTP 500 or console.error was invisible here even though
+  // "net log --failed" already tags each request pass/fail. Same shape as topFailedSelectors
+  // above (repeat-count ranked, decorated with knownIssues when the registry matches); built
+  // from failed/errored rows only (dbApi.listFailedNetEntries/listFailedConsoleEntries filter
+  // in SQL), not a scan of the 60K+ rows net_entries alone can hold.
+  const netByUrl = new Map();
+  for (const n of dbApi.listFailedNetEntries()) {
+    const key = n.url || '(no url)';
+    const s = netByUrl.get(key) ?? { url: key, failCount: 0, sessionIds: new Set(), lastFailedAt: null, knownIssues: [] };
+    s.failCount += 1;
+    s.sessionIds.add(n.session_id);
+    if (!s.lastFailedAt || n.started_at > s.lastFailedAt) s.lastFailedAt = n.started_at;
+    for (const hit of matchKnownIssuesFor(n.error || (n.status ? `HTTP ${n.status}` : ''))) if (!s.knownIssues.some((x) => x.id === hit.id)) s.knownIssues.push(hit);
+    netByUrl.set(key, s);
+  }
+  const topFailedNetUrls = [...netByUrl.values()]
+    .filter((s) => s.failCount > 1)
+    .map((s) => ({ url: s.url, failCount: s.failCount, sessionCount: s.sessionIds.size, lastFailedAt: s.lastFailedAt, ...(s.knownIssues.length ? { knownIssues: s.knownIssues } : {}) }))
+    .sort((a, b) => b.failCount - a.failCount);
+
+  const consoleByMessage = new Map();
+  for (const c of dbApi.listFailedConsoleEntries()) {
+    const key = c.message;
+    const s = consoleByMessage.get(key) ?? { message: key, failCount: 0, sessionIds: new Set(), lastFailedAt: null, knownIssues: [] };
+    s.failCount += 1;
+    s.sessionIds.add(c.session_id);
+    if (!s.lastFailedAt || c.occurred_at > s.lastFailedAt) s.lastFailedAt = c.occurred_at;
+    for (const hit of matchKnownIssuesFor(c.message)) if (!s.knownIssues.some((x) => x.id === hit.id)) s.knownIssues.push(hit);
+    consoleByMessage.set(key, s);
+  }
+  const topFailedConsoleMessages = [...consoleByMessage.values()]
+    .filter((s) => s.failCount > 1)
+    .map((s) => ({ message: s.message, failCount: s.failCount, sessionCount: s.sessionIds.size, lastFailedAt: s.lastFailedAt, ...(s.knownIssues.length ? { knownIssues: s.knownIssues } : {}) }))
+    .sort((a, b) => b.failCount - a.failCount);
+
+  // 13. Top friction items - everything above is now ~13 separate arrays; this is a single
   // ranked digest of the highest-signal entry from each, so a human/agent can read one
   // short list instead of scanning the whole analytics blob to find what to fix first.
   // Severity is a deliberately crude frequency-weighted score (not a real cost model) -
@@ -1521,6 +1580,17 @@ function computeAnalytics() {
   for (const v of verityLabelsStillFailing) {
     topFrictionItems.push({ kind: 'verityLabelStillFailing', severity: 40 + v.importCount, summary: `verity label "${v.label}" imported ${v.importCount}x, still FAIL as of ${v.lastImportedAt}` });
   }
+  for (const g of goldenDiffsStillFailing) {
+    topFrictionItems.push({ kind: 'goldenDiffStillFailing', severity: 40 + g.diffCount, summary: `golden "${g.golden}" diffed ${g.diffCount}x, still dirty as of ${g.lastDiffedAt}` });
+  }
+  if (topFailedNetUrls[0]) {
+    const n = topFailedNetUrls[0];
+    topFrictionItems.push({ kind: 'topFailedNetUrl', severity: n.failCount, summary: `network request "${n.url}" failed ${n.failCount}x across ${n.sessionCount} session(s), last at ${n.lastFailedAt}${knownIssueText(n.knownIssues)}` });
+  }
+  if (topFailedConsoleMessages[0]) {
+    const c = topFailedConsoleMessages[0];
+    topFrictionItems.push({ kind: 'topFailedConsoleMessage', severity: c.failCount, summary: `console error "${c.message.slice(0, 120)}" occurred ${c.failCount}x across ${c.sessionCount} session(s), last at ${c.lastFailedAt}${knownIssueText(c.knownIssues)}` });
+  }
   if (macroAdoption.note) {
     topFrictionItems.push({ kind: 'macroAdoption', severity: 30 + macroAdoption.nudgeEligibleSessionCount, summary: macroAdoption.note });
   }
@@ -1537,9 +1607,12 @@ function computeAnalytics() {
     ...(knownIssuesCheckError ? { knownIssuesCheckError } : {}),
     failureRateByType,
     topFailedSelectors,
+    topFailedNetUrls,
+    topFailedConsoleMessages,
     macrosNeverRun,
     macrosNeverSucceeding,
     verityLabelsStillFailing,
+    goldenDiffsStillFailing,
     heatmap,
     macroHealth,
     macroAdoption,

@@ -520,6 +520,11 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    attach-and-wait for a console entry whose message contains
                                    the given substring, instead of a blind sleep+"console log"-
                                    poll loop that can race the app's own async console.error call.
+  console history [--contains <substr>] [--level error,warn] [--limit <n>] [--session <id>]
+                                   queries the DURABLE, already-persisted console_entries table
+                                   (survives past a page reload) instead of the live ring buffer
+                                   above - defaults to the active session. Same gap "net history"
+                                   closes for network entries, mirrored here.
   console clear                   clear the captured console log
 
   debug state                     THIS TOOL's own live runtime state (WebSocket readyState,

@@ -261,6 +261,21 @@ only printed by `macro run`/`suite run` right before replaying, and only there),
 "Verity labels still failing" panel surfaces `analytics.verityLabelsStillFailing` on its own instead
 of only when it happens to rank in the top-5 `topFrictionItems` digest.
 
+Three more gaps closed the same round: (1) the known-issues cross-reference (`analytics`'
+`failureRateByType`/`topFailedSelectors`) only ever matched a dom/idb/eval action's own error text -
+`net_entries`/`console_entries` are captured passively, straight from the page's event batches, and
+never contributed to it, so a repeating HTTP 500 or `console.error` was invisible even though
+`net log --failed` already tags each request pass/fail. `analytics.topFailedNetUrls`/
+`topFailedConsoleMessages` (and `topFrictionItems`) now rank those too, decorated with `knownIssues`
+when the registry matches - same shape as `topFailedSelectors`, built from failed/errored rows only,
+not a scan of the 60K+ rows `net_entries` alone can hold. (2) `console history` (and MCP
+`webscout_console.history`) mirrors `net history`: the durable `console_entries` table and its
+`GET /sessions/:id/console` route already existed, but only `net` had a filtered, cross-session
+history verb of its own - console had only the live capped ring buffer. (3) a new "Golden diffs
+still dirty" dashboard panel surfaces `analytics.goldenDiffsStillFailing` (a `diff-golden` comparison
+whose most recent result was non-clean) - the structurally identical gap the Verity panel above
+closes, for state-diff goldens instead of Verity imports.
+
 ## When the caller's own environment blocks a CRV command
 
 A caller (an AI coding agent, a CI runner, a sandboxed shell) may have its OWN permission or

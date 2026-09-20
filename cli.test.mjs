@@ -228,3 +228,51 @@ test('"macro update" rejects malformed JSON and a non-array before touching the 
   assert.equal(notArray.status, 1);
   assert.match(notArray.stderr, /must be a JSON array/);
 });
+
+// "console history" (GET /sessions/:id/console) queries the DURABLE console_entries table -
+// the same gap "net history" already closed for net_entries, mirrored for console. Entries are
+// captured passively over the agent WebSocket (see inject.js's flushQueue), never through
+// dispatchTracked, so - like the "macro update" test above - they are pushed over a plain
+// fetch-free raw WebSocket instead of connectFakeAgent (no command/reply round trip needed at
+// all here, just the {kind:'event', ...} envelope inject.js itself sends). "console history"
+// itself never talks to a connected tab (it queries by sessionId, not by live agent connection -
+// see mcp-server.mjs's own comment on this), so the spawnSync CLI is safe for it.
+test('"console history" reads the durable console_entries table, filtered by --contains and --level', async () => {
+  const started = run('session', 'start', 'cli.test.mjs console history', 'automated');
+  const session = JSON.parse(started.stdout);
+  const ws = new WebSocket(`ws://127.0.0.1:${relay.port}/agent?name=events`);
+  await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(new Error('event socket could not connect')); });
+  try {
+    const now = new Date().toISOString();
+    ws.send(JSON.stringify({
+      kind: 'event',
+      type: 'console',
+      entries: [
+        { level: 'error', message: 'boom: save failed', stack: null, at: now },
+        { level: 'warn', message: 'deprecated API used', stack: null, at: now },
+      ],
+    }));
+    let entries;
+    for (let i = 0; i < 50; i += 1) {
+      const shown = run('console', 'history', '--session', String(session.id));
+      assert.equal(shown.status, 0, shown.stderr);
+      entries = JSON.parse(shown.stdout).entries;
+      if (entries.length >= 2) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(entries.length, 2);
+
+    const errorOnly = run('console', 'history', '--session', String(session.id), '--level', 'error');
+    assert.equal(errorOnly.status, 0, errorOnly.stderr);
+    const errorEntries = JSON.parse(errorOnly.stdout).entries;
+    assert.equal(errorEntries.length, 1);
+    assert.equal(errorEntries[0].level, 'error');
+
+    const filtered = run('console', 'history', '--session', String(session.id), '--contains', 'save failed');
+    assert.equal(filtered.status, 0, filtered.stderr);
+    assert.equal(JSON.parse(filtered.stdout).entries.length, 1);
+  } finally {
+    ws.close();
+    run('session', 'end', String(session.id));
+  }
+});
