@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>self-repair-demo</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
+  #entryList { padding-left: 20px; }
+  button { margin-left: 6px; }
+</style>
+</head>
+<body>
+<h1>Ledger (self-repair-demo)</h1>
+<p>A tiny study-case app for web-scout's self-repair loop - see <code>README.md</code> in this directory.</p>
+<p>
+  <input id="addAmount" type="number" step="0.01" placeholder="amount" style="width:100px">
+  <input id="addLabel" type="text" placeholder="label (optional)" style="width:140px">
+  <button id="addEntryBtn">Add entry</button>
+  <button id="clearAllBtn">Clear all</button>
+</p>
+<p>Total: <span id="totalDisplay">0</span> &middot; Count: <span id="countDisplay">0</span></p>
+<ul id="entryList"></ul>
+<script src="app.js"></script>
+<!-- inject.js is dormant unless ?webscout=1 is in the URL (or
+     localStorage.webscout_enabled) - see tools/web-scout/inject.js -->
+<script src="inject.js"></script>
+</body>
+</html>

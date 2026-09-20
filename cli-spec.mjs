@@ -167,6 +167,22 @@ export const CLI_SPEC = [
   { cmd: 'macro delete', pos: [1, 1], mcp: 'webscout_macro.delete' },
   { cmd: 'macro export-verity', pos: [1, 1], val: ['--out'], mcp: 'webscout_macro.export_verity', params: { '--out': 'outPath' } },
   { cmd: 'suite run', pos: [1, 1], bool: ['--continue-on-error'], mcp: 'webscout_suite.run', params: { '--continue-on-error': 'continueOnError' } },
+
+  // Self-repair loop (see webscout2.md, self-repair.mjs) - scoped to the example app under
+  // self-repair.mjs's configured scopeDir only, disabled by default.
+  { cmd: 'repair status', pos: [0, 0], mcp: 'webscout_repair.status' },
+  { cmd: 'repair enable', pos: [0, 0], val: ['--by'], mcp: 'webscout_repair.enable', params: { '--by': 'by' } },
+  { cmd: 'repair disable', pos: [0, 0], val: ['--by'], mcp: 'webscout_repair.disable', params: { '--by': 'by' } },
+  {
+    cmd: 'repair patch', pos: [3, 3], val: ['--fixes-action-id'], mcp: 'webscout_repair.patch',
+    params: { '--fixes-action-id': 'fixesActionId' },
+  },
+  {
+    cmd: 'repair verify', pos: [0, 0], bool: ['--allow-extra', '--verbose'], val: ['--stores', '--type', '--params', '--expect', '--expect-file', '--patch-action-id', '--samples', '--agent'], mcp: 'webscout_repair.verify',
+    params: { '--stores': 'stores', '--type': 'type', '--params': 'params', '--expect': 'expect', '--patch-action-id': 'patchActionId', '--samples': 'samples', '--allow-extra': 'allowExtra', '--verbose': 'verbose' },
+    cliOnly: { '--expect-file': 'shell-quoting workaround - an MCP caller passes expect inline as a string or JSON' },
+  },
+  { cmd: 'repair causal-diff', pos: [2, 2], mcp: 'webscout_repair.causal_diff' },
 ];
 
 // Output formatting, accepted by every command and never sent to the relay.
