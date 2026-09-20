@@ -198,7 +198,12 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   `analytics`' `topFailedNetUrls`/`topFailedConsoleMessages` (and `topFrictionItems`) the same
   way a repeating selector failure always has, and `console history` (durable
   `console_entries`, also `webscout_console.history`) closes the last durable-history gap -
-  `net history` had one, console did not
+  `net history` had one, console did not. `topFailedNetUrls`/`topFailedConsoleMessages` get
+  their own dashboard panels too, not just a slot in the top-5 `topFrictionItems` digest, and
+  `net history`/`console history` carry a per-entry `knownIssue` when a row matches the
+  registry (previously only the cross-session aggregate did). `session end`'s `emergentFriction`
+  flag (a type/selector failing for the first time ever) now also reaches a session's own
+  first-ever repeating network/console failure, the same way it already covered dom/idb/eval
 - `crv seed <store> <rows-json>` writes rows (`idb put-many`) and records every
   stored row's real key into a manifest file, so `crv cleanup` can delete exactly
   those ids later (`idb delete-many`, one call per store) without hand-tracking ids

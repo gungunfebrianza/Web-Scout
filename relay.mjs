@@ -1029,6 +1029,20 @@ function matchKnownIssueForError(errorText) {
   return { match: hit ? { id: hit.id, description: hit.description, remediation: hit.remediation } : null, checkError: null };
 }
 
+// Round-9 gap: matchKnownIssueForError above decorates a failed ACTION's error inline
+// (dispatchTracked), but the durable "net history"/"console history" routes (GET
+// /sessions/:id/net, GET /sessions/:id/console - db.mjs's passively-captured tables) returned
+// raw entries with no known-issue match of their own, even though the cross-session aggregate
+// (topFailedNetUrls/topFailedConsoleMessages, computeAnalytics below) has carried one since
+// round 8. Same single-hit-per-entry shape as matchKnownIssueForError; skips entries whose
+// text is empty (e.g. a net entry with no error and no status) rather than matching nothing.
+function decorateEntriesWithKnownIssue(entries, textFor) {
+  return entries.map((entry) => {
+    const { match } = matchKnownIssueForError(textFor(entry));
+    return match ? { ...entry, knownIssue: match } : entry;
+  });
+}
+
 // One row per currently-connected agent, so a single preflight can answer "is some tab fighting
 // another over this agent name" instead of several manual `eval location.href` round trips.
 function connectedAgentsSummary() {
@@ -1663,7 +1677,15 @@ function getAnalytics() {
 // instead of only after it quietly repeats enough to rank on its own.
 function emergentFrictionForSession(sessionId) {
   const sessionFails = dbApi.listActions(sessionId).filter((a) => !a.ok);
-  if (!sessionFails.length) return [];
+  // Round-9 gap: this used to only scan dbApi.listActions (dom/idb/eval/net-wait/console-wait
+  // command dispatches) - a session's first-ever failing network request or console error,
+  // passively captured into net_entries/console_entries rather than dispatched as a command,
+  // was invisible here even though topFailedNetUrls/topFailedConsoleMessages (round 8) track
+  // the exact same data cross-session. Filtered to this session up front so the early-return
+  // below still skips computeAnalytics() for a session with no failures of any kind.
+  const sessionFailedNet = dbApi.listFailedNetEntries().filter((n) => n.session_id === sessionId);
+  const sessionFailedConsole = dbApi.listFailedConsoleEntries().filter((c) => c.session_id === sessionId);
+  if (!sessionFails.length && !sessionFailedNet.length && !sessionFailedConsole.length) return [];
   const analytics = computeAnalytics();
   const emergent = [];
 
@@ -1692,6 +1714,32 @@ function emergentFrictionForSession(sessionId) {
     const global = analytics.topFailedSelectors.find((s) => s.type === type && s.selector === selector);
     if (global && global.failCount === countThisSession) {
       emergent.push(`selector "${selector}" (${type}) failed ${countThisSession}x this session - the first session ever to see it fail more than once.`);
+    }
+  }
+
+  const failCountByUrl = new Map();
+  for (const n of sessionFailedNet) {
+    const key = n.url || '(no url)';
+    failCountByUrl.set(key, (failCountByUrl.get(key) ?? 0) + 1);
+  }
+  for (const [url, countThisSession] of failCountByUrl) {
+    // topFailedNetUrls only lists failCount > 1 - same threshold discipline as selectors above.
+    if (countThisSession < 2) continue;
+    const global = analytics.topFailedNetUrls.find((s) => s.url === url);
+    if (global && global.failCount === countThisSession) {
+      emergent.push(`network request "${url}" failed ${countThisSession}x this session - the first session ever to see it fail more than once.`);
+    }
+  }
+
+  const failCountByMessage = new Map();
+  for (const c of sessionFailedConsole) {
+    failCountByMessage.set(c.message, (failCountByMessage.get(c.message) ?? 0) + 1);
+  }
+  for (const [message, countThisSession] of failCountByMessage) {
+    if (countThisSession < 2) continue;
+    const global = analytics.topFailedConsoleMessages.find((s) => s.message === message);
+    if (global && global.failCount === countThisSession) {
+      emergent.push(`console error "${message.slice(0, 120)}" occurred ${countThisSession}x this session - the first session ever to see it repeat.`);
     }
   }
   return emergent;
@@ -2248,7 +2296,8 @@ const routes = [
     handler: async (req, m) => {
       const { searchParams } = new URL(req.url, `http://${HOST}`);
       const limitParam = searchParams.get('limit');
-      return dbApi.listConsoleEntries(Number(m[1]), { limit: limitParam ? Number(limitParam) : undefined });
+      const entries = dbApi.listConsoleEntries(Number(m[1]), { limit: limitParam ? Number(limitParam) : undefined });
+      return decorateEntriesWithKnownIssue(entries, (e) => e.message);
     },
   },
   {
@@ -2257,7 +2306,8 @@ const routes = [
     handler: async (req, m) => {
       const { searchParams } = new URL(req.url, `http://${HOST}`);
       const limitParam = searchParams.get('limit');
-      return dbApi.listNetEntries(Number(m[1]), { limit: limitParam ? Number(limitParam) : undefined });
+      const entries = dbApi.listNetEntries(Number(m[1]), { limit: limitParam ? Number(limitParam) : undefined });
+      return decorateEntriesWithKnownIssue(entries, (e) => e.error || (e.status ? `HTTP ${e.status}` : ''));
     },
   },
   { method: 'GET', pattern: /^\/sessions\/(\d+)\/verity-runs$/, handler: async (_req, m) => dbApi.listVerityRuns(Number(m[1])) },

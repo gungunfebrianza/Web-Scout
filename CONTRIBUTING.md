@@ -276,6 +276,18 @@ still dirty" dashboard panel surfaces `analytics.goldenDiffsStillFailing` (a `di
 whose most recent result was non-clean) - the structurally identical gap the Verity panel above
 closes, for state-diff goldens instead of Verity imports.
 
+Two more gaps closed the round after that: (1) `topFailedNetUrls`/`topFailedConsoleMessages` had
+zero dashboard presence of their own (only a slot in the top-5 `topFrictionItems` digest, if they
+ranked) even though `topFailedSelectors` gets its own scrollable panel - two new panels,
+"Recurring network failures"/"Recurring console errors", mirror it exactly. (2) net/console
+failures had only ever reached the *retrospective* cross-session digest, not the *live* friction
+system dom/idb/eval failures already get: `net history`/`console history` (`GET /sessions/:id/net`
+and `/console`) now decorate each returned entry with its own `knownIssue` when it matches the
+registry, not only the URL/message-level aggregate; and `emergentFrictionForSession` (the "session
+end" flag for a type/selector's first-ever failure) now also scans `net_entries`/`console_entries`
+for the session, not only `dbApi.listActions` - a session's first-ever repeating network or console
+failure was previously invisible to that flag.
+
 ## When the caller's own environment blocks a CRV command
 
 A caller (an AI coding agent, a CI runner, a sandboxed shell) may have its OWN permission or
