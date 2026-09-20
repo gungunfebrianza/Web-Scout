@@ -39,7 +39,18 @@ export function parseUsage(text) {
     if (/^\S/.test(line)) { // a column-0 line after the entries: the trailing global notes
       if (current?.topic === 'global') current.lines.push(line);
       else open('global', 'prose', line);
-    } else if (command && COMMAND_WORDS.has(command[1])) {
+    } else if (command && COMMAND_WORDS.has(command[1]) && (current === null || current.kind === 'command')) {
+      // Real command entries are always stacked directly under another command entry
+      // (no blank line needed between them - that's the file's actual convention).
+      // Without the kind check, an ordinary sentence in PROSE that happens to start
+      // with a command word at column 2 (e.g. "session start also returns...", or a
+      // wrapped continuation line starting with "relay are current) unless...") would
+      // hijack into a bogus new command block mid-paragraph, stealing everything after
+      // it out of its real topic - confirmed real, twice (a cascading case: one hijack
+      // opened a fake "session" block, then a wrapped line inside THAT hijacked prose
+      // starting with "relay" opened a second fake "relay" block on top of it). A
+      // prose block never legitimately turns into a command entry, so only honor the
+      // command match while already inside a command block (or at the very top).
       open(command[1], 'command', line);
     } else if (/^ {2}\S/.test(line)) {
       const prose = PROSE_TOPICS.find(([re]) => re.test(line));

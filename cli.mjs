@@ -184,6 +184,12 @@ async function handleSession(sub, rawArgs) {
     if (session.autoEndedSession) {
       console.error(`NOTE: ${session.autoEndedSession.reason} (session #${session.autoEndedSession.id}: "${session.autoEndedSession.goal}").`);
     }
+    if (session.macroAdoptionNote) {
+      console.error(`NOTE: ${session.macroAdoptionNote}`);
+    }
+    if (session.frictionNote) {
+      console.error(`NOTE: ${session.frictionNote}`);
+    }
     if (strictCrv && !storesValue) {
       console.error('WARNING: --strict-crv with no --stores auto-snapshots the WHOLE db on every dom.click/fill/eval/idb.put/idb.delete - this WILL time out (60s) against a real-size production IndexedDB. Pass --stores a,b,c to scope it.');
     }
@@ -239,6 +245,9 @@ async function handleSession(sub, rawArgs) {
     }
     if (ended.replayableActionCount >= 5) {
       console.error(`${ended.replayableActionCount} replayable action(s) this session - consider "macro record \\"<name>\\" ${ended.id}" if this shape (seed/verify/cleanup, etc.) will repeat.`);
+    }
+    if (ended.emergentFriction?.length) {
+      for (const line of ended.emergentFriction) console.error(`NOTE: emergent friction - ${line}`);
     }
     // One-line cost receipt at the natural end-of-session checkpoint -
     // catches waste the same day it happened instead of only on a later,
@@ -553,6 +562,9 @@ async function handleMacro(sub, rawArgs) {
       console.error(`NOTE: estimated cost of this replay ~${estTokens} tokens across ${macro.steps.length} step(s)${compactNote} (historical per-type averages - see "token-report").`);
     } catch { /* best-effort estimate only, never block the run */ }
     const result = await request('POST', `/macros/${id}/run`, { continueOnError, confirm, full, fromStep: fromStep !== undefined ? Number(fromStep) : undefined });
+    if (result.warning) {
+      console.error(`WARNING: ${result.warning}`);
+    }
     printResult(result);
     // Same exit-code gap as session assert: the relay's own route never
     // throws on a failing step (only on the cross-context guard), so a
@@ -1318,6 +1330,12 @@ main().catch((err) => {
   if (err.postTimeoutVerification) {
     console.error('Post-timeout verification (best-effort - does not prove the original command succeeded, only offers a second signal):');
     console.error(JSON.stringify(err.postTimeoutVerification, null, 2));
+  }
+  // Same known-issues.json registry "crv preflight" checks against boot console errors,
+  // now also matched against THIS failure's own message (see relay.mjs's dispatchTracked) -
+  // a bug already root-caused once is named here instead of read identically to a new one.
+  if (err.knownIssue) {
+    console.error(`Known issue: ${err.knownIssue.id}${err.knownIssue.description ? ` - ${err.knownIssue.description}` : ''}${err.knownIssue.remediation ? ` (remediation: ${err.knownIssue.remediation})` : ''}`);
   }
   process.exitCode = 1;
 });

@@ -191,6 +191,13 @@ export async function request(method, pathName, body, { autostart = true } = {})
   // stdout-only, so a stderr line here can never corrupt a JSON-RPC reply.
   const nudge = res.headers.get('x-webscout-nudge');
   if (nudge) emitNote(nudge);
+  // Pre-action risky-selector warn and proactive macro-match nudge (see relay.mjs's
+  // maybeRiskySelectorWarn/maybeMacroMatchNudge) - same header-not-body convention as the
+  // nudge above, for the same reason (never change the shape of a command's own real result).
+  const selectorRisk = res.headers.get('x-webscout-selector-risk');
+  if (selectorRisk) emitNote(selectorRisk);
+  const macroMatch = res.headers.get('x-webscout-macro-match');
+  if (macroMatch) emitNote(macroMatch);
   // The relay process is running OLDER code than what is on disk (an edit to
   // relay.mjs/db.mjs/... is invisible to it until restart) - once per process
   // is enough, and CLI/MCP results are otherwise trustworthy-looking.

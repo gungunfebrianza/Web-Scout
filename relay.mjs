@@ -754,6 +754,11 @@ async function dispatchTracked(session, type, params, agentName, dispatchTimeout
       } catch { /* verification itself threw unexpectedly - leave the original timeout error unannotated */ }
       broadcastUpdate('action', session.id);
     }
+    // Same registry crv preflight checks against boot console errors, now also checked
+    // against THIS failure's own message - a known bug otherwise looks identical to a
+    // brand-new mystery until a separate "analytics" call is made.
+    const known = matchKnownIssueForError(err.message);
+    if (known) err.extra = { ...err.extra, knownIssue: known };
     if (AUTO_SCREENSHOT_ON_FAILURE_TYPES.has(type) && params?.selector) {
       // Logged as its own action EITHER way (success or failure) - a
       // silent swallow on failure would hide exactly the case confirmed
@@ -816,6 +821,90 @@ function maybeCacheAwarenessNudge(sessionId, res) {
   } catch { /* best-effort - never block a command reply on this */ }
 }
 
+// ---------- Per-session friction snapshot (risky selectors, never-run macros) ----------
+//
+// Both nudges below need "what does analytics already know is risky" on EVERY command
+// dispatch - calling the shared getAnalytics() there would be wrong even though it is
+// cached: computing it (or extending its cache) from inside a fast-moving session would
+// freeze the SHARED analytics cache on a pre-this-session's-own-failures snapshot for up
+// to ANALYTICS_CACHE_MS, which is exactly the poisoning bug session start's own
+// macroAdoptionNote/frictionNote deliberately avoid by using computeAnalytics() uncached
+// (confirmed real here too: a fast scripted session hitting the same broken selector twice
+// got back a "clean" GET /analytics immediately after, because the first command's own
+// pre-check had already cached the pre-failure snapshot). Instead, the snapshot is computed
+// ONCE per session (at session start, from the SAME uncached computeAnalytics() call
+// session start already makes for macroAdoptionNote/frictionNote - no extra recompute) and
+// consulted here as a plain in-memory lookup - never touches the shared analytics cache.
+// Deliberately frozen for the session's own duration (a session doesn't need its own nudges
+// to update mid-flight); cleaned up in dropSessionMemory like every other per-session map.
+const sessionFrictionSnapshot = new Map(); // sessionId -> { riskySelectors: Map<"type::selector", entry>, neverRunMacros: [{id, name, steps}] }
+const RISKY_SELECTOR_FAIL_THRESHOLD = 3;
+
+function buildSessionFrictionSnapshot(sessionId, analytics) {
+  const riskySelectors = new Map();
+  for (const s of analytics.topFailedSelectors) {
+    if (s.failCount >= RISKY_SELECTOR_FAIL_THRESHOLD) riskySelectors.set(`${s.type}::${s.selector}`, s);
+  }
+  const neverRunIds = new Set(analytics.macrosNeverRun.map((m) => m.id));
+  let neverRunMacros = [];
+  try {
+    neverRunMacros = dbApi.listMacros().filter((m) => neverRunIds.has(m.id) && Array.isArray(m.steps) && m.steps.length >= 2);
+  } catch { /* best-effort - an empty list just means no macro-match nudge this session */ }
+  sessionFrictionSnapshot.set(sessionId, { riskySelectors, neverRunMacros });
+}
+
+// ---------- Pre-action risky-selector warn ----------
+//
+// topFailedSelectors already flags a selector that has repeatedly failed across sessions -
+// previously only visible via a separate "analytics" call, so an agent about to click/fill
+// the SAME risky selector again had no signal until AFTER it failed again, the exact same
+// wall. Checked against this session's own frozen snapshot (see above) right before
+// dispatch and surfaced as a response header, same convention as the mid-session macro
+// nudge below - decorates the reply without changing the result shape for a caller that
+// isn't reading headers, and never blocks the dispatch even when it fires.
+function maybeRiskySelectorWarn(sessionId, type, params, res) {
+  const selector = params?.selector;
+  if (!selector || typeof selector !== 'string') return;
+  try {
+    const hit = sessionFrictionSnapshot.get(sessionId)?.riskySelectors.get(`${type}::${selector}`);
+    if (!hit) return;
+    const known = hit.knownIssues?.[0];
+    res.setHeader('x-webscout-selector-risk', `selector "${selector}" (${type}) has failed ${hit.failCount}x before across ${hit.sessionCount} session(s), last at ${hit.lastFailedAt} - consider dom.click-wait or a settle/wait first.${known ? ` known issue: ${known.id}${known.remediation ? ` (${known.remediation})` : ''}` : ''}`);
+  } catch { /* best-effort - never block a command dispatch on this */ }
+}
+
+// ---------- Proactive macro-match nudge ----------
+//
+// macrosNeverRun already flags a macro that was recorded but never once replayed - visible
+// only on a separate "analytics" call, well after the moment it could have saved anything.
+// This catches it LIVE: if this session's own last N replayable actions match a never-run
+// macro's own step TYPE sequence (in order), nudge to replay it now instead of continuing
+// to hand-type the exact sequence it already exists to save. Compares action TYPES only,
+// not param values - a selector/value match would be brittle against dynamic ids (a
+// different row key each run is normal), and a false positive here just means an unwanted
+// nudge, never a wrong action. Reads the same frozen per-session snapshot as the warn
+// above (never the shared analytics cache - see its comment). One nudge per macro per
+// session (sessionMacroMatchNudged), same header convention as the mid-session nudge -
+// never folded into a command's own result body.
+const sessionMacroMatchNudged = new Map(); // sessionId -> Set<macroId> already nudged this session
+function maybeMacroMatchNudge(sessionId, res) {
+  try {
+    const candidates = sessionFrictionSnapshot.get(sessionId)?.neverRunMacros;
+    if (!candidates?.length) return;
+    const nudged = sessionMacroMatchNudged.get(sessionId) ?? new Set();
+    const recent = dbApi.listActions(sessionId, { ascending: true }).filter((a) => a.ok && DEFAULT_MACRO_TYPES.has(a.type));
+    for (const macro of candidates) {
+      if (nudged.has(macro.id) || recent.length < macro.steps.length) continue;
+      const tail = recent.slice(-macro.steps.length);
+      if (!macro.steps.every((step, i) => step.type === tail[i].type)) continue;
+      nudged.add(macro.id);
+      sessionMacroMatchNudged.set(sessionId, nudged);
+      res.setHeader('x-webscout-macro-match', `last ${macro.steps.length} action(s) match macro "${macro.name}" (#${macro.id}), recorded but never run - "macro run ${macro.id}" instead of continuing by hand.`);
+      return; // one macro's worth of nudge per reply is enough
+    }
+  } catch { /* best-effort - never block a command reply on this */ }
+}
+
 function requireActiveSession() {
   const session = dbApi.getCurrentSession();
   if (!session) {
@@ -833,6 +922,8 @@ function dropSessionMemory(sessionId) {
   sessionMutationCounters.delete(sessionId);
   sessionCacheAwarenessNudged.delete(sessionId);
   sessionCacheHitBytes.delete(sessionId);
+  sessionMacroMatchNudged.delete(sessionId);
+  sessionFrictionSnapshot.delete(sessionId);
   readPipeline.endSession(sessionId);
   lastReportedSessionTokens.delete(sessionId);
 }
@@ -906,6 +997,22 @@ function matchKnownIssues(bootErrors, report) {
   return loaded.issues
     .filter((issue) => texts.some((text) => issue.matches(text)))
     .map(({ id, description, remediation }) => ({ id, description, remediation }));
+}
+
+// Best-effort single-hit known-issue match for ONE failed action's own error text - used
+// inline on a /command failure (see dispatchTracked) so a bug that was already root-caused
+// once (the same registry "crv preflight" checks against boot console errors) reaches the
+// agent in the SAME reply as the failure, instead of only via a later, separate "analytics"
+// round trip. Returns the first match only (a failure needs one remediation to act on, not
+// a ranked list) and null on anything from "no file" to "no match" - never throws, never
+// blocks a command reply.
+function matchKnownIssueForError(errorText) {
+  if (!errorText) return null;
+  let loaded;
+  try { loaded = loadKnownIssues(); } catch { return null; }
+  if (!loaded?.issues.length) return null;
+  const hit = loaded.issues.find((issue) => issue.matches(errorText));
+  return hit ? { id: hit.id, description: hit.description, remediation: hit.remediation } : null;
 }
 
 // One row per currently-connected agent, so a single preflight can answer "is some tab fighting
@@ -1075,37 +1182,103 @@ function computeAnalytics() {
   const macros = dbApi.listMacros();
   const verityRuns = dbApi.listAllVerityRuns();
 
+  // Known-issues cross-reference (the operator-maintained known-issues.json registry, see
+  // "Known-issues registry" above) previously only matched against live boot-console-errors
+  // at "crv preflight" time - a failed action's own error text was never checked against it,
+  // so a failure this engine already flags as recurring (failureRateByType, topFailedSelectors)
+  // looked identical whether it was a brand-new mystery or a bug someone already root-caused
+  // months ago. Loaded once per call and reused below. Best-effort: any load/parse problem
+  // must not break the rest of analytics (same discipline as matchKnownIssues above).
+  let knownIssues = [];
+  try {
+    const loaded = loadKnownIssues();
+    if (loaded?.issues.length) knownIssues = loaded.issues;
+  } catch { /* malformed known-issues.json - analytics still works, just without cross-refs */ }
+  const matchKnownIssuesFor = (errorText) => {
+    if (!errorText || !knownIssues.length) return [];
+    return knownIssues.filter((issue) => issue.matches(errorText)).map(({ id, description, remediation }) => ({ id, description, remediation }));
+  };
+
   // 1. Failure rate by action type - only types with >=1 failure matter
   // here (a 100%-ok type is not friction), sorted by raw failure count.
   const byType = new Map();
+  const knownIssuesByType = new Map();
   for (const a of actions) {
     const t = byType.get(a.type) ?? { type: a.type, total: 0, failed: 0 };
     t.total += 1;
-    if (!a.ok) t.failed += 1;
+    if (!a.ok) {
+      t.failed += 1;
+      for (const hit of matchKnownIssuesFor(a.error)) {
+        const list = knownIssuesByType.get(a.type) ?? [];
+        if (!list.some((x) => x.id === hit.id)) list.push(hit);
+        knownIssuesByType.set(a.type, list);
+      }
+    }
     byType.set(a.type, t);
   }
+  // Trend: current cumulative-forever counts can't say "did the fix work" - a bad early
+  // round permanently drags the number even after a selector stops failing. Split
+  // sessions (already chronological, oldest first) into two non-overlapping windows -
+  // the most recent TREND_WINDOW sessions vs the TREND_WINDOW before those - and compare
+  // per-type failure rate between them. Needs at least 4 sessions to form two windows of
+  // 2+; below that there's nothing to split, so trend is simply omitted rather than
+  // computed from a misleadingly tiny window.
+  const TREND_WINDOW = Math.min(10, Math.floor(sessions.length / 2));
+  const recentByType = new Map();
+  const priorByType = new Map();
+  if (TREND_WINDOW >= 2) {
+    const orderedIds = sessions.map((s) => s.id);
+    const recentWindowIds = new Set(orderedIds.slice(-TREND_WINDOW));
+    const priorWindowIds = new Set(orderedIds.slice(-TREND_WINDOW * 2, -TREND_WINDOW));
+    for (const a of actions) {
+      const bucket = recentWindowIds.has(a.session_id) ? recentByType : priorWindowIds.has(a.session_id) ? priorByType : null;
+      if (!bucket) continue;
+      const t = bucket.get(a.type) ?? { total: 0, failed: 0 };
+      t.total += 1;
+      if (!a.ok) t.failed += 1;
+      bucket.set(a.type, t);
+    }
+  }
+  const trendFor = (type) => {
+    const r = recentByType.get(type);
+    const p = priorByType.get(type);
+    if (!r || !p) return undefined;
+    const recentRate = r.failed / r.total;
+    const priorRate = p.failed / p.total;
+    return { recentRate, priorRate, delta: recentRate - priorRate };
+  };
   const failureRateByType = [...byType.values()]
     .filter((t) => t.failed > 0)
-    .map((t) => ({ ...t, failureRate: t.failed / t.total }))
+    .map((t) => {
+      const trend = trendFor(t.type);
+      const knownForType = knownIssuesByType.get(t.type);
+      return { ...t, failureRate: t.failed / t.total, ...(trend ? { trend } : {}), ...(knownForType?.length ? { knownIssues: knownForType } : {}) };
+    })
     .sort((a, b) => b.failed - a.failed);
 
   // 2. Selectors that failed more than once - a single one-off miss is
   // normal; a selector failing repeatedly across sessions is the exact
   // "same wall hit again" pattern this exists to surface.
+  // lastFailedAt is tracked alongside failCount so a selector that failed 5x two months
+  // ago (since fixed) doesn't rank identically to one still failing this week - a plain
+  // count has no way to tell "chronic" from "stale", and chasing a stale entry wastes a
+  // session on something already dead.
   const bySelector = new Map();
   for (const a of actions) {
     if (a.ok) continue;
     const sel = a.params?.selector;
     if (!sel || typeof sel !== 'string') continue;
     const key = `${a.type}::${sel}`;
-    const s = bySelector.get(key) ?? { type: a.type, selector: sel, failCount: 0, sessionIds: new Set() };
+    const s = bySelector.get(key) ?? { type: a.type, selector: sel, failCount: 0, sessionIds: new Set(), lastFailedAt: null, knownIssues: [] };
     s.failCount += 1;
     s.sessionIds.add(a.session_id);
+    if (!s.lastFailedAt || a.started_at > s.lastFailedAt) s.lastFailedAt = a.started_at;
+    for (const hit of matchKnownIssuesFor(a.error)) if (!s.knownIssues.some((x) => x.id === hit.id)) s.knownIssues.push(hit);
     bySelector.set(key, s);
   }
   const topFailedSelectors = [...bySelector.values()]
     .filter((s) => s.failCount > 1)
-    .map((s) => ({ type: s.type, selector: s.selector, failCount: s.failCount, sessionCount: s.sessionIds.size }))
+    .map((s) => ({ type: s.type, selector: s.selector, failCount: s.failCount, sessionCount: s.sessionIds.size, lastFailedAt: s.lastFailedAt, ...(s.knownIssues.length ? { knownIssues: s.knownIssues } : {}) }))
     .sort((a, b) => b.failCount - a.failCount);
 
   // 3. Macros recorded but never actually replayed, and macros that HAVE
@@ -1254,6 +1427,69 @@ function computeAnalytics() {
     .sort((a, b) => b.wastePct - a.wastePct)
     .slice(0, 15);
 
+  // 10. Macro adoption - macrosNeverRun (above) catches a macro that was recorded but
+  // never replayed; this catches the earlier failure: sessions that crossed the
+  // mid-session "consider macro record" nudge threshold (see maybeMidSessionNudge's
+  // own >=5 replayable-actions check, same DEFAULT_MACRO_TYPES/threshold reused here so
+  // this can never disagree with what was actually shown) and STILL never recorded a
+  // macro at all. Confirmed real: a session hit that nudge, printed it to stderr mid a
+  // long CRV pass, and the macro was never recorded that session or any later one -
+  // the nudge fired and was seen, but nothing kept the fact that it was ignored visible
+  // past that session's own scrollback. macrosEverRecorded===0 here is the same signal
+  // "analytics".totals.macros already carries; this just also names WHICH sessions
+  // earned the nudge, so the note below is a claim a human/agent can go verify.
+  const NUDGE_ELIGIBLE_THRESHOLD = 5;
+  const replayableCountBySession = new Map();
+  for (const a of actions) {
+    if (!a.ok || !DEFAULT_MACRO_TYPES.has(a.type)) continue;
+    replayableCountBySession.set(a.session_id, (replayableCountBySession.get(a.session_id) ?? 0) + 1);
+  }
+  const nudgeEligibleSessions = [...replayableCountBySession.entries()]
+    .filter(([, count]) => count >= NUDGE_ELIGIBLE_THRESHOLD)
+    .map(([sessionId, count]) => ({ sessionId, count, goal: sessions.find((s) => s.id === sessionId)?.goal ?? null }));
+  const macroAdoption = {
+    nudgeEligibleSessionCount: nudgeEligibleSessions.length,
+    macrosEverRecorded: macros.length,
+    recentEligibleSessions: nudgeEligibleSessions.slice(-5),
+    ...(macros.length === 0 && nudgeEligibleSessions.length >= 3
+      ? { note: `${nudgeEligibleSessions.length} session(s) crossed the "consider recording a macro" nudge threshold (>=${NUDGE_ELIGIBLE_THRESHOLD} replayable actions) and none ever recorded one - the nudge is firing and being ignored, not missing. Run "macro record \\"<name>\\" <sessionId>" the next time a seed/verify/cleanup (or similar) shape repeats.` }
+      : {}),
+  };
+
+  // 11. Top friction items - everything above is ~10 separate arrays; this is a single
+  // ranked digest of the highest-signal entry from each, so a human/agent can read one
+  // short list instead of scanning the whole analytics blob to find what to fix first.
+  // Severity is a deliberately crude frequency-weighted score (not a real cost model) -
+  // good enough to rank a handful of candidates, not meant to be precise.
+  const topFrictionItems = [];
+  const knownIssueText = (list) => (list?.length
+    ? ` - known issue: ${list.map((k) => (k.remediation ? `${k.id} (${k.remediation})` : k.id)).join(', ')}`
+    : '');
+  if (failureRateByType[0]) {
+    const t = failureRateByType[0];
+    const trendText = t.trend ? `, trend ${t.trend.delta <= 0 ? 'improving' : 'worsening'} (${Math.round(t.trend.priorRate * 100)}% -> ${Math.round(t.trend.recentRate * 100)}%)` : '';
+    topFrictionItems.push({ kind: 'failureRateByType', severity: t.failed, summary: `"${t.type}" failed ${t.failed}/${t.total} times (${Math.round(t.failureRate * 100)}%)${trendText}${knownIssueText(t.knownIssues)}` });
+  }
+  if (topFailedSelectors[0]) {
+    const s = topFailedSelectors[0];
+    topFrictionItems.push({ kind: 'topFailedSelector', severity: s.failCount, summary: `selector "${s.selector}" (${s.type}) failed ${s.failCount}x across ${s.sessionCount} session(s), last at ${s.lastFailedAt}${knownIssueText(s.knownIssues)}` });
+  }
+  for (const m of macrosNeverSucceeding) {
+    topFrictionItems.push({ kind: 'macroNeverSucceeding', severity: 50 + m.attemptedSteps, summary: `macro "${m.name}" (#${m.id}) has run ${m.attemptedSteps} step(s) and never once succeeded` });
+  }
+  for (const v of verityLabelsStillFailing) {
+    topFrictionItems.push({ kind: 'verityLabelStillFailing', severity: 40 + v.importCount, summary: `verity label "${v.label}" imported ${v.importCount}x, still FAIL as of ${v.lastImportedAt}` });
+  }
+  if (macroAdoption.note) {
+    topFrictionItems.push({ kind: 'macroAdoption', severity: 30 + macroAdoption.nudgeEligibleSessionCount, summary: macroAdoption.note });
+  }
+  if (wasteBySession[0]) {
+    const w = wasteBySession[0];
+    topFrictionItems.push({ kind: 'wasteBySession', severity: Math.round((w.wastePct / 100) * w.calls), summary: `session ${w.sessionId}${w.goal ? ` ("${w.goal}")` : ''} wasted ${Math.round(w.wastePct)}% of ${w.calls} calls` });
+  }
+  topFrictionItems.sort((a, b) => b.severity - a.severity);
+  topFrictionItems.splice(5);
+
   return {
     totals: { sessions: sessions.length, actions: actions.length, macros: macros.length, verityRuns: verityRuns.length },
     malformedActionsSkipped,
@@ -1264,6 +1500,8 @@ function computeAnalytics() {
     verityLabelsStillFailing,
     heatmap,
     macroHealth,
+    macroAdoption,
+    topFrictionItems,
     activityPunchcard,
     durationByType,
     wasteBySession,
@@ -1296,6 +1534,52 @@ function getAnalytics() {
   const data = computeAnalytics();
   analyticsCache = { at: now, data };
   return data;
+}
+
+// ---------- Emergent-friction diff (session end) ----------
+//
+// topFrictionItems is a global top-5 digest - real but rare friction from ONE session would
+// never surface there (it hasn't accumulated enough occurrences project-wide to rank yet).
+// This diffs a just-ended session's own failures against the CURRENT project-wide totals
+// (computeAnalytics(), uncached, so this session's own just-logged actions are reflected -
+// same discipline as session start's own uncached call) and flags a type/selector whose
+// entire historical fail count IS this session's count - i.e. the first session ever to see
+// it fail (or, for a selector, fail more than once) - as "emergent", the moment it happens
+// instead of only after it quietly repeats enough to rank on its own.
+function emergentFrictionForSession(sessionId) {
+  const sessionFails = dbApi.listActions(sessionId).filter((a) => !a.ok);
+  if (!sessionFails.length) return [];
+  const analytics = computeAnalytics();
+  const emergent = [];
+
+  const failCountByType = new Map();
+  for (const a of sessionFails) failCountByType.set(a.type, (failCountByType.get(a.type) ?? 0) + 1);
+  for (const [type, countThisSession] of failCountByType) {
+    const global = analytics.failureRateByType.find((t) => t.type === type);
+    if (global && global.failed === countThisSession) {
+      emergent.push(`"${type}" failed ${countThisSession}x this session - the first session ever to see this type fail.`);
+    }
+  }
+
+  const failCountBySelector = new Map();
+  for (const a of sessionFails) {
+    const sel = a.params?.selector;
+    if (typeof sel !== 'string') continue;
+    const key = `${a.type}::${sel}`;
+    failCountBySelector.set(key, (failCountBySelector.get(key) ?? 0) + 1);
+  }
+  for (const [key, countThisSession] of failCountBySelector) {
+    // topFailedSelectors only lists failCount > 1 - below that threshold there is nothing
+    // to diff against yet, so a selector failing exactly once this session is left for a
+    // later session to potentially flag, not reported as emergent on a single data point.
+    if (countThisSession < 2) continue;
+    const [type, selector] = key.split('::');
+    const global = analytics.topFailedSelectors.find((s) => s.type === type && s.selector === selector);
+    if (global && global.failCount === countThisSession) {
+      emergent.push(`selector "${selector}" (${type}) failed ${countThisSession}x this session - the first session ever to see it fail more than once.`);
+    }
+  }
+  return emergent;
 }
 
 // ---------- DB_VERSION drift check (dashboard-visible) ----------
@@ -1560,13 +1844,31 @@ const routes = [
       openDashboardInBrowser();
       maybeAutoCalibrate();
       const briefing = body.briefing === false ? undefined : await buildBriefing(body.agent || DEFAULT_AGENT);
+      // Surfaced at session start (not just buried in "analytics", which nothing prompts
+      // anyone to run) so an ignored macro nudge from a past session is visible again right
+      // when a new one could actually act on it. See computeAnalytics()'s own macroAdoption
+      // comment for why this is derived, not a separately-tracked "was it acted on" flag.
+      // Deliberately computeAnalytics() (uncached), not getAnalytics(): calling the cached
+      // getter here would poison ANALYTICS_CACHE_MS with a snapshot taken before this brand
+      // new session has any actions of its own - confirmed real, a fast scripted
+      // start->act->end->GET /analytics sequence got back that pre-session stale result.
+      const sessionStartAnalytics = computeAnalytics();
+      const macroAdoptionNote = sessionStartAnalytics.macroAdoption?.note;
+      // Same treatment as macroAdoptionNote above, generalized: the single top-ranked
+      // entry from topFrictionItems (worst failing type/selector, a macro that never
+      // once succeeds, a verity label stuck FAIL, the worst-waste session) surfaces here
+      // too, instead of staying dashboard-only behind a manual "analytics" call. Skipped
+      // when it IS the macroAdoption item, to avoid printing the same note twice.
+      const topFriction = sessionStartAnalytics.topFrictionItems[0];
+      const frictionNote = topFriction && topFriction.kind !== 'macroAdoption' ? topFriction.summary : undefined;
+      buildSessionFrictionSnapshot(session.id, sessionStartAnalytics);
       const budget = session.token_budget
         ? { tokens: session.token_budget, tightenAtTokens: Math.round(session.token_budget * BUDGET_TIGHTEN_PCT / 100), strictAtTokens: Math.round(session.token_budget * BUDGET_STRICT_PCT / 100), note: 'past the first mark, reads over ~3000 tokens return their shape (--no-guard forces the body) and rows come back as {columns, rows}; past the second the guard drops to ~1000 tokens' }
         : undefined;
       const leanNote = session.lean
         ? { note: `lean session: reads come back as tables, a repeat of a result you already hold as a one-line pointer (or only what changed), and a body over ~${LEAN_GUARD_TOKENS} tokens as its shape (repeat the call to get it, from cache). --no-guard on a call gives the body as it is. Only rely on "unchanged"/deltas while the earlier result is still in your context.` }
         : undefined;
-      return { ...session, ...(briefing ? { briefing } : {}), ...(budget ? { budget } : {}), ...(leanNote ? { leanProfile: leanNote } : {}) };
+      return { ...session, ...(briefing ? { briefing } : {}), ...(budget ? { budget } : {}), ...(leanNote ? { leanProfile: leanNote } : {}), ...(macroAdoptionNote ? { macroAdoptionNote } : {}), ...(frictionNote ? { frictionNote } : {}) };
     },
   },
   {
@@ -1580,6 +1882,9 @@ const routes = [
       // session is exactly the shape the NEXT phase needs again, and
       // `macro record` (which already exists) has no prompt pointing at it.
       const replayableActionCount = dbApi.listActions(sessionId).filter((a) => a.ok && DEFAULT_MACRO_TYPES.has(a.type)).length;
+      // Computed before endSession/dropSessionMemory - listActions works on an ended
+      // session too, but this reads naturally as "one last look at what this session did".
+      const emergentFriction = emergentFrictionForSession(sessionId);
       const session = dbApi.endSession(sessionId);
       const deliveredEstTokens = sessionRunningTokens(sessionId); // what the caller actually received, after shaping
       // Nothing under an ended session can change again - an unbounded relay
@@ -1590,7 +1895,7 @@ const routes = [
       const savingsReceipt = { ...(sessionSavingsTally.get(sessionId) ?? { scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0, shapedCalls: 0, shapedBytes: 0 }), deliveredEstTokens };
       sessionSavingsTally.delete(sessionId);
       broadcastUpdate('session', null);
-      return { ...session, replayableActionCount, savingsReceipt };
+      return { ...session, replayableActionCount, savingsReceipt, ...(emergentFriction.length ? { emergentFriction } : {}) };
     },
   },
   { method: 'GET', pattern: /^\/sessions$/, handler: async () => dbApi.listSessions() },
@@ -2114,6 +2419,16 @@ const routes = [
         }
       }
 
+      // The friction analytics engine already knows (macrosNeverSucceeding) when a macro
+      // has been run before and never once succeeded end-to-end - that signal previously
+      // only surfaced in the dashboard/analytics command, never at the one place it could
+      // actually save an attempt: right before running it again. Cached getAnalytics() is
+      // fine here (unlike session start, staleness of a few seconds doesn't matter for a
+      // warning) and only checked on a fresh run (fromStep 0), not a resume.
+      const priorNeverSucceeding = fromStep === 0
+        ? getAnalytics().macrosNeverSucceeding.find((mns) => mns.id === macro.id)
+        : undefined;
+
       const results = [];
       for (const step of macro.steps.slice(fromStep)) {
         if (await isNoOpPut(step)) {
@@ -2173,7 +2488,17 @@ const routes = [
       const compactResults = results.map((r) => (includeFull || !r.ok
         ? r
         : { type: r.type, ok: r.ok, skipped: r.skipped, reason: r.reason, durationMs: r.durationMs }));
-      return { macro: { id: macro.id, name: macro.name }, fromStep, ranSteps: results.length, totalSteps: macro.steps.length, skippedCount, results: compactResults };
+      return {
+        macro: { id: macro.id, name: macro.name },
+        fromStep,
+        ranSteps: results.length,
+        totalSteps: macro.steps.length,
+        skippedCount,
+        results: compactResults,
+        ...(priorNeverSucceeding
+          ? { warning: `macro "${macro.name}" (#${macro.id}) has run ${priorNeverSucceeding.attemptedSteps} step(s) before this and never once succeeded - check "macro inspect ${macro.id}" or the dashboard's macro health strip before relying on it again.` }
+          : {}),
+      };
     },
   },
 
@@ -2242,6 +2567,7 @@ const routes = [
       if (type === 'idb.snapshot') throw new HttpError(400, "use POST /state/snapshot instead - idb.snapshot must be persisted, never dispatched raw");
       const session = requireActiveSession();
       const dispatchTimeoutMs = LONG_POLL_TYPES.has(type) ? (Number(params?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS;
+      maybeRiskySelectorWarn(session.id, type, params, res);
 
       const cacheKey = readCacheKey(agentName, type, params);
       const budget = cacheKey ? currentBudget(session) : null;
@@ -2299,6 +2625,7 @@ const routes = [
         broadcastUpdate('snapshot', session.id);
         broadcastUpdate('diff', session.id);
         maybeMidSessionNudge(session.id, res);
+        maybeMacroMatchNudge(session.id, res);
 
         // `--crv-compact` (session.strict_crv_compact): counts alone often are not enough to tell
         // whether the right rows changed, and the only way to see more today is a second, full-body
@@ -2319,6 +2646,7 @@ const routes = [
         noteScopedRead(session.id, result, { agentName, type, params });
         broadcastUpdate('action', session.id);
         maybeMidSessionNudge(session.id, res);
+        maybeMacroMatchNudge(session.id, res);
         resultOut = result;
         freshActionId = actionId;
       }
@@ -2468,6 +2796,11 @@ const routes = [
         report.bootErrorsCheckError = err.message;
       }
       report.knownIssueMatches = matchKnownIssues(report.bootErrors, report);
+      // Project-wide ranked friction digest (see computeAnalytics()'s topFrictionItems),
+      // cached (getAnalytics(), 5s TTL - cheap to add here). Lets an agent front-load the
+      // riskiest known-bad selectors/types/macros into the pass it's about to run instead
+      // of discovering them one at a time as each one fails live.
+      try { report.knownFriction = getAnalytics().topFrictionItems; } catch { /* best-effort - never blocks preflight */ }
 
       report.ok = !(report.missingStores?.length) && (selector ? report.selectorPresent !== false : true) && !(report.bootErrors?.length);
       return report;
