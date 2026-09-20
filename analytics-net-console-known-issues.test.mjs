@@ -13,6 +13,12 @@
 // "console history" routes (previously only the cross-session aggregate carried a match), and
 // emergentFrictionForSession reaching net_entries/console_entries the same way it already
 // reached dom/idb/eval action failures.
+//
+// Round 10 closes a gap round 9 itself introduced: decorateEntriesWithKnownIssue was applied
+// to the live "net history"/"console history" routes above but not to gatherReportBundle
+// (relay.mjs, backing "session report") - the ONE other place a session's raw net/console rows
+// are read back, so a saved/exported report still showed a bare failed request/console error
+// with no known-issue trace.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -170,5 +176,24 @@ test('"session end" flags emergentFriction for a session\'s first-ever repeating
     const ended = await api('POST', `/sessions/${id}/end`, {});
     assert.ok(ended.emergentFriction?.some((line) => line.includes('brand-new-endpoint')), `expected an emergent net line, got: ${JSON.stringify(ended.emergentFriction)}`);
     assert.ok(ended.emergentFriction?.some((line) => line.includes('brandNewThing is not defined')), `expected an emergent console line, got: ${JSON.stringify(ended.emergentFriction)}`);
+  });
+});
+
+test('"session report" (JSON) carries the same per-entry knownIssue on its console/net rows as "net history"/"console history"', async () => {
+  await withRelay([
+    { id: 'flaky-save-endpoint', signature: 'HTTP 500', description: 'save endpoint flakes under load', remediation: 'retry once after 500ms' },
+    { id: 'unhandled-null-deref', signature: 'Cannot read properties of undefined', description: 'a render races store hydration', remediation: 'guard with the loading flag' },
+  ], async ({ api, sendEvent }) => {
+    const id = (await api('POST', '/sessions', { goal: 'report bundle known-issue test', context: 'analytics-net-console-known-issues.test.mjs', briefing: false })).id;
+    const now = new Date().toISOString();
+    sendEvent('net', [{ via: 'fetch', method: 'POST', url: 'https://api.example.com/save', status: 500, error: null, startedAt: now, endedAt: now }]);
+    sendEvent('console', [{ level: 'error', message: "TypeError: Cannot read properties of undefined (reading 'id')", stack: null, at: now }]);
+    await waitUntil(async () => (await api('GET', `/sessions/${id}/net`)).length >= 1);
+    await waitUntil(async () => (await api('GET', `/sessions/${id}/console`)).length >= 1);
+
+    const report = await api('GET', `/sessions/${id}/report?format=json`);
+    const bundle = JSON.parse(report.content);
+    assert.equal(bundle.net[0].knownIssue?.id, 'flaky-save-endpoint');
+    assert.equal(bundle.console[0].knownIssue?.id, 'unhandled-null-deref');
   });
 });

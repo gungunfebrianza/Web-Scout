@@ -203,7 +203,12 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   `net history`/`console history` carry a per-entry `knownIssue` when a row matches the
   registry (previously only the cross-session aggregate did). `session end`'s `emergentFriction`
   flag (a type/selector failing for the first time ever) now also reaches a session's own
-  first-ever repeating network/console failure, the same way it already covered dom/idb/eval
+  first-ever repeating network/console failure, the same way it already covered dom/idb/eval.
+  A saved/exported `session report` now decorates its own `net`/`console` rows with `knownIssue`
+  too (previously only the live `net history`/`console history` routes did), and `verity history`/
+  `verity show` (also `webscout_session.verity_history`/`verity_show`) close the same
+  durable-history gap for imported Verity runs that `console history` closed for console - `verity
+  import` was write-only before
 - `crv seed <store> <rows-json>` writes rows (`idb put-many`) and records every
   stored row's real key into a manifest file, so `crv cleanup` can delete exactly
   those ids later (`idb delete-many`, one call per store) without hand-tracking ids
@@ -606,6 +611,8 @@ ask "what changed between snapshot 1 and 2?"   # optional, needs an AI backend
 analytics                     # recurring failure patterns across every session
 search "cfi_ontology"         # full-text search across every session's actions
 verity import <sessionId> ./scenario-result.json   # fold a Verity result into a session's evidence
+verity history [--label <substr>] [--limit] [--session]   # durable verity_runs, mirrors net/console history
+verity show <id>              # one imported Verity run's full per-step result
 agents                        # which browser tabs are connected
 dashboard                     # prints the dashboard URL
 ```

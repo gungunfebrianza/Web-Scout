@@ -305,6 +305,29 @@ export async function consoleHistory({ sessionId, contains, level, limit } = {})
   return { sessionId: id, count: entries.length, entries };
 }
 
+// ---------- Verity history (durable verity_runs, client-side filter) ----------
+//
+// Round-10 gap: GET /sessions/:id/verity-runs and GET /verity-runs/:id (relay.mjs) already
+// existed - a saved/exported report reads them internally (gatherReportBundle) - but had no
+// filtered, cross-session-callable verb of their own, unlike net_entries/console_entries
+// (netHistory/consoleHistory, above). A Verity run's own evidence was reachable only by
+// re-importing it or pulling the whole session report. Mirrors netHistory/consoleHistory:
+// filter/limit applied here, client-side, after the fetch. listVerityRuns (db.mjs) already
+// omits each run's full result_json (only imported/pass-fail counts) - the full per-step
+// result is verityShow's job, not this one, to keep a multi-run history call cheap.
+export async function verityHistory({ sessionId, label, limit } = {}) {
+  let id = sessionId;
+  if (!id) {
+    const health = await request('GET', '/health');
+    if (!health.active_session) throw new Error('no active session - pass sessionId, or start one');
+    id = health.active_session.id;
+  }
+  let runs = await request('GET', `/sessions/${id}/verity-runs`);
+  if (label) runs = runs.filter((r) => (r.label ?? '').includes(label));
+  if (limit !== undefined) runs = runs.slice(0, Number(limit));
+  return { sessionId: id, count: runs.length, runs };
+}
+
 // ---------- Snapshot delta (idb snapshot --since) ----------
 //
 // Takes a fresh snapshot scoped to the baseline's own stores, diffs it

@@ -28,7 +28,11 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 // Measured 17,854 when the round-8 coherence pass added console.history (webscout_console) -
 // console had no durable cross-session history verb though net already did. Raised to 17950,
 // same commit, same convention.
-const MCP_TOTAL_MAX_BYTES = 17950;
+// Measured 18,188 when the round-10 coherence pass added verity_history/verity_show
+// (webscout_session) - verity runs had durable routes (already read internally by session
+// report) but no cross-session-callable read verb of their own, same gap round 8 closed for
+// console. Raised to 18200, same commit, same convention.
+const MCP_TOTAL_MAX_BYTES = 18200;
 // Raised to 3550 when V38 added crv_preflight/crv_seed/crv_cleanup to webscout_idb (already the
 // biggest single tool, from crv_run) - same commit-with-the-text convention as above.
 // Raised to 3650 when V39 extended crv_preflight's one-line description (webscout_idb measured 3,606).

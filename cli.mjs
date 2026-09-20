@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import {
-  request, BASE, HOST, PORT, netHistory, consoleHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, ensureFreshRelayForNewSession,
+  request, BASE, HOST, PORT, netHistory, consoleHistory, verityHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, ensureFreshRelayForNewSession,
   manifestPath, readManifest, writeManifest,
 } from './client.mjs';
 import { validateArgs, findMsysMangledArgs, findSpec } from './cli-spec.mjs';
@@ -812,6 +812,26 @@ async function main() {
     if (!sessionId || !path) throw new Error('verity import requires <sessionId> <path-to-scenario-result.json>');
     const result = JSON.parse(fs.readFileSync(path, 'utf8'));
     printResult(await request('POST', '/verity/import', { sessionId: Number(sessionId), label: label ?? path, result }));
+    return;
+  }
+
+  // Round-10 gap: verity import (above) is write-only - reading a session's imported Verity
+  // runs back required a full "session report"/"session show". Mirrors "net history"/
+  // "console history": history lists (metadata only), show pulls one run's full result.
+  if (command === 'verity' && rest[0] === 'history') {
+    let args = rest.slice(1);
+    let label, limitValue, sessionValue;
+    ({ args, value: label } = extractFlag(args, '--label'));
+    ({ args, value: limitValue } = extractFlag(args, '--limit'));
+    ({ args, value: sessionValue } = extractFlag(args, '--session'));
+    printResult(await verityHistory({ sessionId: sessionValue, label, limit: limitValue }));
+    return;
+  }
+
+  if (command === 'verity' && rest[0] === 'show') {
+    const id = rest[1];
+    if (!id) throw new Error('verity show requires an id');
+    printResult(await request('GET', `/verity-runs/${id}`));
     return;
   }
 

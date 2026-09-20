@@ -1194,8 +1194,14 @@ async function gatherReportBundle(sessionId) {
     snapshots,
     diffs,
     qa: dbApi.listQA(sessionId),
-    console: dbApi.listConsoleEntries(sessionId),
-    net: dbApi.listNetEntries(sessionId),
+    // Round-10 gap: GET /sessions/:id/net and /console (used live by "net history"/"console
+    // history") gained per-entry knownIssue decoration in round 9 (decorateEntriesWithKnownIssue,
+    // above), but this second call site over the same tables - a saved/exported report, the
+    // ONE other place a session's raw net/console rows are read back - was missed, so a report
+    // showed a bare failed request/console error with no trace it was already a known bug, same
+    // gap round 9 had just closed for the live route.
+    console: decorateEntriesWithKnownIssue(dbApi.listConsoleEntries(sessionId), (e) => e.message),
+    net: decorateEntriesWithKnownIssue(dbApi.listNetEntries(sessionId), (e) => e.error || (e.status ? `HTTP ${e.status}` : '')),
     verityRuns: dbApi.listVerityRuns(sessionId).map((r) => dbApi.getVerityRun(r.id)),
     tokenReport: dbApi.getActionCostReport(sessionId),
     repeatedActionLoops: dbApi.findRepeatedActionLoops(sessionId),

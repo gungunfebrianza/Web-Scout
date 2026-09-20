@@ -288,6 +288,18 @@ end" flag for a type/selector's first-ever failure) now also scans `net_entries`
 for the session, not only `dbApi.listActions` - a session's first-ever repeating network or console
 failure was previously invisible to that flag.
 
+Two more gaps closed the round after that: (1) `decorateEntriesWithKnownIssue` (above) was applied
+to the live `net history`/`console history` routes but not to `gatherReportBundle` (the "session
+report" route) - the ONE other place a session's raw `net`/`console` rows are read back, so a
+saved/exported report still showed a bare failed request/console error with no known-issue trace,
+same gap the round before had just closed for the live routes. (2) Verity runs (`GET
+/sessions/:id/verity-runs`, `GET /verity-runs/:id`) had durable routes - already read internally by
+`session report` - but no filtered, cross-session-callable verb of their own, unlike
+`net_entries`/`console_entries`: `verity import` was write-only. New `verity history [--label]
+[--limit] [--session]` (mirrors `net history`/`console history`, metadata + pass/fail counts only)
+and `verity show <id>` (one run's full per-step result) close it, plus `webscout_session.
+verity_history`/`verity_show` on the MCP side.
+
 ## When the caller's own environment blocks a CRV command
 
 A caller (an AI coding agent, a CI runner, a sandboxed shell) may have its OWN permission or
