@@ -431,6 +431,31 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: 'webscout_repair',
+    description: 'Self-repair loop: source-write + confirm-fix, scoped to the example app under self-repair.mjs\'s scope dir ONLY (see webscout2.md). Disabled by default (fail-closed) - enable/disable is a server-side flag, not a display preference.\n'
+      + 'Actions:\n'
+      + '  status {} - enabled/scopeDir + recent enable/disable history\n'
+      + '  enable {by?} - flip the kill-switch on (logged with who flipped it)\n'
+      + '  disable {by?} - flip it off\n'
+      + '  patch {file, find, replace, fixesActionId?} - literal find/replace, ONE file, inside scope only; refuses an ambiguous/missing match or an out-of-scope path. fixesActionId -> a RECORDED (not inferred) causal edge\n'
+      + '  verify {stores, type, params?, expect?, patchActionId?, allowExtra?, samples?, verbose?} - same shape as webscout_idb.crv_run, replayed against the patched app; patchActionId -> another RECORDED edge. {pass:false,...} is a normal result, not a thrown error\n'
+      + '  causal_diff {sessionA, sessionB} - two sessions\' causality trees diffed, plus each session\'s RECORDED fixed_by/confirmed_by edges - see webscout2.md\'s "recorded vs inferred" gap',
+    actions: {
+      status: () => request('GET', '/repair/config'),
+      enable: (p) => request('PUT', '/repair/config', { enabled: true, by: p?.by }),
+      disable: (p) => request('PUT', '/repair/config', { enabled: false, by: p?.by }),
+      patch: (p) => {
+        if (p?.replace === undefined || p?.replace === null) throw new Error('params.replace is required (use "" to delete the matched text)');
+        return request('POST', '/repair/patch', { file: requireField(p, 'file'), find: requireField(p, 'find'), replace: p.replace, fixesActionId: p?.fixesActionId });
+      },
+      verify: (p) => request('POST', '/repair/verify', {
+        agent: p?.agent, stores: requireField(p, 'stores'), type: requireField(p, 'type'), params: p?.params ?? {}, expect: p?.expect,
+        patchActionId: p?.patchActionId, allowExtra: p?.allowExtra || undefined, verbose: p?.verbose || undefined, samples: numOrUndef(p?.samples),
+      }),
+      causal_diff: (p) => request('GET', `/repair/causal-diff?a=${encodeURIComponent(requireField(p, 'sessionA'))}&b=${encodeURIComponent(requireField(p, 'sessionB'))}`),
+    },
+  },
 ];
 
 // eval has no sub-actions (a single free-form expression, not a fixed verb

@@ -469,6 +469,29 @@ macro export-verity <id> --out ./scenario.json   # skeleton Verity scenario from
 suite run ./checks/my-suite.json
 ```
 
+**Self-repair loop** (see `webscout2.md` - Live Control + Causal Evidence only become a *repair*
+loop, not a dashboard, when the same process reads the evidence AND holds write access to the code,
+then re-runs to confirm its own patch). Disabled by default (fail-closed); scoped to the study-case
+app under `examples/self-repair-demo/` ONLY - never a real page. `--by`/`--fixes-action-id`/
+`--patch-action-id` are new flags this loop introduces; see `examples/self-repair-demo/README.md`
+for the full witness -> patch -> verify -> causal-diff walkthrough.
+```bash
+repair status                 # enabled/scopeDir + recent enable/disable history
+repair enable --by "<name>"   # server-side kill-switch ON (a CLI/MCP caller ignores a UI toggle -
+                               # this is the real gate; --by is self-declared, not authentication)
+repair disable --by "<name>"
+repair patch <file> <find> <replace> --fixes-action-id <id>
+                               # literal find/replace, ONE file, inside the configured scope dir
+                               # only - refuses disabled/out-of-scope/ambiguous-or-missing match
+repair verify --stores entries --type dom.click --params '{"selector":"#clearAllBtn"}' \
+              --expect "entries:-3" --patch-action-id <id>
+                               # confirm-fix step - same snapshot/dispatch/verify shape as
+                               # "crv run", replayed against the patched app. {pass:false} is a
+                               # normal result (exits 1), not a thrown error
+repair causal-diff <sessionA> <sessionB>   # two sessions' causality trees diffed, plus each
+                               # session's RECORDED fixed_by/confirmed_by edges (not inferred)
+```
+
 **Token cost & waste prevention**
 ```bash
 token-report                  # all-time byType/byTarget cost ranking + a "savings" block proving

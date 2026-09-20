@@ -46,10 +46,11 @@ import { createReadPipeline, readTargetKey, SCOPING_PARAM_KEYS, FOLLOW_UP_WINDOW
 import { sizeOf } from './read-shape.mjs';
 import { estimatorInfo, baselineBand } from './token-estimate.mjs';
 import { parseExpect, buildVerifyReport, sampleStoreDiff } from './crv-verify.mjs';
-import { buildSessionViz, buildWaste } from './session-viz.mjs';
+import { buildSessionViz, buildWaste, diffCausality } from './session-viz.mjs';
 import { discoverTranscripts, readTranscriptFile, importIntents } from './intent-import.mjs';
 import { exportTrace, writeTrace } from './trace.mjs';
 import { autoCalibrateIfMissing } from './transcript-tokens.mjs';
+import * as repairApi from './self-repair.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
@@ -2048,6 +2049,11 @@ const routes = [
       return {
         ...cost,
         byTarget: dbApi.getActionCostByTarget(),
+        // One row per session, tags included (db.mjs's getSessionTokenTotals) - the caller (dashboard)
+        // does the tag-matching client-side, same reasoning as that function's own comment. Lets
+        // "tokens spent by the self-repair loop" (sessions tagged 'self-repair') answer from data
+        // already collected here, instead of a second tracking system - see self-repair.mjs.
+        bySession: dbApi.getSessionTokenTotals(),
         neverCalled: {
           types: neverCalledTypes,
           sampleSizeCalls: cost.totalCalls,
@@ -2904,6 +2910,119 @@ const routes = [
       if (MUTATING_TYPES.has(type)) bumpMutationCounter(session.id);
       const report = await verifyAgainstBaseline(session, agentName, { baseline, stores, expect: body.expect, allowExtra: body.allowExtra, samples: body.samples, verbose: body.verbose });
       return { action: { type, ok: true, actionId, result: actionResult }, ...report };
+    },
+  },
+
+  // ---------------- self-repair loop (see webscout2.md, self-repair.mjs, docs/self-repair-loop.md) ----------------
+  //
+  // C = a coding agent that reads B's (causal) evidence AND holds write access to the code A (live
+  // control) exercises, then re-runs to confirm its own patch. Scoped to the example app under
+  // self-repair.mjs's configured scopeDir ONLY (never a real page) and disabled by default
+  // (fail-closed) - see self-repair.mjs's own comments for the enforcement, not just this doc note.
+  {
+    method: 'GET',
+    pattern: /^\/repair\/config$/,
+    handler: async () => ({ ...repairApi.getConfig(), history: repairApi.getConfigHistory(10) }),
+  },
+  {
+    // The kill-switch: a server-checked flag, not a display preference (a dashboard toggle that
+    // only hid a panel would be decorative - anyone driving the CLI/MCP directly would ignore it).
+    method: 'PUT',
+    pattern: /^\/repair\/config$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      if (typeof body.enabled !== 'boolean') throw new HttpError(400, 'enabled (boolean) is required');
+      const config = repairApi.setEnabled(body.enabled, { by: body.by });
+      log(`self-repair loop ${body.enabled ? 'ENABLED' : 'disabled'} via ${body.by || 'unknown caller'}`);
+      broadcastUpdate('repair-config', null);
+      return config;
+    },
+  },
+  {
+    // A literal find/replace against ONE file inside the configured scope dir - see self-repair.mjs
+    // for the fail-closed enforcement (disabled, out-of-scope path, ambiguous/missing match all
+    // refuse here, before any write happens). Logged as a normal 'fs.patch' action via
+    // withLoggedAction, same evidence-trail convention as every dispatched command - fixesActionId
+    // (optional) becomes a RECORDED causal edge (session-viz.mjs's buildRecordedRepairEdges), not a
+    // guessed one.
+    method: 'POST',
+    pattern: /^\/repair\/patch$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      const session = requireActiveSession();
+      const { file, find, replace, fixesActionId } = body;
+      let logged;
+      try {
+        logged = await withLoggedAction(
+          session.id, 'fs.patch',
+          { file, find, replace, fixesActionId: fixesActionId !== undefined && fixesActionId !== null ? Number(fixesActionId) : null },
+          async () => repairApi.applyPatch({ file, find, replace }),
+          'repair',
+        );
+      } catch (err) {
+        throw new HttpError(400, err.message);
+      }
+      broadcastUpdate('action', session.id);
+      return { actionId: logged.actionId, ...logged.result };
+    },
+  },
+  {
+    // The confirm-fix step: same snapshot -> dispatch -> verify shape as POST /crv/run above
+    // (deliberately not refactored to share code with it - lower regression risk on a route this
+    // repo's own tests already cover heavily than a shared-helper extraction), replayed against the
+    // now-patched app. patchActionId (optional) becomes a RECORDED 'confirmed_by' edge. A FAILING
+    // confirm is a normal result ({pass:false, ...}), not a thrown error - "still failing" is a real
+    // finding the self-repair loop's own caller needs to see, exactly like /state/verify's own
+    // pass/fail shape.
+    method: 'POST',
+    pattern: /^\/repair\/verify$/,
+    handler: async (req) => {
+      if (!repairApi.isEnabled()) throw new HttpError(403, 'self-repair loop is disabled - enable it first ("repair enable" / the dashboard kill-switch)');
+      const body = await readJsonBody(req);
+      const agentName = body.agent || DEFAULT_AGENT;
+      const session = requireActiveSession();
+      const stores = Array.isArray(body.stores) && body.stores.length ? body.stores : undefined;
+      if (!stores) throw new HttpError(400, 'stores (array) is required, same as "crv run"');
+      const type = body.type;
+      if (!type) throw new HttpError(400, 'type is required (the same action that originally failed, replayed now against the patched code)');
+      if (type === 'idb.snapshot') throw new HttpError(400, 'use "idb snapshot" for the baseline - "repair verify" takes its own');
+      const params = body.params ?? {};
+      const before = await withLoggedAction(session.id, 'idb.snapshot', { stores, for: 'repair.verify', phase: 'before' }, () => dispatchCommand('idb.snapshot', { stores }, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
+      const savedBaseline = dbApi.saveSnapshot({ sessionId: session.id, actionId: before.actionId, stores: before.result.stores, agentName });
+      const baseline = dbApi.getSnapshot(savedBaseline.id);
+      broadcastUpdate('snapshot', session.id);
+      const { result: actionResult, actionId: replayedActionId } = await dispatchTracked(session, type, params, agentName, COMMAND_TIMEOUT_MS);
+      broadcastUpdate('action', session.id);
+      if (MUTATING_TYPES.has(type)) bumpMutationCounter(session.id);
+      // verifyAgainstBaseline's own report shape (buildVerifyReport, crv-verify.mjs) carries the
+      // pass/fail flag as `passed`, not `ok` - matched exactly here rather than renamed, so a
+      // caller comparing this against /state/verify's or /crv/run's own reply sees the same field.
+      const report = await verifyAgainstBaseline(session, agentName, { baseline, stores, expect: body.expect, allowExtra: body.allowExtra, samples: body.samples, verbose: body.verbose });
+      const patchActionId = body.patchActionId !== undefined && body.patchActionId !== null ? Number(body.patchActionId) : null;
+      const { actionId: verifyActionId } = await withLoggedAction(
+        session.id, 'repair.verify',
+        { patchActionId, replayedActionId, type, params },
+        async () => ({ pass: report.passed }),
+        'repair',
+      );
+      broadcastUpdate('action', session.id);
+      return { pass: report.passed, verifyActionId, replayedActionId, action: { type, actionId: replayedActionId, result: actionResult }, ...report };
+    },
+  },
+  {
+    // Two sessions' causality trees diffed (session-viz.mjs's diffCausality) - the self-repair
+    // loop's own evidence that a patch actually removed the failing chain, not just "the session
+    // ended without an error". Read-only, no new storage.
+    method: 'GET',
+    pattern: /^\/repair\/causal-diff$/,
+    handler: async (req) => {
+      const { searchParams } = new URL(req.url, `http://${HOST}`);
+      const a = searchParams.get('a');
+      const b = searchParams.get('b');
+      if (!a || !b) throw new HttpError(400, 'query params a and b (session ids) are required');
+      const actionsA = dbApi.listActions(Number(a), { ascending: true });
+      const actionsB = dbApi.listActions(Number(b), { ascending: true });
+      return diffCausality(actionsA, actionsB);
     },
   },
 

@@ -650,6 +650,79 @@ async function handleSuite(sub, rawArgs) {
   throw new Error(`unknown 'suite ${sub || ''}'`);
 }
 
+// Self-repair loop (see webscout2.md, self-repair.mjs) - status/enable/disable control a
+// server-side kill-switch (not a display preference), patch/verify are scoped to the example app
+// under self-repair.mjs's own configured scope dir. Own small handler, independent of dom/idb's
+// shared flag-parsing block above (a distinct namespace, nothing to share with those).
+async function handleRepair(sub, rawArgs) {
+  if (sub === 'status') {
+    printResult(await request('GET', '/repair/config'));
+    return;
+  }
+  if (sub === 'enable' || sub === 'disable') {
+    let args = rawArgs;
+    let byFlag;
+    ({ args, value: byFlag } = extractFlag(args, '--by'));
+    printResult(await request('PUT', '/repair/config', { enabled: sub === 'enable', by: byFlag }));
+    return;
+  }
+  if (sub === 'patch') {
+    let args = rawArgs;
+    let fixesActionId;
+    ({ args, value: fixesActionId } = extractFlag(args, '--fixes-action-id'));
+    const [file, find, replace] = args;
+    if (!file || find === undefined || replace === undefined) throw new Error('repair patch requires <file> <find> <replace> (use "" for replace to delete the matched text)');
+    printResult(await request('POST', '/repair/patch', {
+      file, find, replace, fixesActionId: fixesActionId !== undefined ? Number(fixesActionId) : undefined,
+    }));
+    return;
+  }
+  if (sub === 'verify') {
+    let args = rawArgs;
+    let storesFlag;
+    let typeFlag;
+    let paramsFlag;
+    let expectFlag;
+    let expectFileFlag;
+    let patchActionIdFlag;
+    let samplesFlag;
+    let allowExtraFlag;
+    let verboseFlag;
+    ({ args, value: storesFlag } = extractFlag(args, '--stores'));
+    ({ args, value: typeFlag } = extractFlag(args, '--type'));
+    ({ args, value: paramsFlag } = extractFlag(args, '--params'));
+    ({ args, value: expectFlag } = extractFlag(args, '--expect'));
+    ({ args, value: expectFileFlag } = extractFlag(args, '--expect-file'));
+    ({ args, value: patchActionIdFlag } = extractFlag(args, '--patch-action-id'));
+    ({ args, value: samplesFlag } = extractFlag(args, '--samples'));
+    ({ args, value: allowExtraFlag } = extractBooleanFlag(args, '--allow-extra'));
+    ({ args, value: verboseFlag } = extractBooleanFlag(args, '--verbose'));
+    if (!storesFlag || !typeFlag) throw new Error('repair verify requires --stores and --type (same shape as "crv run")');
+    const result = await request('POST', '/repair/verify', {
+      stores: storesFlag.split(',').map((s) => s.trim()).filter(Boolean),
+      type: typeFlag,
+      params: paramsFlag ? JSON.parse(paramsFlag) : {},
+      expect: expectFileFlag ? fs.readFileSync(expectFileFlag, 'utf8') : expectFlag,
+      patchActionId: patchActionIdFlag !== undefined ? Number(patchActionIdFlag) : undefined,
+      samples: samplesFlag !== undefined ? Number(samplesFlag) : undefined,
+      allowExtra: allowExtraFlag, verbose: verboseFlag,
+    });
+    printResult(result);
+    // Same exit-code convention as macro run / session assert: a failing
+    // confirm-fix is a normal result, not a thrown error, but should still
+    // fail the shell exit code so a caller scripting this notices.
+    if (!result.pass) process.exitCode = 1;
+    return;
+  }
+  if (sub === 'causal-diff') {
+    const [a, b] = rawArgs;
+    if (!a || !b) throw new Error('repair causal-diff requires <sessionA> <sessionB>');
+    printResult(await request('GET', `/repair/causal-diff?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`));
+    return;
+  }
+  throw new Error(`unknown 'repair ${sub || ''}'`);
+}
+
 // Manually parses the relay's SSE feed (GET /events) over a plain
 // node:http request - re-checks `store`'s row count on every "something
 // changed" push instead of polling on a fixed interval. Resolves once
@@ -772,6 +845,11 @@ async function main() {
 
   if (command === 'suite') {
     await handleSuite(rest[0], rest.slice(1));
+    return;
+  }
+
+  if (command === 'repair') {
+    await handleRepair(rest[0], rest.slice(1));
     return;
   }
 

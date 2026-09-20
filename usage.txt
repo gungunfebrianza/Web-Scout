@@ -708,6 +708,32 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    failing step unless --continue-on-error. Exits 1 if any step,
                                    or the whole suite, didn't pass - CI-safe.
 
+  repair status                   self-repair loop: current enabled/scopeDir + recent
+                                   enable/disable history. Disabled by default (fail-closed) -
+                                   see self-repair.mjs / webscout2.md. Scoped to the example app
+                                   under examples/self-repair-demo ONLY, never a real page.
+  repair enable [--by <name>]     flip the server-side kill-switch ON (logged, not a silent
+                                   file edit; --by is self-declared, not authentication)
+  repair disable [--by <name>]    flip it OFF
+  repair patch <file> <find> <replace> [--fixes-action-id <id>]
+                                   literal find/replace against ONE file inside the configured
+                                   scope dir. Refuses: disabled, file outside scope, "find" not
+                                   found, or "find" matching 2+ places (narrow it to one match).
+                                   --fixes-action-id links this patch to the failing action it
+                                   addresses - becomes a RECORDED causal edge (not inferred).
+  repair verify --stores a,b --type dom.click --params '{"selector":"#x"}' [--expect "a:-1"]
+                [--patch-action-id <id>] [--allow-extra] [--verbose] [--samples N]
+                                   confirm-fix step: same snapshot/dispatch/verify shape as
+                                   "crv run", replayed against the now-patched app. Returns
+                                   {pass, ...} - a FAILING confirm is a normal result (exits 1),
+                                   not a thrown error. --patch-action-id links this confirm to
+                                   the patch it checks - another RECORDED edge.
+  repair causal-diff <sessionA> <sessionB>
+                                   diff two sessions' causality trees (edges added/removed/kept),
+                                   plus each session's RECORDED fixed_by/confirmed_by edges from
+                                   patch/verify actions - see webscout2.md's "recorded vs
+                                   inferred" gap. Read-only.
+
   verity import <sessionId> <path-to-scenario-result.json> [--label <text>]
                                    fold a saved tools/ui-verifier "-Command scenario"
                                    result into that session's own evidence trail (shows
