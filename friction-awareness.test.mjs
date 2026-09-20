@@ -218,3 +218,123 @@ test('crv preflight carries knownFriction, the same ranked topFrictionItems dige
     assert.deepEqual(preflight.knownFriction, analytics.topFrictionItems);
   }, { handlers: { 'dom.click': () => { throw new Error('still broken'); } } });
 });
+
+// ---- round 6: macro replay, "crv run", and computeAnalytics's own known-issues load error ----
+// were the one dispatch surface (macro replay) and the one dispatch route ("crv run") the round-4/5
+// live-friction system never reached, plus the one known-issues.json reader (computeAnalytics
+// itself) that still degraded silently instead of reporting knownIssuesCheckError like its two
+// siblings (matchKnownIssues, matchKnownIssueForError).
+
+test('macro replay carries the same risky-selector warning and knownIssue match POST /command already gets, per step - not just the CLI/single-command path', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-macro-run-'));
+  const registryPath = path.join(dir, 'known-issues.json');
+  fs.writeFileSync(registryPath, JSON.stringify([{ id: 'macro-flaky-el', signature: 'detached from DOM', description: 'stale DOM reference', remediation: 'use dom.click-wait instead' }]));
+  let riskyCalls = 0;
+  let flakyCalled = false;
+  await withRelay(async ({ api }) => {
+    // Session A: fail #risky 3x to seed cross-session history, then end.
+    const a = await api('POST', '/sessions', { goal: 'seed risky-selector history', context: 'friction-awareness.test.mjs', briefing: false });
+    for (let i = 0; i < 3; i += 1) {
+      try { await api('POST', '/command', { type: 'dom.click', params: { selector: '#risky' } }); } catch { /* expected */ }
+    }
+    await api('POST', `/sessions/${a.id}/end`);
+
+    // Session B: one SUCCESSFUL click on each selector, so both can be recorded into a macro
+    // (macro record only captures successful actions). #risky's 4th call succeeds live even
+    // though its history is still flagged risky; #flaky succeeds on its first call only.
+    const b = await api('POST', '/sessions', { goal: 'record macro', context: 'friction-awareness.test.mjs', briefing: false });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#risky' } });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#flaky' } });
+    const macro = await api('POST', '/macros', { name: 'macro-run-friction-test', sessionId: b.id });
+    assert.equal(macro.steps.length, 2);
+
+    // Replay, same still-active session: #risky is expected to succeed again but carry the
+    // history-based riskWarning regardless of the live outcome (same convention /command's own
+    // maybeRiskySelectorWarn uses - it warns off history, not the result that follows);
+    // #flaky is expected to fail this time (2nd call) and carry a matched knownIssue.
+    const run = await api('POST', `/macros/${macro.id}/run`, { full: true });
+    assert.equal(run.results.length, 2);
+    const [riskyStep, flakyStep] = run.results;
+    assert.equal(riskyStep.ok, true);
+    assert.ok(riskyStep.riskWarning, 'expected a riskWarning on the #risky replay step');
+    assert.match(riskyStep.riskWarning, /#risky/);
+    assert.match(riskyStep.riskWarning, /failed 3x before/);
+    assert.equal(flakyStep.ok, false);
+    assert.equal(flakyStep.knownIssue?.id, 'macro-flaky-el');
+    assert.match(flakyStep.knownIssue.remediation, /dom.click-wait/);
+
+    // Default (compact) reply: riskWarning survives compaction on the successful step (it is a
+    // short signal, not a result body - compacting must not silently drop it), everything else
+    // about that step is dropped; the failed step always keeps its full detail either way.
+    const compact = await api('POST', `/macros/${macro.id}/run`, {});
+    assert.ok(compact.results[0].riskWarning);
+    assert.equal(compact.results[0].result, undefined);
+    assert.equal(compact.results[1].ok, false);
+    assert.equal(compact.results[1].knownIssue?.id, 'macro-flaky-el');
+  }, {
+    handlers: {
+      'dom.click': (params) => {
+        if (params.selector === '#risky') { riskyCalls += 1; if (riskyCalls <= 3) throw new Error('still broken'); return { clicked: true }; }
+        if (params.selector === '#flaky') { if (!flakyCalled) { flakyCalled = true; return { clicked: true }; } throw new Error('Element not found: #flaky (detached from DOM)'); }
+        return { clicked: true };
+      },
+    },
+    envOverride: { WEBSCOUT_KNOWN_ISSUES: registryPath },
+  });
+});
+
+test('"crv run" gets the same pre-dispatch risky-selector warning and post-dispatch macro-match nudge POST /command already gets', async () => {
+  await withRelay(async ({ apiRaw, api }) => {
+    // Seed #risky as a risky selector across sessions.
+    const a = await api('POST', '/sessions', { goal: 'seed risky-selector history', context: 'friction-awareness.test.mjs', briefing: false });
+    for (let i = 0; i < 3; i += 1) {
+      try { await api('POST', '/command', { type: 'dom.click', params: { selector: '#risky' } }); } catch { /* expected */ }
+    }
+    await api('POST', `/sessions/${a.id}/end`);
+
+    // Record a never-run macro (2 dom.click steps) from a THIRD session, unrelated to the one
+    // that will call "crv run" below.
+    const seedMacro = await api('POST', '/sessions', { goal: 'seed macro', context: 'friction-awareness.test.mjs', briefing: false });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#one' } });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#two' } });
+    await api('POST', `/sessions/${seedMacro.id}/end`);
+    await api('POST', '/macros', { name: 'crv-run-friction-test-macro', sessionId: seedMacro.id });
+
+    // Fresh session: its frozen snapshot already knows both facts above.
+    await api('POST', '/sessions', { goal: 'crv run friction test', context: 'friction-awareness.test.mjs', briefing: false });
+    const risk = await apiRaw('POST', '/crv/run', { stores: ['x'], type: 'dom.click', params: { selector: '#risky' } });
+    assert.match(risk.res.headers.get('x-webscout-selector-risk') ?? '', /#risky/);
+
+    // Two more dom.click calls (types only) via "crv run" itself complete the never-run macro's
+    // own step-type sequence - the nudge must fire from THIS route too, not only /command.
+    await api('POST', '/crv/run', { stores: ['x'], type: 'dom.click', params: { selector: '#three' } });
+    const nudge = await apiRaw('POST', '/crv/run', { stores: ['x'], type: 'dom.click', params: { selector: '#four' } });
+    assert.match(nudge.res.headers.get('x-webscout-macro-match') ?? '', /crv-run-friction-test-macro/);
+  }, {
+    handlers: {
+      'idb.snapshot': () => ({ stores: {} }),
+      'dom.click': (params) => { if (params.selector === '#risky') throw new Error('still broken'); return { clicked: true }; },
+    },
+  });
+});
+
+test('GET /analytics and crv preflight report knownIssuesCheckError (not a silent "no known issues") when known-issues.json is malformed', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-analytics-badregistry-'));
+  const registryPath = path.join(dir, 'known-issues.json');
+  fs.writeFileSync(registryPath, '{ not valid json');
+  await withRelay(async ({ api }) => {
+    const s = await api('POST', '/sessions', { goal: 'bad registry analytics test', context: 'friction-awareness.test.mjs', briefing: false });
+    try { await api('POST', '/command', { type: 'dom.click', params: {} }); } catch { /* not relevant here */ }
+    await api('POST', `/sessions/${s.id}/end`);
+
+    const analytics = await api('GET', '/analytics');
+    assert.match(analytics.knownIssuesCheckError ?? '', /not valid JSON/);
+
+    await api('POST', '/sessions', { goal: 'bad registry preflight test', context: 'friction-awareness.test.mjs', briefing: false });
+    const preflight = await api('POST', '/crv/preflight', {});
+    assert.match(preflight.knownIssuesCheckError ?? '', /not valid JSON/);
+  }, {
+    handlers: { 'dom.click': () => ({ clicked: true }) },
+    envOverride: { WEBSCOUT_KNOWN_ISSUES: registryPath },
+  });
+});

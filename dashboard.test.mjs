@@ -193,6 +193,48 @@ describe('dashboard in a headless browser', () => {
     }
   });
 
+  test('"End session" shows emergentFriction and the savings receipt instead of discarding the response - same info the CLI already prints', { skip: browserSkip(), timeout: 90000 }, async () => {
+    const relay = await startTestRelay();
+    let page;
+    let tab;
+    try {
+      const api = async (method, route, body) => (await (await fetch(`http://127.0.0.1:${relay.port}${route}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined })).json()).result;
+      tab = await connectFakeAgent(relay.port, {
+        'dom.click': () => { throw new Error('first-ever failure on this type'); },
+      }, { name: 'default', epoch: 0 });
+      const session = await api('POST', '/sessions', { goal: 'dashboard end-session banner test', context: 'automated' });
+      try { await api('POST', '/command', { type: 'dom.click', params: { selector: '#brand-new' } }); } catch { /* expected: this is what seeds emergentFriction */ }
+
+      page = await launchBrowser(browser);
+      await page.navigate(`http://127.0.0.1:${relay.port}/dashboard`);
+      // endSessionBtn has no "disabled" attribute in the static markup - it only gets disabled
+      // once real session data has loaded (renderSessionDetail), so checking its disabled state
+      // alone is a false-positive trap on the very first render tick, before currentSessionId is
+      // even set. sessionStatusBadge starts empty and is set in that same render pass, right
+      // after currentSessionId - a real signal that the page has loaded THIS session's data.
+      let ready = false;
+      let readyDeadline = Date.now() + 25000;
+      while (Date.now() < readyDeadline && !ready) {
+        ready = await page.evaluate("document.getElementById('sessionStatusBadge').textContent === 'active'");
+        if (!ready) await sleep(300);
+      }
+      assert.ok(ready, 'session detail (sessionStatusBadge) never loaded in time');
+      await page.evaluate("document.getElementById('endSessionBtn').click()");
+      let text = '';
+      let textDeadline = Date.now() + 25000;
+      while (Date.now() < textDeadline && !text) {
+        text = (await page.evaluate(`(() => { const b = document.getElementById('sessionEndBanner'); return b && !b.hidden ? document.getElementById('sessionEndList').textContent : ''; })()`)) || '';
+        if (!text) await sleep(300);
+      }
+      assert.deepEqual(page.errors, [], `page errors: ${page.errors.join(' | ')}`);
+      assert.match(text, /"dom\.click" failed 1x this session - the first session ever to see this type fail\./);
+    } finally {
+      tab?.close();
+      await page?.close();
+      await relay.stop();
+    }
+  });
+
   test('the savings panel surfaces real usage evidence (never-called action types, help all-vs-sliced)', { skip: browserSkip(), timeout: 90000 }, async () => {
     const relay = await startTestRelay();
     let page;

@@ -863,14 +863,22 @@ function buildSessionFrictionSnapshot(sessionId, analytics) {
 // dispatch and surfaced as a response header, same convention as the mid-session macro
 // nudge below - decorates the reply without changing the result shape for a caller that
 // isn't reading headers, and never blocks the dispatch even when it fires.
-function maybeRiskySelectorWarn(sessionId, type, params, res) {
+// Shared with the macro-run step loop below (no response-header slot there - a macro reply
+// has no single "this command" to decorate, it has N steps - so that caller attaches the same
+// text to the one step it's about, instead of a header).
+function riskySelectorWarningText(sessionId, type, params) {
   const selector = params?.selector;
-  if (!selector || typeof selector !== 'string') return;
+  if (!selector || typeof selector !== 'string') return null;
+  const hit = sessionFrictionSnapshot.get(sessionId)?.riskySelectors.get(`${type}::${selector}`);
+  if (!hit) return null;
+  const known = hit.knownIssues?.[0];
+  return `selector "${selector}" (${type}) has failed ${hit.failCount}x before across ${hit.sessionCount} session(s), last at ${hit.lastFailedAt} - consider dom.click-wait or a settle/wait first.${known ? ` known issue: ${known.id}${known.remediation ? ` (${known.remediation})` : ''}` : ''}`;
+}
+
+function maybeRiskySelectorWarn(sessionId, type, params, res) {
   try {
-    const hit = sessionFrictionSnapshot.get(sessionId)?.riskySelectors.get(`${type}::${selector}`);
-    if (!hit) return;
-    const known = hit.knownIssues?.[0];
-    res.setHeader('x-webscout-selector-risk', `selector "${selector}" (${type}) has failed ${hit.failCount}x before across ${hit.sessionCount} session(s), last at ${hit.lastFailedAt} - consider dom.click-wait or a settle/wait first.${known ? ` known issue: ${known.id}${known.remediation ? ` (${known.remediation})` : ''}` : ''}`);
+    const text = riskySelectorWarningText(sessionId, type, params);
+    if (text) res.setHeader('x-webscout-selector-risk', text);
   } catch { /* best-effort - never block a command dispatch on this */ }
 }
 
@@ -1215,10 +1223,18 @@ function computeAnalytics() {
   // months ago. Loaded once per call and reused below. Best-effort: any load/parse problem
   // must not break the rest of analytics (same discipline as matchKnownIssues above).
   let knownIssues = [];
+  let knownIssuesCheckError = null;
   try {
     const loaded = loadKnownIssues();
     if (loaded?.issues.length) knownIssues = loaded.issues;
-  } catch { /* malformed known-issues.json - analytics still works, just without cross-refs */ }
+  } catch (err) {
+    // Same distinction the other two known-issues.json readers already make (matchKnownIssues'
+    // report.knownIssuesCheckError, matchKnownIssueForError's checkError) - this was the one
+    // remaining call site still silently degrading to "no cross-refs" on a malformed registry,
+    // which reads identically to "checked, genuinely nothing matched" everywhere this feeds:
+    // GET /analytics, crv preflight's knownFriction, the dashboard's friction panel.
+    knownIssuesCheckError = err.message;
+  }
   const matchKnownIssuesFor = (errorText) => {
     if (!errorText || !knownIssues.length) return [];
     return knownIssues.filter((issue) => issue.matches(errorText)).map(({ id, description, remediation }) => ({ id, description, remediation }));
@@ -1518,6 +1534,7 @@ function computeAnalytics() {
   return {
     totals: { sessions: sessions.length, actions: actions.length, macros: macros.length, verityRuns: verityRuns.length },
     malformedActionsSkipped,
+    ...(knownIssuesCheckError ? { knownIssuesCheckError } : {}),
     failureRateByType,
     topFailedSelectors,
     macrosNeverRun,
@@ -2491,6 +2508,14 @@ const routes = [
         const stepTimeoutMs = LONG_POLL_TYPES.has(step.type) ? (Number(step.params?.timeoutMs) || 15000) + 5000
           : step.type === 'idb.snapshot' ? SNAPSHOT_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
         const stepStartedAt = Date.now();
+        // Macro replay previously never touched the live-friction-awareness system at all -
+        // /command's dispatchTracked (inline knownIssue-on-failure) and maybeRiskySelectorWarn
+        // were both wired to exactly one dispatch surface. Macros exist specifically for
+        // REPEATED command shapes, which is exactly where a selector already known to fail 3+
+        // times is most likely to recur - this was the one place the whole system was silently
+        // absent. No response-header slot for N steps in one reply, so both surface as fields
+        // on that step's own result object instead.
+        const riskWarning = riskySelectorWarningText(session.id, step.type, step.params);
         try {
           const { result } = await withLoggedAction(session.id, step.type, { ...step.params, via: 'macro', macroId: macro.id, macroName: macro.name }, () => dispatchCommand(step.type, step.params ?? {}, stepTimeoutMs, agentName), agentName);
           // A macro's mutating steps (idb.put/delete/eval/...) previously
@@ -2503,9 +2528,10 @@ const routes = [
           if (MUTATING_TYPES.has(step.type)) bumpMutationCounter(session.id);
           noteScopedRead(session.id, result, { agentName, type: step.type, params: step.params });
           if (cacheKey) storeReadCache(session.id, cacheKey, result);
-          results.push({ type: step.type, ok: true, result, durationMs: Date.now() - stepStartedAt });
+          results.push({ type: step.type, ok: true, result, durationMs: Date.now() - stepStartedAt, ...(riskWarning ? { riskWarning } : {}) });
         } catch (err) {
-          results.push({ type: step.type, ok: false, error: err.message, durationMs: Date.now() - stepStartedAt });
+          const { match: knownIssue } = matchKnownIssueForError(err.message);
+          results.push({ type: step.type, ok: false, error: err.message, durationMs: Date.now() - stepStartedAt, ...(riskWarning ? { riskWarning } : {}), ...(knownIssue ? { knownIssue } : {}) });
           if (!continueOnError) break;
         }
       }
@@ -2523,7 +2549,11 @@ const routes = [
       const includeFull = !!body.full;
       const compactResults = results.map((r) => (includeFull || !r.ok
         ? r
-        : { type: r.type, ok: r.ok, skipped: r.skipped, reason: r.reason, durationMs: r.durationMs }));
+        // riskWarning is a short string, not a result body - the whole point of compacting is
+        // to not echo back a potentially-large result the caller already has; a warning that a
+        // step is about to repeat a known-bad selector is exactly the kind of thing compacting
+        // must not silently drop.
+        : { type: r.type, ok: r.ok, skipped: r.skipped, reason: r.reason, durationMs: r.durationMs, ...(r.riskWarning ? { riskWarning: r.riskWarning } : {}) }));
       return {
         macro: { id: macro.id, name: macro.name },
         fromStep,
@@ -2836,7 +2866,11 @@ const routes = [
       // cached (getAnalytics(), 5s TTL - cheap to add here). Lets an agent front-load the
       // riskiest known-bad selectors/types/macros into the pass it's about to run instead
       // of discovering them one at a time as each one fails live.
-      try { report.knownFriction = getAnalytics().topFrictionItems; } catch { /* best-effort - never blocks preflight */ }
+      try {
+        const analytics = getAnalytics();
+        report.knownFriction = analytics.topFrictionItems;
+        if (analytics.knownIssuesCheckError && !report.knownIssuesCheckError) report.knownIssuesCheckError = analytics.knownIssuesCheckError;
+      } catch { /* best-effort - never blocks preflight */ }
 
       report.ok = !(report.missingStores?.length) && (selector ? report.selectorPresent !== false : true) && !(report.bootErrors?.length);
       return report;
@@ -2881,7 +2915,7 @@ const routes = [
     // postTimeoutVerification, ...) applies exactly as it already does to a bare action.
     method: 'POST',
     pattern: /^\/crv\/run$/,
-    handler: async (req) => {
+    handler: async (req, _m, res) => {
       const body = await readJsonBody(req);
       const agentName = body.agent || DEFAULT_AGENT;
       const session = requireActiveSession();
@@ -2899,9 +2933,16 @@ const routes = [
       const baseline = dbApi.getSnapshot(savedBaseline.id);
       broadcastUpdate('snapshot', session.id);
       const dispatchTimeoutMs = LONG_POLL_TYPES.has(type) ? (Number(params?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS;
+      // Same pre-dispatch risky-selector warning /command already gets (maybeRiskySelectorWarn)
+      // - "crv run" takes an identical {type,params} action and is arguably higher-stakes to
+      // warn on: it burns a whole snapshot+diff round trip on an action already known to fail
+      // repeatedly. dispatchTracked below already covers the ON-FAILURE knownIssue match; this
+      // was the missing BEFORE-failure half.
+      maybeRiskySelectorWarn(session.id, type, params, res);
       const { result: actionResult, actionId } = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
       broadcastUpdate('action', session.id);
       if (MUTATING_TYPES.has(type)) bumpMutationCounter(session.id);
+      maybeMacroMatchNudge(session.id, res);
       const report = await verifyAgainstBaseline(session, agentName, { baseline, stores, expect: body.expect, allowExtra: body.allowExtra, samples: body.samples, verbose: body.verbose });
       return { action: { type, ok: true, actionId, result: actionResult }, ...report };
     },

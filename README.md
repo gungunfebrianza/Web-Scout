@@ -178,6 +178,11 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   carries the same known-issues matches for that session's own failed actions, and the
   MCP server's tool-failure replies carry the same `knownIssue`/post-timeout-verification
   info the CLI already prints - a failure looks the same whichever front end hit it. The
+  dashboard's "End session" button shows the same `emergentFriction`/savings receipt too,
+  instead of discarding the response. `macro run` and `crv run` get the same risky-selector
+  warning and known-issue match `/command` does - a macro's own steps carry `riskWarning`/
+  `knownIssue` per step (macros exist for repeated shapes, exactly where a selector already
+  known to be flaky is most likely to recur). The
   per-session checks are read from a snapshot frozen at `session start` (from the same
   analytics `analytics` itself reads), never a live per-command analytics call, so they
   can never go stale mid-session or poison the shared 5s analytics cache
