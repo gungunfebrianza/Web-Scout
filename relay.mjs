@@ -3025,6 +3025,41 @@ const routes = [
       return diffCausality(actionsA, actionsB);
     },
   },
+  {
+    // Cross-session feed of the loop's own dispatched actions (fs.patch + repair.verify), newest
+    // first - powers the dashboard's patch ledger and pass/fail funnel without either one scanning
+    // every session's action log client-side. Reuses dbApi.listAllActions() (already the source for
+    // computeAnalytics' cross-session digests, same discipline: best-effort, a malformed row is
+    // skipped not fatal) rather than adding a dedicated table - fs.patch/repair.verify are logged
+    // exactly like any other action, this just filters and sorts what's already stored. Capped at
+    // 300 - a ledger this deep is already well past "read it all", not a pagination gap.
+    method: 'GET',
+    pattern: /^\/repair\/activity$/,
+    handler: async () => {
+      const { actions } = dbApi.listAllActions();
+      const goalBySession = new Map(dbApi.listSessions().map((s) => [s.id, s.goal]));
+      const rows = actions
+        .filter((a) => a.type === 'fs.patch' || a.type === 'repair.verify')
+        .sort((x, y) => y.id - x.id)
+        .slice(0, 300)
+        .map((a) => ({
+          id: a.id, sessionId: a.session_id, goal: goalBySession.get(a.session_id) ?? null,
+          type: a.type, ok: a.ok, startedAt: a.started_at, error: a.error,
+          file: a.params?.file ?? null, find: a.params?.find ?? null, replace: a.params?.replace ?? null,
+          fixesActionId: a.params?.fixesActionId ?? null, patchActionId: a.params?.patchActionId ?? null,
+          pass: a.type === 'repair.verify' ? (a.result?.pass ?? null) : null,
+        }));
+      const patches = rows.filter((r) => r.type === 'fs.patch');
+      const verifies = rows.filter((r) => r.type === 'repair.verify');
+      return {
+        rows,
+        funnel: {
+          patchesAttempted: patches.length, patchesApplied: patches.filter((r) => r.ok).length,
+          verifiesRun: verifies.length, verifiesPassed: verifies.filter((r) => r.pass === true).length,
+        },
+      };
+    },
+  },
 
   {
     // Replays a persisted snapshot's rows back into IndexedDB, one idb.put

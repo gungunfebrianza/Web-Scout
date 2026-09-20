@@ -387,6 +387,20 @@
   .macro-health-dot.fail { background: var(--accent-danger); box-shadow: 0 0 3px var(--accent-danger); }
   .net-waterfall-row { display: flex; align-items: center; gap: 6px; font-size: 10px; padding: 1px 0; }
   .net-waterfall-label { min-width: 46px; flex-shrink: 0; color: var(--ink-muted); text-align: right; }
+  .repair-timeline-strip { display: flex; height: 16px; border-radius: 2px; overflow: hidden; background: var(--bg-panel-inset); margin-top: 4px; }
+  .repair-timeline-seg { flex: 1; min-width: 3px; cursor: help; }
+  .repair-timeline-seg.on { background: var(--accent-alien); }
+  .repair-timeline-seg.off { background: var(--bg-panel-raised); }
+  .repair-funnel-stage { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px; }
+  .repair-funnel-label { min-width: 130px; flex-shrink: 0; color: var(--ink-muted); font-size: 11px; }
+  .repair-funnel-track { position: relative; flex: 1; height: 14px; background: var(--bg-panel-inset); border-radius: 2px; }
+  .repair-funnel-fill { position: absolute; top: 0; bottom: 0; left: 0; background: var(--accent-info); border-radius: 2px; }
+  .repair-funnel-value { min-width: 90px; flex-shrink: 0; font-size: 10px; color: var(--ink-muted); text-align: right; }
+  .repair-edge-list { list-style: none; margin: 4px 0 0; padding: 0; font-size: 11px; }
+  .repair-edge-list li { padding: 2px 0; border-bottom: 1px solid var(--border-hud); }
+  .repair-edge-added { color: var(--accent-alien); }
+  .repair-edge-removed { color: var(--accent-danger); }
+  .repair-edge-recorded { color: var(--accent-info); }
   .net-waterfall-track { position: relative; flex: 1; height: 8px; background: var(--bg-panel-inset); border-radius: 1px; }
   .net-waterfall-bar { position: absolute; top: 0; height: 100%; border-radius: 1px; min-width: 2px; }
   .gauge-ring-wrap { position: relative; width: 46px; height: 46px; flex-shrink: 0; }
@@ -706,15 +720,45 @@
     scope: <code id="repairScopeDir">-</code>
     <button type="button" id="repairToggleBtn" disabled style="margin-left:8px;">Toggle</button>
   </p>
+  <div class="sv-h3">Enabled/disabled timeline</div>
+  <div id="repairTimelineStrip" class="repair-timeline-strip"></div>
   <div class="sv-h3">Recent changes</div>
   <ul id="repairHistoryList" style="margin:4px 0 0; padding-left:18px;"></ul>
 </section>
 
 <section class="hud-section" id="repairCostSection">
   <h2>Self-repair loop cost</h2>
-  <div class="muted">estimated tokens per session tagged "self-repair" (witness + patch + verify) - same estimator as "Token burn" above, filtered to this loop's own sessions</div>
+  <div class="muted">estimated tokens per session tagged "self-repair" (witness + patch + verify) - same estimator as "Token burn" above, filtered to this loop's own sessions. Second line per row, when the loop confirmed at least one fix in that session: tokens per confirmed fix.</div>
   <div class="hud-scroll-body" id="repairCostContainer"></div>
   <div id="repairCostEmpty" class="empty" hidden>No self-repair-tagged sessions recorded yet.</div>
+</section>
+
+<section class="hud-section" id="repairFunnelSection">
+  <h2>Self-repair loop funnel</h2>
+  <div class="muted">patches attempted -> applied -> verifies run -> confirmed passing, across every session (GET /repair/activity)</div>
+  <div id="repairFunnelContainer"></div>
+  <div id="repairFunnelEmpty" class="empty" hidden>No patch/verify activity recorded yet.</div>
+</section>
+
+<section class="hud-section" id="repairLedgerSection">
+  <h2>Self-repair patch ledger</h2>
+  <div class="muted">every fs.patch / repair.verify action across all sessions, newest first - file touched, ok/refused (with why), and the recorded fixesActionId/patchActionId edge when one was declared</div>
+  <div class="hud-scroll-body">
+    <table id="repairLedgerTable"><thead><tr><th>#</th><th>Session</th><th>Type</th><th>File</th><th>Result</th><th>Edge</th><th>When</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div id="repairLedgerEmpty" class="empty" hidden>No patch/verify activity recorded yet.</div>
+</section>
+
+<section class="hud-section" id="repairCausalDiffSection">
+  <h2>Self-repair causal diff</h2>
+  <div class="muted">two sessions' causality trees diffed (e.g. the witnessing run vs the post-patch confirm run) - which inferred cause-&gt;effect chains disappeared, which are new, plus each session's own RECORDED fixed_by/confirmed_by edges. See GET /repair/causal-diff.</div>
+  <p style="margin-top:8px;">
+    session A: <input type="number" id="repairDiffSessionA" style="width:80px;" placeholder="id">
+    session B: <input type="number" id="repairDiffSessionB" style="width:80px;" placeholder="id">
+    <button type="button" id="repairDiffRunBtn">Diff</button>
+  </p>
+  <div id="repairCausalDiffContainer"></div>
+  <div id="repairCausalDiffEmpty" class="empty">Pick two session ids and run the diff.</div>
 </section>
 
 <div class="hud-grid-2">
@@ -922,6 +966,10 @@
   <div id="causalityStats" class="viz-stats"></div>
   <div id="causalityList" class="ep-list"></div>
   <div id="causalityEmpty" class="empty" hidden>No causal chains found yet - nothing here has retried, verified, or recovered from anything.</div>
+  <div id="causalityRecordedBlock" hidden>
+    <div class="sv-h3">Self-repair loop: recorded edges (ground truth, not inferred)</div>
+    <ul id="causalityRecordedList" class="repair-edge-list"></ul>
+  </div>
   </section>
 
   <section class="hud-section" id="sequenceSection">
@@ -3340,16 +3388,38 @@ function renderCausality() {
   const c = lastViz?.causality;
   const has = !!c && c.roots.length > 0;
   el('causalityEmpty').hidden = has;
-  if (!has) { el('causalityList').innerHTML = ''; el('causalityStats').innerHTML = ''; return; }
+  if (!has) { el('causalityList').innerHTML = ''; el('causalityStats').innerHTML = ''; }
+  if (has) {
   el('causalityStats').innerHTML = [
     `<span><b>${c.stats.chains}</b> causal chain(s)</span>`, `<span><b>${c.stats.linkedActions}</b> of ${lastViz.swimlane.bars.length} actions linked</span>`, `<span><b>${c.stats.edges}</b> cause &rarr; effect link(s)</span>`,
   ].join('');
   const data = { byId: new Map(c.nodes.map((n) => [n.id, n])), childrenOf: c.childrenOf, edges: c.edges };
   const budget = { n: 0 };
   el('causalityList').innerHTML = c.roots.map((id) => `<div class="cz-chain">${czNodeHtml(data, id, 0, budget)}</div>`).join('');
+  }
+  // Separate from the inferred chain tree above on purpose - see buildRecordedRepairEdges' own
+  // comment (session-viz.mjs). Looked up against lastActions (already fetched for the Actions
+  // table) rather than lastViz's own episode-step nodes, since these edges are keyed by raw
+  // action id, not episode step id.
+  const recorded = lastViz?.recordedRepairEdges ?? [];
+  const recordedBlock = el('causalityRecordedBlock');
+  recordedBlock.hidden = recorded.length === 0;
+  if (recorded.length) {
+    el('causalityRecordedList').innerHTML = recorded.map((e) => {
+      const from = lastActions.find((a) => a.id === e.from);
+      const to = lastActions.find((a) => a.id === e.to);
+      const fromLabel = from ? `#${from.id} ${from.type}` : `#${e.from}`;
+      const toLabel = to ? `#${to.id} ${to.type}` : `#${e.to}`;
+      return `<li class="repair-edge-recorded" data-reveal="${e.to}">${esc(fromLabel)} &rarr; ${esc(toLabel)} <code>${esc(e.kind)}</code></li>`;
+    }).join('');
+  }
 }
 el('causalityList').addEventListener('click', (e) => {
   const n = e.target.closest('.cz-node[data-reveal]');
+  if (n) jumpToAction(Number(n.dataset.reveal));
+});
+el('causalityRecordedList').addEventListener('click', (e) => {
+  const n = e.target.closest('[data-reveal]');
   if (n) jumpToAction(Number(n.dataset.reveal));
 });
 
@@ -3802,10 +3872,25 @@ el('wasteBySessionContainer').addEventListener('click', (e) => {
   if (row) openSessionById(Number(row.dataset.sessionId));
 });
 
+// ---------- Self-repair loop activity (cross-session fs.patch/repair.verify feed) ----------
+// One fetch (GET /repair/activity, bounded to 300 rows server-side) backs three panels below
+// (cost-per-fix, funnel, ledger) - same "one payload, several renders" discipline as lastViz.
+let lastRepairActivity = null;
+async function refreshRepairActivity() {
+  try { lastRepairActivity = await api('GET', '/repair/activity'); } catch { lastRepairActivity = null; }
+  renderRepairCost(lastAnalyticsData ?? {});
+  renderRepairFunnel();
+  renderRepairLedger();
+  panelTouch('repairFunnelSection');
+  panelTouch('repairLedgerSection');
+}
+
 // ---------- Self-repair loop cost (cross-session) ----------
 // Derived entirely from a.sessionTokenTotals (already fetched for the Burn chart above, db.mjs's
 // getSessionTokenTotals) filtered to sessions tagged "self-repair" - no separate fetch, same
-// reasoning as renderWasteBySession reusing GET /analytics rather than its own round trip.
+// reasoning as renderWasteBySession reusing GET /analytics rather than its own round trip. The
+// per-row "confirmed fix" count comes from lastRepairActivity (already fetched for the funnel/
+// ledger panels below), not a second fetch of its own.
 function renderRepairCost(a) {
   const container = el('repairCostContainer');
   const rows = (a.sessionTokenTotals || []).filter((s) => (s.tags || []).includes('self-repair') && s.totalEstTokens > 0);
@@ -3813,18 +3898,115 @@ function renderRepairCost(a) {
   el('repairCostEmpty').hidden = true;
   const total = rows.reduce((sum, r) => sum + r.totalEstTokens, 0);
   const maxVal = Math.max(1, ...rows.map((r) => r.totalEstTokens));
-  const bars = rows.map((r) => `<div class="duration-bar-row" data-session-id="${r.sessionId}" style="cursor:pointer;">
+  const confirmedBySession = new Map();
+  for (const r of lastRepairActivity?.rows ?? []) {
+    if (r.type === 'repair.verify' && r.pass === true) confirmedBySession.set(r.sessionId, (confirmedBySession.get(r.sessionId) ?? 0) + 1);
+  }
+  const bars = rows.map((r) => {
+    const confirmed = confirmedBySession.get(r.sessionId) ?? 0;
+    return `<div class="duration-bar-row" data-session-id="${r.sessionId}" style="cursor:pointer;">
       <div class="duration-bar-label" title="#${r.sessionId} ${esc(r.goal)}">#${r.sessionId} ${esc(clip(r.goal, 26))}</div>
       <div class="duration-bar-track" title="${r.totalEstTokens} estimated tokens">
         <div class="duration-bar-max" style="width:${Math.max(2, (r.totalEstTokens / maxVal) * 100).toFixed(1)}%"></div>
       </div>
-      <div class="duration-bar-value">~${r.totalEstTokens} tok</div>
-    </div>`).join('');
+      <div class="duration-bar-value">~${r.totalEstTokens} tok${confirmed ? ` (~${Math.round(r.totalEstTokens / confirmed)}/fix)` : ''}</div>
+    </div>`;
+  }).join('');
   container.innerHTML = `${bars}<div class="burn-chart-legend">${rows.length} self-repair session(s) - ~${total} estimated tokens total</div>`;
 }
 el('repairCostContainer').addEventListener('click', (e) => {
   const row = e.target.closest('[data-session-id]');
   if (row) openSessionById(Number(row.dataset.sessionId));
+});
+
+// ---------- Self-repair loop funnel (cross-session) ----------
+// Four stages of the same lastRepairActivity.funnel counts (GET /repair/activity) - each stage's
+// bar width is relative to the FIRST stage (patches attempted), so a caller sees drop-off at a
+// glance instead of reading four separate numbers.
+function renderRepairFunnel() {
+  const f = lastRepairActivity?.funnel;
+  const container = el('repairFunnelContainer');
+  const has = !!f && f.patchesAttempted > 0;
+  el('repairFunnelEmpty').hidden = has;
+  if (!has) { container.innerHTML = ''; return; }
+  const stages = [
+    ['patches attempted', f.patchesAttempted],
+    ['patches applied', f.patchesApplied],
+    ['verifies run', f.verifiesRun],
+    ['verifies passed', f.verifiesPassed],
+  ];
+  const maxVal = Math.max(1, f.patchesAttempted);
+  container.innerHTML = stages.map(([label, n]) => `<div class="repair-funnel-stage">
+      <div class="repair-funnel-label">${label}</div>
+      <div class="repair-funnel-track"><div class="repair-funnel-fill" style="width:${Math.max(2, (n / maxVal) * 100).toFixed(1)}%"></div></div>
+      <div class="repair-funnel-value">${n}</div>
+    </div>`).join('');
+}
+
+// ---------- Self-repair patch ledger (cross-session) ----------
+function renderRepairLedger() {
+  const rows = lastRepairActivity?.rows ?? [];
+  const tbody = el('repairLedgerTable').querySelector('tbody');
+  const has = rows.length > 0;
+  el('repairLedgerEmpty').hidden = has;
+  if (!has) { tbody.innerHTML = ''; return; }
+  tbody.innerHTML = rows.map((r) => {
+    const resultText = r.type === 'fs.patch'
+      ? (r.ok ? 'applied' : `refused: ${esc(clip(r.error || '', 60))}`)
+      : (r.pass === true ? 'PASS' : r.pass === false ? 'FAIL' : (r.ok ? '-' : `error: ${esc(clip(r.error || '', 60))}`));
+    const edge = r.fixesActionId != null ? `fixes #${r.fixesActionId}` : r.patchActionId != null ? `confirms #${r.patchActionId}` : '';
+    return `<tr data-session-id="${r.sessionId}" data-action-id="${r.id}" style="cursor:pointer;">
+      <td>#${r.id}</td>
+      <td title="${esc(r.goal || '')}">#${r.sessionId}</td>
+      <td>${r.type}</td>
+      <td title="${esc(r.file || '')}">${esc(clip(r.file || '-', 34))}</td>
+      <td class="${r.ok !== false && r.pass !== false ? '' : 'row-fail'}">${resultText}</td>
+      <td>${edge}</td>
+      <td>${fmtTime(r.startedAt)}</td>
+    </tr>`;
+  }).join('');
+}
+el('repairLedgerTable').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-session-id]');
+  if (tr) openSessionById(Number(tr.dataset.sessionId));
+});
+
+// ---------- Self-repair causal diff (two sessions, on demand) ----------
+// GET /repair/causal-diff?a=&b= (session-viz.mjs's diffCausality) - user-triggered, not polled: a
+// diff only makes sense once both a witnessing session and a post-patch confirm session exist, and
+// picking which two is the caller's call, not something to guess and re-fetch every 3s.
+function repairEdgeLi(e, cls) {
+  return `<li class="${cls}">#${e.from} &rarr; #${e.to} <code>${esc(e.kind)}</code></li>`;
+}
+el('repairDiffRunBtn').addEventListener('click', async () => {
+  const a = Number(el('repairDiffSessionA').value);
+  const b = Number(el('repairDiffSessionB').value);
+  const container = el('repairCausalDiffContainer');
+  const empty = el('repairCausalDiffEmpty');
+  if (!a || !b) { empty.hidden = false; empty.textContent = 'Pick two session ids and run the diff.'; container.innerHTML = ''; return; }
+  try {
+    const d = await api('GET', `/repair/causal-diff?a=${a}&b=${b}`);
+    empty.hidden = true;
+    const parts = [];
+    parts.push(`<div class="sv-h3">Inferred causal chains (${d.inferred.a.edges} -&gt; ${d.inferred.b.edges} edge(s))</div>`);
+    parts.push(`<ul class="repair-edge-list">${
+      d.inferred.added.map((e) => repairEdgeLi(e, 'repair-edge-added')).join('')
+      + d.inferred.removed.map((e) => repairEdgeLi(e, 'repair-edge-removed')).join('')
+    }</ul>`);
+    parts.push(`<div class="burn-chart-legend">${d.inferred.kept} kept, ${d.inferred.added.length} added (green), ${d.inferred.removed.length} removed (red) between session #${a} and #${b}</div>`);
+    if (d.recorded.a.length || d.recorded.b.length) {
+      parts.push('<div class="sv-h3">Recorded edges (self-repair loop\'s own fixed_by/confirmed_by)</div>');
+      parts.push(`<ul class="repair-edge-list">${
+        d.recorded.a.map((e) => `<li class="repair-edge-recorded">#${a}: ${repairEdgeLi(e, '')}</li>`).join('')
+        + d.recorded.b.map((e) => `<li class="repair-edge-recorded">#${b}: ${repairEdgeLi(e, '')}</li>`).join('')
+      }</ul>`);
+    }
+    container.innerHTML = parts.join('');
+  } catch (err) {
+    empty.hidden = false;
+    empty.textContent = `failed: ${err.message}`;
+    container.innerHTML = '';
+  }
 });
 
 // ---------- Self-repair loop kill-switch ----------
@@ -3838,7 +4020,8 @@ function renderRepairStatus() {
   const badge = el('repairStatusBadge');
   const toggleBtn = el('repairToggleBtn');
   const historyEl = el('repairHistoryList');
-  if (!c) { badge.textContent = 'unknown'; badge.className = 'chip'; toggleBtn.disabled = true; historyEl.innerHTML = ''; return; }
+  const strip = el('repairTimelineStrip');
+  if (!c) { badge.textContent = 'unknown'; badge.className = 'chip'; toggleBtn.disabled = true; historyEl.innerHTML = ''; strip.innerHTML = ''; return; }
   badge.textContent = c.enabled ? 'ENABLED' : 'disabled';
   badge.className = c.enabled ? 'chip badge-active' : 'chip';
   toggleBtn.disabled = false;
@@ -3847,6 +4030,16 @@ function renderRepairStatus() {
   historyEl.innerHTML = (c.history || []).slice(0, 8)
     .map((h) => `<li>${h.enabled ? 'enabled' : 'disabled'} by ${esc(h.by)} - ${fmtTime(h.at)}</li>`)
     .join('') || '<li class="muted">no changes yet</li>';
+  // Oldest-first (history itself is newest-first) so the strip reads left-to-right in time, one
+  // segment per toggle plus a trailing segment for "now" holding the current state.
+  const chrono = (c.history || []).slice().reverse();
+  const segs = chrono.map((h, i) => {
+    const next = chrono[i + 1];
+    const label = `${h.enabled ? 'enabled' : 'disabled'} by ${h.by || 'unknown'} at ${fmtTime(h.at)}${next ? ` until ${fmtTime(next.at)}` : ' (current)'}`;
+    return `<div class="repair-timeline-seg ${h.enabled ? 'on' : 'off'}" title="${esc(label)}"></div>`;
+  });
+  if (!chrono.length) segs.push(`<div class="repair-timeline-seg ${c.enabled ? 'on' : 'off'}" title="${c.enabled ? 'enabled' : 'disabled'} (no toggle history yet)"></div>`);
+  strip.innerHTML = segs.join('');
 }
 async function refreshRepairStatus() {
   try { lastRepairConfig = await api('GET', '/repair/config'); } catch { lastRepairConfig = null; }
@@ -3944,6 +4137,7 @@ async function refreshAll() {
     await refreshMacros();
     await refreshFriction();
     await refreshRepairStatus();
+    await refreshRepairActivity();
     syncBannerStack();
   } catch (err) {
     document.body.classList.add('relay-down');
@@ -3969,7 +4163,7 @@ async function refreshAll() {
 // arrives), just uncoalesced rebuild churn. Collapsing a burst into one
 // trailing refresh per 250ms fixes it.
 const debouncedPendingRerender = debounce(() => { if (!actionsPaused) renderActions(lastActions); }, 100);
-const debouncedActionRefresh = debounce(async () => { await refreshActions(); await refreshTokenReport(); renderTimeline(); debouncedSavingsRefresh(); debouncedVizRefresh(); }, 250);
+const debouncedActionRefresh = debounce(async () => { await refreshActions(); await refreshTokenReport(); renderTimeline(); debouncedSavingsRefresh(); debouncedVizRefresh(); await refreshRepairActivity(); }, 250);
 const debouncedConsoleRefresh = debounce(async () => { await refreshConsole(); renderTimeline(); }, 250);
 const debouncedNetRefresh = debounce(async () => { await refreshNet(); renderTimeline(); }, 250);
 const KIND_REFRESH = {
@@ -4351,6 +4545,9 @@ const PANELS = {
   savingsSection: { group: 'global', wide: true, label: 'Savings', autoEmpty: true, count: () => { const s = lastSavingsReport?.savings; return s?.ledgers ? { n: s.ledgers.filter((l) => l.countedInTotal).length, text: `~${fmtK(s.byKind?.storage?.estTokensSaved ?? 0)} tok-eq.`, title: 'savings mechanisms counted in the totals (disk bytes avoided, not tokens a caller avoided)' } : null; }, refresh: () => refreshSavings(true), exportRows: () => (lastSavingsReport?.savings?.ledgers ?? []).map((l) => ({ mechanism: l.label, kind: l.kind, counted: l.countedInTotal, bytesSaved: l.bytesSaved, estTokensEquivalent: l.estTokensSaved, reductionPct: l.reductionPct, refsTotal: l.refs?.total ?? null, refsStored: l.refs?.unique ?? null })) },
   repairSection: { group: 'global', label: 'Self-repair', count: () => (lastRepairConfig ? { n: lastRepairConfig.enabled ? 1 : 0, title: lastRepairConfig.enabled ? 'self-repair loop is ENABLED' : 'self-repair loop is disabled' } : null), refresh: () => refreshRepairStatus(), exportRows: () => lastRepairConfig?.history ?? null },
   repairCostSection: { group: 'global', wide: true, label: 'Self-repair cost', autoEmpty: true, count: () => { const t = lastAnalyticsData?.sessionTokenTotals; if (!t) return null; const rows = t.filter((s) => (s.tags || []).includes('self-repair')); const tok = rows.reduce((sum, r) => sum + r.totalEstTokens, 0); return { n: rows.length, text: rows.length ? `~${fmtK(tok)} tok` : undefined, title: 'sessions tagged self-repair, cumulative estimated tokens' }; }, refresh: () => refreshFriction(), exportRows: () => (lastAnalyticsData?.sessionTokenTotals ?? []).filter((s) => (s.tags || []).includes('self-repair')) },
+  repairFunnelSection: { group: 'global', label: 'Self-repair funnel', autoEmpty: true, count: () => { const f = lastRepairActivity?.funnel; return f ? { n: f.patchesAttempted, text: `${f.verifiesPassed}/${f.verifiesRun} confirmed`, title: 'patches attempted, across every session' } : null; }, refresh: () => refreshRepairActivity(), exportRows: () => (lastRepairActivity?.funnel ? Object.entries(lastRepairActivity.funnel).map(([stage, count]) => ({ stage, count })) : null) },
+  repairLedgerSection: { group: 'global', wide: true, label: 'Self-repair ledger', autoEmpty: true, failLabel: 'refused/failed', count: () => { const r = lastRepairActivity?.rows; return r ? { n: r.length, fail: r.filter((x) => x.ok === false || x.pass === false).length, title: 'fs.patch / repair.verify actions across every session' } : null; }, refresh: () => refreshRepairActivity(), exportRows: () => lastRepairActivity?.rows ?? null },
+  repairCausalDiffSection: { group: 'global', label: 'Self-repair causal diff', count: () => null, refresh: () => {}, exportRows: () => null },
   durationSection: { group: 'global', label: 'Duration', autoEmpty: true, count: () => (lastAnalyticsData ? { n: lastAnalyticsData.durationByType?.length ?? 0, title: 'action types with timing data' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.durationByType ?? []) },
   wasteBySessionSection: { group: 'global', label: 'Wasteful sessions', autoEmpty: true, failLabel: 'over 30%', count: () => { const w = lastAnalyticsData?.wasteBySession; return w ? { n: w.length, fail: w.filter((r) => r.wastePct > 0.3).length, title: 'sessions ranked by wasted-call share (5+ calls)' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.wasteBySession ?? []) },
   punchcardSection: { group: 'global', label: 'Punchcard', autoEmpty: true, count: () => (lastAnalyticsData ? { n: (lastAnalyticsData.activityPunchcard ?? []).flat().reduce((s, v) => s + v, 0), title: 'sessions started' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => (a.activityPunchcard ?? []).flatMap((hours, day) => hours.map((count, hour) => ({ day: PUNCHCARD_DAY_LABELS[day], hour, count })).filter((r) => r.count))) },

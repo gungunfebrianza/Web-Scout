@@ -819,6 +819,11 @@ export function buildSessionViz({ session = null, actions = [], snapshots = [], 
     costTree: buildCostBreakdown(actions),
     failureHeatmap: buildFailureHeatmap(actions),
     causality: buildCausality(episodes),
+    // Separate from `causality` above on purpose (see buildRecordedRepairEdges' own comment) - keyed
+    // by raw action id, not episode step id, and genuinely recorded rather than pattern-inferred.
+    // Free to compute here: `actions` is already loaded for everything else in this payload, so a
+    // session with no self-repair-loop activity just gets an empty array, no extra fetch either way.
+    recordedRepairEdges: buildRecordedRepairEdges(actions),
     routeMachine: buildRouteMachine(clicks),
   };
 }
