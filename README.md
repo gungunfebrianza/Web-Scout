@@ -186,7 +186,7 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   `session end` also reports `emergentFriction` - a type/selector failing for the first time ever. A
   saved/exported session report (`GET /sessions/:id/report`) carries the same known-issues matches for that
   session's own failed actions, and the MCP server's tool-failure replies carry the same
-  `knownIssue`/post-timeout-verification info the CLI prints. History is read on demand (indexed by
+  `knownIssue`/post-timeout-verification info the CLI prints; the dashboard's "End session" button shows the same `emergentFriction`/savings receipt, and `macro run` / `crv run` steps carry the same risk warning and known-issue match as `/command`. History is read on demand (indexed by
   target), never frozen at session start, and the per-command check never touches the shared 5s analytics cache
 - `crv seed <store> <rows-json>` writes rows (`idb put-many`) and records every
   stored row's real key into a manifest file, so `crv cleanup` can delete exactly

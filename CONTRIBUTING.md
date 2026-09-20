@@ -235,9 +235,22 @@ a registry edited after the session ended. All four are best-effort against the 
 missing registry degrades to "no cross-refs", never breaks the command, analytics, or report it's
 checked against. A malformed one (bad JSON, wrong shape) is different from "no matches": it is
 surfaced explicitly, as `extra.knownIssuesCheckError` on a `/command` failure or as
-`knownIssuesCheckError` in a session report, the same distinction `crv preflight`'s own
-`knownIssuesCheckError` has always made - a broken registry file should never look identical to "no
+`knownIssuesCheckError` in a session report, `GET /analytics`, or `crv preflight` - `computeAnalytics`
+itself used to be the one reader of this file that still degraded to "no cross-refs" silently; now
+all four readers make the same distinction, so a broken registry file never looks identical to "no
 known bug here".
+
+Two dispatch surfaces used to sit entirely outside this system, both now covered: `macro run`
+replays each step through the same risky-selector check and known-issue match `/command` gets - a
+step about to repeat a selector that's failed 3+ times gets a `riskWarning` on that step's own
+result (macro replay has no single response to hang a header off of, so it rides the step object
+instead, and survives the default compact-reply shaping even when the rest of that step's detail is
+dropped), and a step that fails gets `knownIssue` the same way `/command` does. This matters more for
+macros than for `/command` itself - a macro exists specifically for a REPEATED command shape, which
+is exactly where a selector already known to be flaky is most likely to recur. `crv run` (baseline
+snapshot + action + verify in one call) gets the same pre-dispatch `x-webscout-selector-risk` header
+and post-dispatch `x-webscout-macro-match` nudge `/command` gets, not only the on-failure `knownIssue`
+it already had.
 
 ## When the caller's own environment blocks a CRV command
 

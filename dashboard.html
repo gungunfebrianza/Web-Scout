@@ -478,18 +478,19 @@
   .diff-added { color: var(--accent-alien); }
   .diff-removed { color: var(--accent-danger); }
   .diff-changed { color: var(--accent-predator); }
-  #frictionBanner, #dbVersionBanner, #wasteBanner { background: var(--warn-bg); border: 1px solid var(--accent-predator); border-left: 4px solid var(--accent-predator); border-radius: 2px; padding: 10px 12px; margin-bottom: 12px; position: relative; }
+  #frictionBanner, #dbVersionBanner, #wasteBanner, #sessionEndBanner { background: var(--warn-bg); border: 1px solid var(--accent-predator); border-left: 4px solid var(--accent-predator); border-radius: 2px; padding: 10px 12px; margin-bottom: 12px; position: relative; }
   #dbVersionBanner { border-left-color: var(--accent-danger); }
-  #frictionBanner { border-left-color: var(--accent-info); }
-  #frictionBanner h3, #dbVersionBanner h3, #wasteBanner h3 { margin: 0 0 6px; font-family: var(--font-display); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--accent-predator); }
+  #frictionBanner, #sessionEndBanner { border-left-color: var(--accent-info); }
+  #frictionBanner h3, #dbVersionBanner h3, #wasteBanner h3, #sessionEndBanner h3 { margin: 0 0 6px; font-family: var(--font-display); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--accent-predator); }
   #dbVersionBanner h3 { color: var(--accent-danger); }
   #dbVersionBanner h3::before { content: '\25B2  '; }
-  #frictionBanner h3 { color: var(--accent-info); }
+  #frictionBanner h3, #sessionEndBanner h3 { color: var(--accent-info); }
   #frictionBanner h3::before { content: '\25CF  '; }
   #wasteBanner h3::before { content: '\25C6  '; }
-  #frictionBanner ul { margin: 0; padding-left: 18px; }
-  #frictionBanner li { margin: 2px 0; }
-  #frictionToggle, #dbVersionToggle, #wasteToggle { float: right; background: none; border: none; color: var(--ink-muted); cursor: pointer; padding: 0 4px; }
+  #sessionEndBanner h3::before { content: '\25A0  '; }
+  #frictionBanner ul, #sessionEndBanner ul { margin: 0; padding-left: 18px; }
+  #frictionBanner li, #sessionEndBanner li { margin: 2px 0; }
+  #frictionToggle, #dbVersionToggle, #wasteToggle, #sessionEndToggle { float: right; background: none; border: none; color: var(--ink-muted); cursor: pointer; padding: 0 4px; }
   .banner-stack-badge { position: absolute; top: 10px; right: 34px; font-size: 10px; color: var(--ink-muted); }
   .token-trend-bar { display: inline-block; width: 16px; margin-right: 2px; text-align: center; vertical-align: bottom; }
   .token-trend-bar-track { height: 30px; display: flex; align-items: flex-end; }
@@ -589,7 +590,7 @@
   @media print {
     :root { color-scheme: light; --bg-void: #fff; --bg-panel: #fff; --bg-panel-raised: #f3f5f4; --bg-panel-inset: #f3f5f4; --border-hud: #c9d2cc; --accent-predator: #a85d00; --accent-alien: #1d7a1d; --accent-danger: #c4121f; --accent-info: #0a5a73; --ink-primary: #111; --ink-muted: #555; --ok-bg: #dff5df; --fail-bg: #fbe0e2; --warn-bg: #fdeccf; --active-bg: #d9eef5; }
     body { padding: 0; font-size: 11px; }
-    body::before, #hudSweepBar, #wsToast, #hudBackdrop, .hud-nav, .hud-tools, .hud-new, .hud-fresh, .hud-toggle, dialog, .radar-sweep, #hudRadar, .hud-radar-legend, .actions-toolbar, .kbd-hint, #dbVersionToggle, #wasteToggle, #frictionToggle, #dbVersionReloadBtn, #askForm, #hudSparkline, .verity-dropzone { display: none !important; }
+    body::before, #hudSweepBar, #wsToast, #hudBackdrop, .hud-nav, .hud-tools, .hud-new, .hud-fresh, .hud-toggle, dialog, .radar-sweep, #hudRadar, .hud-radar-legend, .actions-toolbar, .kbd-hint, #dbVersionToggle, #wasteToggle, #frictionToggle, #sessionEndToggle, #dbVersionReloadBtn, #askForm, #hudSparkline, .verity-dropzone { display: none !important; }
     pre, .hud-section, .hud-scroll-body { background: #fff !important; color: #111 !important; }
     .hud-section.collapsed > .hud-section-body { display: block !important; }
     .hud-section.auto-collapsed > .hud-section-body { display: none !important; }
@@ -958,6 +959,12 @@
   <button id="frictionToggle">hide</button>
   <h3>Known friction (across every session)</h3>
   <ul id="frictionList"></ul>
+</div>
+
+<div id="sessionEndBanner" hidden>
+  <button id="sessionEndToggle">hide</button>
+  <h3>Session ended</h3>
+  <ul id="sessionEndList"></ul>
 </div>
 
 <div id="searchResults" hidden></div>
@@ -4536,7 +4543,7 @@ async function refreshFriction(opts = {}) {
 // below the fold isn't silently missed - only shown at all once there's
 // more than one to disambiguate.
 function syncBannerStack() {
-  const all = ['dbVersionBanner', 'wasteBanner', 'frictionBanner'].map((id) => el(id));
+  const all = ['dbVersionBanner', 'wasteBanner', 'frictionBanner', 'sessionEndBanner'].map((id) => el(id));
   const visible = all.filter((b) => !b.hidden);
   for (const b of all) {
     let badge = b.querySelector('.banner-stack-badge');
@@ -4841,8 +4848,23 @@ el('dbVersionReloadBtn').addEventListener('click', async () => {
 
 el('endSessionBtn').addEventListener('click', async () => {
   if (!currentSessionId) return;
-  await api('POST', `/sessions/${currentSessionId}/end`);
+  const ended = await api('POST', `/sessions/${currentSessionId}/end`);
+  // The CLI/MCP front ends already print emergentFriction and the savings receipt at
+  // session end (cli.mjs's handleSession('end', ...)) - the dashboard's own "End session"
+  // button threw the identical response away, so a human clicking it here never saw either.
+  const lines = (ended.emergentFriction ?? []).map((l) => esc(l));
+  const receipt = ended.savingsReceipt;
+  if (receipt && (receipt.scopedCalls || receipt.cacheHits || receipt.shapedCalls)) {
+    const tok = (bytes) => Math.round(bytes / 4);
+    lines.push(esc(`session #${ended.id} savings: ${receipt.scopedCalls} scoped read(s) left out ~${tok(receipt.avoidedBytes)} tokens vs unscoped; ${receipt.cacheHits} cache hit(s) skipped a page round trip (~${tok(receipt.cacheBytes)} tokens still delivered)${receipt.shapedCalls ? `; ${receipt.shapedCalls} shaped reply/ies kept ~${tok(receipt.shapedBytes)} tokens off screen` : ''}.`));
+  }
+  el('sessionEndList').innerHTML = lines.map((l) => `<li>${l}</li>`).join('');
+  el('sessionEndBanner').hidden = lines.length === 0;
   await refreshAll();
+});
+
+el('sessionEndToggle').addEventListener('click', () => {
+  el('sessionEndBanner').hidden = true;
 });
 
 const verityDropzone = el('verityDropzone');

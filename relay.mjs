@@ -1445,10 +1445,18 @@ function computeAnalytics() {
   // months ago. Loaded once per call and reused below. Best-effort: any load/parse problem
   // must not break the rest of analytics (same discipline as matchKnownIssues above).
   let knownIssues = [];
+  let knownIssuesCheckError = null;
   try {
     const loaded = loadKnownIssues();
     if (loaded?.issues.length) knownIssues = loaded.issues;
-  } catch { /* malformed known-issues.json - analytics still works, just without cross-refs */ }
+  } catch (err) {
+    // Same distinction the other two known-issues.json readers already make (matchKnownIssues'
+    // report.knownIssuesCheckError, matchKnownIssueForError's checkError) - this was the one
+    // remaining call site still silently degrading to "no cross-refs" on a malformed registry,
+    // which reads identically to "checked, genuinely nothing matched" everywhere this feeds:
+    // GET /analytics, crv preflight's knownFriction, the dashboard's friction panel.
+    knownIssuesCheckError = err.message;
+  }
   const matchKnownIssuesFor = (errorText) => {
     if (!errorText || !knownIssues.length) return [];
     return knownIssues.filter((issue) => issue.matches(errorText)).map(({ id, description, remediation }) => ({ id, description, remediation }));
@@ -1768,6 +1776,7 @@ function computeAnalytics() {
   return {
     totals: { sessions: sessions.length, actions: actions.length, macros: macros.length, verityRuns: verityRuns.length },
     malformedActionsSkipped,
+    ...(knownIssuesCheckError ? { knownIssuesCheckError } : {}),
     failureRateByType,
     selectorFriction,
     frictionClusters,
@@ -2871,11 +2880,12 @@ const routes = [
           if (MUTATING_TYPES.has(step.type)) bumpMutationCounter(session.id);
           noteScopedRead(session.id, result, { agentName, type: step.type, params: step.params });
           if (cacheKey) storeReadCache(session.id, cacheKey, result);
-          results.push({ type: step.type, ok: true, result, durationMs: Date.now() - stepStartedAt });
+          results.push({ type: step.type, ok: true, result, durationMs: Date.now() - stepStartedAt, ...(riskWarning ? { riskWarning } : {}) });
         } catch (err) {
           let stepContext = null;
           try { stepContext = frictionFactsFor(session.id, step.type, step.params ?? {}, agentName)?.context ?? null; } catch { /* best-effort */ }
-          results.push({ type: step.type, ok: false, error: err.message, durationMs: Date.now() - stepStartedAt, ...(stepContext ? { selectorFriction: stepContext } : {}) });
+          const { match: knownIssue } = matchKnownIssueForError(err.message);
+          results.push({ type: step.type, ok: false, error: err.message, durationMs: Date.now() - stepStartedAt, ...(stepContext ? { selectorFriction: stepContext } : {}), ...(knownIssue ? { knownIssue } : {}) });
           if (!continueOnError) break;
         }
       }
@@ -2894,7 +2904,11 @@ const routes = [
       const includeFull = !!body.full;
       const compactResults = results.map((r) => (includeFull || !r.ok
         ? r
-        : { type: r.type, ok: r.ok, skipped: r.skipped, reason: r.reason, durationMs: r.durationMs }));
+        // riskWarning is a short string, not a result body - the whole point of compacting is
+        // to not echo back a potentially-large result the caller already has; a warning that a
+        // step is about to repeat a known-bad selector is exactly the kind of thing compacting
+        // must not silently drop.
+        : { type: r.type, ok: r.ok, skipped: r.skipped, reason: r.reason, durationMs: r.durationMs, ...(r.riskWarning ? { riskWarning: r.riskWarning } : {}) }));
       return {
         macro: { id: macro.id, name: macro.name },
         fromStep,
@@ -3221,7 +3235,11 @@ const routes = [
       // cached (getAnalytics(), 5s TTL - cheap to add here). Lets an agent front-load the
       // riskiest known-bad selectors/types/macros into the pass it's about to run instead
       // of discovering them one at a time as each one fails live.
-      try { report.knownFriction = getAnalytics().topFrictionItems; } catch { /* best-effort - never blocks preflight */ }
+      try {
+        const analytics = getAnalytics();
+        report.knownFriction = analytics.topFrictionItems;
+        if (analytics.knownIssuesCheckError && !report.knownIssuesCheckError) report.knownIssuesCheckError = analytics.knownIssuesCheckError;
+      } catch { /* best-effort - never blocks preflight */ }
       // The caller's own plan, checked step by step against the facts the pre-action warn will use.
       // Advisory: a risky step is something to reorder or guard, not a reason to call the page unfit.
       if (plan) report.planRisk = planFrictionReport(plan, agentName);
@@ -3290,9 +3308,16 @@ const routes = [
       const baseline = dbApi.getSnapshot(savedBaseline.id);
       broadcastUpdate('snapshot', session.id);
       const dispatchTimeoutMs = LONG_POLL_TYPES.has(type) ? (Number(params?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS;
+      // Same pre-dispatch risky-selector warning /command already gets (maybeRiskySelectorWarn)
+      // - "crv run" takes an identical {type,params} action and is arguably higher-stakes to
+      // warn on: it burns a whole snapshot+diff round trip on an action already known to fail
+      // repeatedly. dispatchTracked below already covers the ON-FAILURE knownIssue match; this
+      // was the missing BEFORE-failure half.
+      maybeRiskySelectorWarn(session.id, type, params, res);
       const { result: actionResult, actionId } = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
       broadcastUpdate('action', session.id);
       if (MUTATING_TYPES.has(type)) bumpMutationCounter(session.id);
+      maybeMacroMatchNudge(session.id, res);
       const report = await verifyAgainstBaseline(session, agentName, { baseline, stores, expect: body.expect, allowExtra: body.allowExtra, samples: body.samples, verbose: body.verbose });
       return { action: { type, ok: true, actionId, result: actionResult }, ...report };
     },
