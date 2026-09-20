@@ -769,6 +769,15 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    result into that session's own evidence trail (shows
                                    up in the dashboard timeline + session report) -
                                    Verity itself persists nothing on its own.
+  verity history [--label <substr>] [--limit <n>] [--session <id>]
+                                   queries the DURABLE, already-persisted verity_runs table -
+                                   defaults to the active session. Same gap "net history"/
+                                   "console history" already closed, mirrored here: previously
+                                   the only way to read an imported run back was the whole
+                                   session report. Metadata + pass/fail counts only, not each
+                                   run's full per-step result - use "verity show" for that.
+  verity show <id>                one imported Verity run's full result (every step, pass/fail),
+                                   by the id "verity history"/"verity import" returned.
 
   search "<query>"                cross-session search over every session's own action log
                                    (type/params/result/error) - which session/action touched X

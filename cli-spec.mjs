@@ -86,6 +86,11 @@ export const CLI_SPEC = [
     mcpExempt: 'reads the calling agent\'s own transcript file off disk after the fact - an agent already knows why it acted, and an MCP tool that took a transcript path would only be a way to make it read one',
   },
   { cmd: 'verity import', pos: [2, 2], val: ['--label'], mcp: 'webscout_session.verity_import', params: { '--label': 'label' } },
+  {
+    cmd: 'verity history', pos: [0, 0], val: ['--label', '--limit', '--session'], mcp: 'webscout_session.verity_history',
+    params: { '--label': 'label', '--limit': 'limit', '--session': 'sessionId' },
+  },
+  { cmd: 'verity show', pos: [1, 1], mcp: 'webscout_session.verity_show' },
 
   {
     cmd: 'dom query', pos: [0, 1], bool: ['--full', '--meta', ...SHAPE_BOOL], val: ['--pick', '--selector-file', '--agent'], mcp: 'webscout_dom.query',

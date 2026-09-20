@@ -34,7 +34,7 @@
 import fs from 'node:fs';
 import readline from 'node:readline';
 import {
-  request, BASE, netHistory, consoleHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, collectNotes, ensureFreshRelayForNewSession,
+  request, BASE, netHistory, consoleHistory, verityHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, collectNotes, ensureFreshRelayForNewSession,
   manifestPath, readManifest, writeManifest,
 } from './client.mjs';
 import { describeFailureContext } from './friction.mjs';
@@ -144,7 +144,9 @@ const TOOLS = [
       + '  cleanup {id, confirm?, sinceSnapshotId?, summary?, agent?} - list (confirm:true deletes) rows this session\'s writes left live; dry-run by default; summary: per-store counts, not row bodies\n'
       + '  assert {id, checks, agent?} - declarative checks against LIVE state (one check object or an array)\n'
       + '  ask {question, sessionId?} - ask the configured AI backend about a session\'s evidence (optional, see README "Ask AI")\n'
-      + '  verity_import {sessionId, label?, path?, result?} - fold a Verity UI Relay scenario-result into the evidence trail (path: local file; result: inline JSON; one required)',
+      + '  verity_import {sessionId, label?, path?, result?} - fold a Verity UI Relay scenario-result into the evidence trail (path: local file; result: inline JSON; one required)\n'
+      + '  verity_history {sessionId?, label?, limit?} - the DURABLE, already-persisted verity_runs table (defaults to the active session) - metadata + pass/fail counts, not each run\'s full result (verity_show for that)\n'
+      + '  verity_show {id} - one imported Verity run\'s full result (every step, pass/fail), by id',
     actions: {
       start: async (p) => {
         await ensureFreshRelayForNewSession();
@@ -222,6 +224,8 @@ const TOOLS = [
         if (!result) throw new Error('params.result (inline JSON) or params.path (local file) is required');
         return request('POST', '/verity/import', { sessionId: Number(sessionId), label: p.label ?? p.path, result });
       },
+      verity_history: (p) => verityHistory({ sessionId: p?.sessionId, label: p?.label, limit: p?.limit }),
+      verity_show: (p) => request('GET', `/verity-runs/${requireField(p, 'id')}`),
     },
   },
   {
