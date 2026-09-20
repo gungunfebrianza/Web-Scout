@@ -705,6 +705,11 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    and never once succeeded, a WARNING prints before the replay -
                                    the signal already existed, it just was never checked at the
                                    one point it could save an attempt.
+  macro update <id> '<steps-json>'
+                                   replace a macro's whole step array (fix/reorder/remove a step
+                                   without deleting and re-recording from scratch). Same endpoint
+                                   the dashboard's macro step inspector already uses. Every step
+                                   needs at least a string "type".
   macro delete <id>               delete a saved macro
   macro export-verity <id> [--out <path>]
                                    best-effort skeleton Verity scenario JSON from a

@@ -181,6 +181,7 @@ export const CLI_SPEC = [
     cmd: 'macro run', pos: [1, 1], bool: ['--continue-on-error', '--confirm', '--full'], val: ['--from-step'], mcp: 'webscout_macro.run',
     params: { '--continue-on-error': 'continueOnError', '--confirm': 'confirm', '--full': 'full', '--from-step': 'fromStep' },
   },
+  { cmd: 'macro update', pos: [2, 2], mcp: 'webscout_macro.update' },
   { cmd: 'macro delete', pos: [1, 1], mcp: 'webscout_macro.delete' },
   { cmd: 'macro export-verity', pos: [1, 1], val: ['--out'], mcp: 'webscout_macro.export_verity', params: { '--out': 'outPath' } },
   { cmd: 'suite run', pos: [1, 1], bool: ['--continue-on-error'], mcp: 'webscout_suite.run', params: { '--continue-on-error': 'continueOnError' } },

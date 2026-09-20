@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startTestRelay } from './test-relay.mjs';
+import { startTestRelay, connectFakeAgent } from './test-relay.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(__dirname, 'cli.mjs');
@@ -181,4 +181,50 @@ test('session start takes --no-briefing and the reply carries no briefing then',
   assert.equal(parsed.briefing.available, false, 'no tab is connected to this relay');
   assert.match(parsed.briefing.reason, /no tab connected/);
   run('session', 'end', String(parsed.id));
+});
+
+// "macro update" (PUT /macros/:id/steps) already backed the dashboard's step inspector - the CLI
+// had no way to fix a stale macro step short of delete + re-record from scratch.
+test('"macro update" replaces a macro\'s whole step array, round trip through the real endpoint', async () => {
+  const started = run('session', 'start', 'cli.test.mjs macro update', 'automated');
+  const session = JSON.parse(started.stdout);
+  const tab = await connectFakeAgent(relay.port, {});
+  try {
+    // dispatched over plain fetch, not the spawnSync CLI: the fake agent tab lives in THIS
+    // process, and a synchronous spawnSync call would freeze this process's event loop, so the
+    // relay's WS round trip to the tab could never get a reply (a real deadlock, reproduced while
+    // writing this test). "macro record"/"update"/"show" below never talk to the tab, so the
+    // spawnSync CLI is safe for those.
+    const dispatch = (selector) => fetch(`http://127.0.0.1:${relay.port}/command`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'dom.click', params: { selector } }),
+    }).then((r) => r.json());
+    assert.equal((await dispatch('#a')).ok, true);
+    assert.equal((await dispatch('#b')).ok, true);
+    const recorded = run('macro', 'record', 'cli-update-test', String(session.id));
+    assert.equal(recorded.status, 0, recorded.stderr);
+    const macro = JSON.parse(recorded.stdout);
+    assert.equal(macro.steps.length, 2);
+
+    const updated = run('macro', 'update', String(macro.id), JSON.stringify([{ type: 'dom.click', params: { selector: '#c' } }]));
+    assert.equal(updated.status, 0, updated.stderr);
+    const parsed = JSON.parse(updated.stdout);
+    assert.equal(parsed.steps.length, 1);
+    assert.equal(parsed.steps[0].params.selector, '#c');
+
+    const shown = run('macro', 'show', String(macro.id));
+    assert.deepEqual(JSON.parse(shown.stdout).steps, parsed.steps);
+  } finally {
+    await tab.close();
+    run('session', 'end', String(session.id));
+  }
+});
+
+test('"macro update" rejects malformed JSON and a non-array before touching the relay', () => {
+  const badJson = run('macro', 'update', '1', 'not-json');
+  assert.equal(badJson.status, 1);
+  assert.match(badJson.stderr, /not valid JSON/);
+
+  const notArray = run('macro', 'update', '1', '{"type":"dom.click"}');
+  assert.equal(notArray.status, 1);
+  assert.match(notArray.stderr, /must be a JSON array/);
 });

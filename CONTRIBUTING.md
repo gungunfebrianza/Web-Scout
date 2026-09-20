@@ -252,6 +252,15 @@ snapshot + action + verify in one call) gets the same pre-dispatch `x-webscout-s
 and post-dispatch `x-webscout-macro-match` nudge `/command` gets, not only the on-failure `knownIssue`
 it already had.
 
+`macro update <id> '<steps-json>'` (and MCP `webscout_macro.update`) closes a gap on the write side:
+`PUT /macros/:id/steps` already backed the dashboard's step inspector (reorder/remove a step before
+replaying), but the CLI - the common front end - had no way to fix a stale macro step short of
+`macro delete` + re-record from scratch. Same endpoint, now reachable everywhere. The dashboard's
+`macrosTable` also now shows each macro's own stamped `steps_cost_est`/compaction counts (previously
+only printed by `macro run`/`suite run` right before replaying, and only there), and a new
+"Verity labels still failing" panel surfaces `analytics.verityLabelsStillFailing` on its own instead
+of only when it happens to rank in the top-5 `topFrictionItems` digest.
+
 ## When the caller's own environment blocks a CRV command
 
 A caller (an AI coding agent, a CI runner, a sandboxed shell) may have its OWN permission or

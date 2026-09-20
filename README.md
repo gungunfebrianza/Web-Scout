@@ -487,6 +487,9 @@ macro run <id>                # prints an estimated-cost NOTE (from the macro's 
                                # before replaying, no live lookup needed
 macro list                    # id, name, step count, source session, stamped cost
 macro show <id>               # every step
+macro update <id> '<steps-json>'   # replace the whole step array - fix/reorder/remove a step
+                               # without delete + re-record; same endpoint the dashboard step
+                               # inspector uses
 macro delete <id>
 macro export-verity <id> --out ./scenario.json   # skeleton Verity scenario from the click/wait steps
 suite run ./checks/my-suite.json
