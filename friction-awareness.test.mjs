@@ -143,6 +143,66 @@ test('session end reports no emergentFriction for a clean session', async () => 
   }, { handlers: { 'dom.click': () => ({ clicked: true, mutated: false }) } });
 });
 
+test('a session report carries the same known-issues.json match a live failure already showed, not just a bare error string', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-report-'));
+  const registryPath = path.join(dir, 'known-issues.json');
+  fs.writeFileSync(registryPath, JSON.stringify([{ id: 'report-flaky-el', signature: 'detached from DOM', description: 'stale DOM reference', remediation: 'use dom.click-wait instead' }]));
+  await withRelay(async ({ apiRaw, api }) => {
+    const s = await api('POST', '/sessions', { goal: 'report known-issue test', context: 'friction-awareness.test.mjs', briefing: false });
+    try { await api('POST', '/command', { type: 'dom.click', params: { selector: '#broken' } }); } catch { /* expected */ }
+    await api('POST', `/sessions/${s.id}/end`);
+    const { json } = await apiRaw('GET', `/sessions/${s.id}/report?format=json`);
+    const bundle = JSON.parse(json.result.content);
+    assert.equal(bundle.knownIssues.length, 1);
+    assert.equal(bundle.knownIssues[0].knownIssue.id, 'report-flaky-el');
+    assert.equal(bundle.knownIssues[0].type, 'dom.click');
+
+    const { json: mdJson } = await apiRaw('GET', `/sessions/${s.id}/report?format=md`);
+    assert.match(mdJson.result.content, /## Known issues matched/);
+    assert.match(mdJson.result.content, /report-flaky-el/);
+  }, {
+    handlers: { 'dom.click': (params) => { if (params.selector === '#broken') throw new Error('Element not found: #broken (detached from DOM)'); return { clicked: true }; } },
+    envOverride: { WEBSCOUT_KNOWN_ISSUES: registryPath },
+  });
+});
+
+test('a macro recorded mid-session is immediately nudge-eligible for that same session, not just future ones', async () => {
+  await withRelay(async ({ apiRaw, api }) => {
+    const s = await api('POST', '/sessions', { goal: 'mid-session macro record', context: 'friction-awareness.test.mjs', briefing: false });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#one' } });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#two' } });
+    const macro = await api('POST', '/macros', { name: 'mid-session-macro', sessionId: s.id });
+    assert.equal(macro.steps.length, 2);
+
+    // SAME still-active session, one more action of the matching type - previously impossible
+    // to nudge for at all (sessionFrictionSnapshot froze before this macro existed), so this
+    // session would never have been nudged for its own just-recorded macro. The macro's own
+    // two recording actions already count as the tail of the match (maybeMacroMatchNudge reads
+    // the session's whole action history, not only actions after the macro existed), so the
+    // very next action of a matching type fires it.
+    const res = await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#three' } });
+    const nudge = res.res.headers.get('x-webscout-macro-match');
+    assert.ok(nudge, 'expected x-webscout-macro-match within the SAME session that just recorded the macro');
+    assert.match(nudge, /mid-session-macro/);
+  }, { handlers: { 'dom.click': () => ({ clicked: true, mutated: false }) } });
+});
+
+test('a malformed known-issues.json is reported as a check error, not silently treated as "no match"', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-badregistry-'));
+  const registryPath = path.join(dir, 'known-issues.json');
+  fs.writeFileSync(registryPath, '{ not valid json');
+  await withRelay(async ({ apiRaw }) => {
+    await apiRaw('POST', '/sessions', { goal: 'bad registry test', context: 'friction-awareness.test.mjs', briefing: false });
+    const { json } = await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#broken' } });
+    assert.equal(json.ok, false);
+    assert.equal(json.extra?.knownIssue, undefined);
+    assert.match(json.extra?.knownIssuesCheckError ?? '', /not valid JSON/);
+  }, {
+    handlers: { 'dom.click': () => { throw new Error('boom'); } },
+    envOverride: { WEBSCOUT_KNOWN_ISSUES: registryPath },
+  });
+});
+
 test('crv preflight carries knownFriction, the same ranked topFrictionItems digest as GET /analytics', async () => {
   await withRelay(async ({ api }) => {
     const s = await api('POST', '/sessions', { goal: 'seed friction', context: 'friction-awareness.test.mjs', briefing: false });

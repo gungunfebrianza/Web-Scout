@@ -534,7 +534,15 @@ async function handleToolsCall(msg) {
     // JSON-RPC protocol-level error - the agent gets the actual message
     // back and can react to it, rather than the call looking like a
     // broken connection.
-    sendResult(msg.id, { content: [{ type: 'text', text: err.message }, ...(err.notes ?? []).map((n) => ({ type: 'text', text: `[web-scout] ${n}` }))], isError: true });
+    const extraText = [];
+    // client.mjs already copies relay.mjs's err.extra onto the thrown Error (see request()) -
+    // the CLI front end already prints these (cli.mjs's main().catch()); this front end was
+    // dropping both silently, so the same failure gave an MCP agent strictly less information
+    // than a CLI agent got for the identical failure.
+    if (err.postTimeoutVerification) extraText.push(`[web-scout] Post-timeout verification (best-effort): ${JSON.stringify(err.postTimeoutVerification)}`);
+    if (err.knownIssue) extraText.push(`[web-scout] Known issue: ${err.knownIssue.id}${err.knownIssue.description ? ` - ${err.knownIssue.description}` : ''}${err.knownIssue.remediation ? ` (remediation: ${err.knownIssue.remediation})` : ''}`);
+    if (err.knownIssuesCheckError) extraText.push(`[web-scout] known-issues.json could not be checked: ${err.knownIssuesCheckError}`);
+    sendResult(msg.id, { content: [{ type: 'text', text: err.message }, ...extraText.map((t) => ({ type: 'text', text: t })), ...(err.notes ?? []).map((n) => ({ type: 'text', text: `[web-scout] ${n}` }))], isError: true });
   }
 }
 

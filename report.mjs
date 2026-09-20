@@ -117,7 +117,7 @@ function buildVizSection(viz) {
   return lines;
 }
 
-export function buildReportMarkdown({ session, actions, snapshots, diffs, qa, console: consoleEntries, net, verityRuns, tokenReport, repeatedActionLoops, viz }) {
+export function buildReportMarkdown({ session, actions, snapshots, diffs, qa, console: consoleEntries, net, verityRuns, tokenReport, repeatedActionLoops, viz, knownIssues, knownIssuesCheckError }) {
   const lines = [];
   lines.push(`# Web-scout Session Report: ${session.goal}`);
   lines.push('');
@@ -141,6 +141,24 @@ export function buildReportMarkdown({ session, actions, snapshots, diffs, qa, co
     }
   }
   lines.push('');
+
+  if (knownIssuesCheckError) {
+    lines.push('## Known issues');
+    lines.push('');
+    lines.push(`_known-issues.json could not be checked: ${mdEscapeBlock(knownIssuesCheckError)}_`);
+    lines.push('');
+  } else if (knownIssues?.length) {
+    lines.push('## Known issues matched');
+    lines.push('');
+    lines.push('_Failed actions in this session whose error text matches an entry in the known-issues.json registry - same match an agent already saw live, mid-session, in the failing command\'s own reply._');
+    lines.push('');
+    lines.push('| Action | Type | Known issue | Remediation |');
+    lines.push('|---|---|---|---|');
+    for (const k of knownIssues) {
+      lines.push(`| #${k.actionId} | ${mdEscapeCell(k.type)} | ${mdEscapeCell(k.knownIssue.id)}${k.knownIssue.description ? ` - ${mdEscapeCell(k.knownIssue.description)}` : ''} | ${mdEscapeCell(k.knownIssue.remediation ?? '')} |`);
+    }
+    lines.push('');
+  }
 
   // chars/4 estimate over the same result_json every action already
   // stores - the exact bytes a coding agent reading this report (or the

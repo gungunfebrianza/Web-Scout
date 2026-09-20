@@ -219,15 +219,25 @@ could not check (unreadable file, or entries loaded but no console result), with
 This file is per-checkout and operator-maintained. Never commit real entries into the tool's own
 generic docs or the example file; it is git-ignored for that reason.
 
-The same registry now reaches an agent in three more places, not only `crv preflight`'s boot-error
+The same registry now reaches an agent in several more places, not only `crv preflight`'s boot-error
 check: (1) a failed `/command` whose own error text matches a signature gets `extra.knownIssue`
-folded straight into that command's error reply (`cli.mjs` prints it as `Known issue: ...`); (2)
-`computeAnalytics()`'s `failureRateByType`/`topFailedSelectors`/`topFrictionItems` entries carry
-`knownIssues` when a past failure of that type/selector matched; (3) a selector that has failed 3+
-times before (`topFailedSelectors`) gets an `x-webscout-selector-risk` warning header on the NEXT
-`/command` against it, before it fails again, with the matched known issue folded into the warning
-text when there is one. All three are best-effort against the same file - a missing or malformed
-registry degrades to "no cross-refs", never breaks the command or the analytics it's checked against.
+folded straight into that command's error reply (`cli.mjs` prints it as `Known issue: ...`, and the
+MCP server's `isError:true` tool result carries the same text - a failure looks identical whether
+you're driving it through the CLI or through MCP); (2) `computeAnalytics()`'s
+`failureRateByType`/`topFailedSelectors`/`topFrictionItems` entries carry `knownIssues` when a past
+failure of that type/selector matched; (3) a selector that has failed 3+ times before
+(`topFailedSelectors`) gets an `x-webscout-selector-risk` warning header on the NEXT `/command`
+against it, before it fails again, with the matched known issue folded into the warning text when
+there is one; (4) a session's own saved/exported report (`GET /sessions/:id/report`, both `md` and
+`json`) carries a "Known issues matched" section/`knownIssues` array for that session's own failed
+actions, re-matched at report time (not read off the live action) so it stays correct even against
+a registry edited after the session ended. All four are best-effort against the same file - a
+missing registry degrades to "no cross-refs", never breaks the command, analytics, or report it's
+checked against. A malformed one (bad JSON, wrong shape) is different from "no matches": it is
+surfaced explicitly, as `extra.knownIssuesCheckError` on a `/command` failure or as
+`knownIssuesCheckError` in a session report, the same distinction `crv preflight`'s own
+`knownIssuesCheckError` has always made - a broken registry file should never look identical to "no
+known bug here".
 
 ## When the caller's own environment blocks a CRV command
 
