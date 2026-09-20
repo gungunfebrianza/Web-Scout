@@ -757,8 +757,9 @@ async function dispatchTracked(session, type, params, agentName, dispatchTimeout
     // Same registry crv preflight checks against boot console errors, now also checked
     // against THIS failure's own message - a known bug otherwise looks identical to a
     // brand-new mystery until a separate "analytics" call is made.
-    const known = matchKnownIssueForError(err.message);
+    const { match: known, checkError: knownIssuesCheckError } = matchKnownIssueForError(err.message);
     if (known) err.extra = { ...err.extra, knownIssue: known };
+    else if (knownIssuesCheckError) err.extra = { ...err.extra, knownIssuesCheckError };
     if (AUTO_SCREENSHOT_ON_FAILURE_TYPES.has(type) && params?.selector) {
       // Logged as its own action EITHER way (success or failure) - a
       // silent swallow on failure would hide exactly the case confirmed
@@ -1004,15 +1005,20 @@ function matchKnownIssues(bootErrors, report) {
 // once (the same registry "crv preflight" checks against boot console errors) reaches the
 // agent in the SAME reply as the failure, instead of only via a later, separate "analytics"
 // round trip. Returns the first match only (a failure needs one remediation to act on, not
-// a ranked list) and null on anything from "no file" to "no match" - never throws, never
-// blocks a command reply.
+// a ranked list). Never throws.
+//
+// Distinguishes "checked, nothing matched" (match: null, checkError: null) from "could not
+// check" (match: null, checkError: <message>) - a malformed/unreadable known-issues.json
+// previously failed the SAME way as a clean miss here (matchKnownIssues, the older
+// crv-preflight-only sibling of this function, already reports load failures via
+// report.knownIssuesCheckError; this one silently looked identical to "no match" until now).
 function matchKnownIssueForError(errorText) {
-  if (!errorText) return null;
+  if (!errorText) return { match: null, checkError: null };
   let loaded;
-  try { loaded = loadKnownIssues(); } catch { return null; }
-  if (!loaded?.issues.length) return null;
+  try { loaded = loadKnownIssues(); } catch (err) { return { match: null, checkError: err.message }; }
+  if (!loaded?.issues.length) return { match: null, checkError: null };
   const hit = loaded.issues.find((issue) => issue.matches(errorText));
-  return hit ? { id: hit.id, description: hit.description, remediation: hit.remediation } : null;
+  return { match: hit ? { id: hit.id, description: hit.description, remediation: hit.remediation } : null, checkError: null };
 }
 
 // One row per currently-connected agent, so a single preflight can answer "is some tab fighting
@@ -1143,9 +1149,26 @@ async function gatherReportBundle(sessionId) {
   const session = dbApi.getSession(sessionId);
   const snapshots = dbApi.listSnapshots(sessionId);
   const diffs = dbApi.listDiffs(sessionId).map((d) => dbApi.getDiff(d.id));
+  const actions = dbApi.listActions(sessionId);
+  // Known-issues cross-reference on THIS session's own failed actions - matchKnownIssueForError
+  // already runs live on a /command failure (dispatchTracked), so an agent mid-session sees the
+  // remediation, but a saved/exported report previously re-derived nothing: it showed a bare
+  // "FAIL: <message>" with zero trace that the bug was already root-caused. Re-matched here
+  // (not read off the live action, which never persisted err.extra) so the report stays
+  // correct even against a known-issues.json updated after the session ended. checkError is
+  // surfaced once, not per action - a malformed registry degrading every row identically is
+  // one fact, not N.
+  let knownIssuesCheckError = null;
+  const knownIssues = [];
+  for (const a of actions) {
+    if (a.ok || !a.error) continue;
+    const { match, checkError } = matchKnownIssueForError(a.error);
+    if (checkError) { knownIssuesCheckError = checkError; break; }
+    if (match) knownIssues.push({ actionId: a.id, type: a.type, error: a.error, knownIssue: match });
+  }
   return {
     session,
-    actions: dbApi.listActions(sessionId),
+    actions,
     snapshots,
     diffs,
     qa: dbApi.listQA(sessionId),
@@ -1154,6 +1177,8 @@ async function gatherReportBundle(sessionId) {
     verityRuns: dbApi.listVerityRuns(sessionId).map((r) => dbApi.getVerityRun(r.id)),
     tokenReport: dbApi.getActionCostReport(sessionId),
     repeatedActionLoops: dbApi.findRepeatedActionLoops(sessionId),
+    knownIssues,
+    ...(knownIssuesCheckError ? { knownIssuesCheckError } : {}),
     // The dashboard's round-1/round-2 visualizations (session-viz.mjs), same models GET
     // /sessions/:id/viz serves - a saved report had zero trace of any of them before this.
     // Its own query (listActionsForViz), separate from the full listActions() above, since
@@ -2317,6 +2342,17 @@ const routes = [
       const steps = actions.filter((a) => a.ok && (!allow || allow.has(a.type))).map((a) => ({ type: a.type, params: a.params ?? {} }));
       if (!steps.length) throw new HttpError(400, 'no replayable actions found in that session - nothing matched the macro type allowlist (pass {"all":true} to include read-only actions too)');
       const macro = dbApi.createMacro({ name: body.name.trim(), sourceSessionId: Number(body.sessionId), steps });
+      // The mid-session macro-match nudge (maybeMacroMatchNudge) only ever consults
+      // sessionFrictionSnapshot, which is frozen once at session start - a macro recorded
+      // DURING that same still-active session never existed at freeze time, so the session
+      // that just created it could repeat its own exact step-type sequence again and get no
+      // nudge, ever, for a macro it just recorded itself. It is definitionally never-run
+      // (just created), so appending it here is safe without re-querying analytics.
+      const active = dbApi.getCurrentSession();
+      if (active && active.id === Number(body.sessionId) && steps.length >= 2) {
+        const snapshot = sessionFrictionSnapshot.get(active.id);
+        if (snapshot && !snapshot.neverRunMacros.some((m) => m.id === macro.id)) snapshot.neverRunMacros.push(macro);
+      }
       broadcastUpdate('macro', null);
       return macro;
     },

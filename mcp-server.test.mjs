@@ -8,8 +8,10 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { startTestRelay } from './test-relay.mjs';
+import { startTestRelay, connectFakeAgent } from './test-relay.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -30,8 +32,8 @@ before(async () => {
   } catch { /* relay unreachable - every test below will fail with a clear message anyway */ }
 });
 
-function startServer() {
-  const child = spawn('node', [path.join(__dirname, 'mcp-server.mjs')], { stdio: ['pipe', 'pipe', 'pipe'] });
+function startServer(envOverride) {
+  const child = spawn('node', [path.join(__dirname, 'mcp-server.mjs')], { stdio: ['pipe', 'pipe', 'pipe'], env: envOverride ? { ...process.env, ...envOverride } : process.env });
   const rl = readline.createInterface({ input: child.stdout, terminal: false });
   let stderr = '';
   child.stderr.on('data', (d) => { stderr += d.toString(); });
@@ -57,8 +59,8 @@ function startServer() {
   return { call, notify, close, getStderr: () => stderr };
 }
 
-async function withServer(fn) {
-  const server = startServer();
+async function withServer(fn, envOverride) {
+  const server = startServer(envOverride);
   try {
     const init = await server.call('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
     assert.equal(init.result.serverInfo.name, 'web-scout');
@@ -146,4 +148,34 @@ test('session start -> dom/idb/eval against the active session -> session end (r
     assert.equal(end.result.isError, undefined);
     assert.equal(JSON.parse(end.result.content[0].text).status, 'ended');
   });
+});
+
+// relay.mjs's dispatchTracked already attaches err.extra.knownIssue to a failed /command
+// (see friction-awareness.test.mjs) and client.mjs already copies err.extra onto the thrown
+// Error - cli.mjs already prints it, but handleToolsCall's catch previously dropped it, so an
+// MCP agent got strictly less diagnostic information than a CLI agent for the identical
+// failure. Own relay + own fake tab (this file's shared module-level relay has none connected).
+test('an MCP tool failure carries the same knownIssue info the CLI already prints', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-mcp-known-issue-'));
+  const registryPath = path.join(dir, 'known-issues.json');
+  fs.writeFileSync(registryPath, JSON.stringify([{ id: 'mcp-flaky-el', signature: 'detached from DOM', description: 'stale DOM reference after a rerender', remediation: 'use dom.click-wait instead of a bare click' }]));
+  const localRelay = await startTestRelay({ env: { WEBSCOUT_KNOWN_ISSUES: registryPath } });
+  const tab = await connectFakeAgent(localRelay.port, {
+    'dom.click': (params) => { if (params.selector === '#broken') throw new Error('Element not found: #broken (detached from DOM)'); return { clicked: true }; },
+  });
+  try {
+    await withServer(async (server) => {
+      const start = await server.call('tools/call', { name: 'webscout_session', arguments: { action: 'start', params: { goal: 'mcp known-issue parity test', context: 'mcp-server.test.mjs' } } });
+      assert.equal(start.result.isError, undefined);
+
+      const click = await server.call('tools/call', { name: 'webscout_dom', arguments: { action: 'click', params: { selector: '#broken' } } });
+      assert.equal(click.result.isError, true);
+      const texts = click.result.content.map((c) => c.text).join('\n');
+      assert.match(texts, /Known issue: mcp-flaky-el/);
+      assert.match(texts, /use dom.click-wait instead of a bare click/);
+    }, { WEBSCOUT_PORT: String(localRelay.port) });
+  } finally {
+    await tab.close();
+    await localRelay.stop();
+  }
 });

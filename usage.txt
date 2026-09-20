@@ -154,7 +154,12 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    printed to stdout, or written to --out. --verity
                                    imports that Verity scenario-result file into the
                                    session first, so it appears in the report's own
-                                   "Verity UI checks" section (see "verity import" below)
+                                   "Verity UI checks" section (see "verity import" below).
+                                   Also carries a "Known issues matched" section/knownIssues
+                                   array for this session's own failed actions, re-checked
+                                   against known-issues.json at report time (not read off
+                                   the live failure) - so it stays correct even against a
+                                   registry edited after the session ended
   session viz <id> [--section swimlane|episodes|stateMachine|sequence|waste|costTree|failureHeatmap|causality|routeMachine]
                                    the dashboard's own derived views as JSON (same data GET
                                    /sessions/:id/viz serves) - --section prints just one of them
