@@ -698,6 +698,25 @@
   <div id="savingsEmpty" class="empty" hidden>No token report yet - the relay may be unreachable.</div>
 </section>
 
+<section class="hud-section" id="repairSection">
+  <h2>Self-repair loop</h2>
+  <div class="muted">server-side kill-switch (a CLI/MCP caller ignores a UI-only toggle - this is the real gate), scoped to examples/self-repair-demo only. Disabled by default. See webscout2.md / self-repair.mjs.</div>
+  <p style="margin-top:8px;">
+    <span id="repairStatusBadge" class="chip">unknown</span>
+    scope: <code id="repairScopeDir">-</code>
+    <button type="button" id="repairToggleBtn" disabled style="margin-left:8px;">Toggle</button>
+  </p>
+  <div class="sv-h3">Recent changes</div>
+  <ul id="repairHistoryList" style="margin:4px 0 0; padding-left:18px;"></ul>
+</section>
+
+<section class="hud-section" id="repairCostSection">
+  <h2>Self-repair loop cost</h2>
+  <div class="muted">estimated tokens per session tagged "self-repair" (witness + patch + verify) - same estimator as "Token burn" above, filtered to this loop's own sessions</div>
+  <div class="hud-scroll-body" id="repairCostContainer"></div>
+  <div id="repairCostEmpty" class="empty" hidden>No self-repair-tagged sessions recorded yet.</div>
+</section>
+
 <div class="hud-grid-2">
   <section class="hud-section hud-scroll-col" id="durationSection">
   <h2>Duration by action type</h2>
@@ -3783,6 +3802,73 @@ el('wasteBySessionContainer').addEventListener('click', (e) => {
   if (row) openSessionById(Number(row.dataset.sessionId));
 });
 
+// ---------- Self-repair loop cost (cross-session) ----------
+// Derived entirely from a.sessionTokenTotals (already fetched for the Burn chart above, db.mjs's
+// getSessionTokenTotals) filtered to sessions tagged "self-repair" - no separate fetch, same
+// reasoning as renderWasteBySession reusing GET /analytics rather than its own round trip.
+function renderRepairCost(a) {
+  const container = el('repairCostContainer');
+  const rows = (a.sessionTokenTotals || []).filter((s) => (s.tags || []).includes('self-repair') && s.totalEstTokens > 0);
+  if (!rows.length) { container.innerHTML = ''; el('repairCostEmpty').hidden = false; return; }
+  el('repairCostEmpty').hidden = true;
+  const total = rows.reduce((sum, r) => sum + r.totalEstTokens, 0);
+  const maxVal = Math.max(1, ...rows.map((r) => r.totalEstTokens));
+  const bars = rows.map((r) => `<div class="duration-bar-row" data-session-id="${r.sessionId}" style="cursor:pointer;">
+      <div class="duration-bar-label" title="#${r.sessionId} ${esc(r.goal)}">#${r.sessionId} ${esc(clip(r.goal, 26))}</div>
+      <div class="duration-bar-track" title="${r.totalEstTokens} estimated tokens">
+        <div class="duration-bar-max" style="width:${Math.max(2, (r.totalEstTokens / maxVal) * 100).toFixed(1)}%"></div>
+      </div>
+      <div class="duration-bar-value">~${r.totalEstTokens} tok</div>
+    </div>`).join('');
+  container.innerHTML = `${bars}<div class="burn-chart-legend">${rows.length} self-repair session(s) - ~${total} estimated tokens total</div>`;
+}
+el('repairCostContainer').addEventListener('click', (e) => {
+  const row = e.target.closest('[data-session-id]');
+  if (row) openSessionById(Number(row.dataset.sessionId));
+});
+
+// ---------- Self-repair loop kill-switch ----------
+// Server-side truth (GET/PUT /repair/config), not a localStorage/panelPrefs toggle - see
+// self-repair.mjs. A CLI/MCP caller driving the loop directly must see the SAME state a dashboard
+// viewer flips, and vice versa - that's why this fetches its own state instead of trusting a cached
+// client-side flag.
+let lastRepairConfig = null;
+function renderRepairStatus() {
+  const c = lastRepairConfig;
+  const badge = el('repairStatusBadge');
+  const toggleBtn = el('repairToggleBtn');
+  const historyEl = el('repairHistoryList');
+  if (!c) { badge.textContent = 'unknown'; badge.className = 'chip'; toggleBtn.disabled = true; historyEl.innerHTML = ''; return; }
+  badge.textContent = c.enabled ? 'ENABLED' : 'disabled';
+  badge.className = c.enabled ? 'chip badge-active' : 'chip';
+  toggleBtn.disabled = false;
+  toggleBtn.textContent = c.enabled ? 'Disable' : 'Enable';
+  el('repairScopeDir').textContent = c.scopeDir;
+  historyEl.innerHTML = (c.history || []).slice(0, 8)
+    .map((h) => `<li>${h.enabled ? 'enabled' : 'disabled'} by ${esc(h.by)} - ${fmtTime(h.at)}</li>`)
+    .join('') || '<li class="muted">no changes yet</li>';
+}
+async function refreshRepairStatus() {
+  try { lastRepairConfig = await api('GET', '/repair/config'); } catch { lastRepairConfig = null; }
+  renderRepairStatus();
+  panelTouch('repairSection');
+}
+el('repairToggleBtn').addEventListener('click', async () => {
+  if (!lastRepairConfig) return;
+  const turningOn = !lastRepairConfig.enabled;
+  // A lightweight audit prompt, not authentication (see THREAT-MODEL-equivalent notes in
+  // self-repair.mjs) - "by" is self-declared, same honest limit as "approve --by" elsewhere in this
+  // class of tool. Cancelling the prompt cancels the toggle.
+  const by = window.prompt(`${turningOn ? 'Enable' : 'Disable'} the self-repair loop. Your name (for the audit log):`, '');
+  if (by === null) return;
+  try {
+    lastRepairConfig = await api('PUT', '/repair/config', { enabled: turningOn, by: by || 'dashboard user' });
+    renderRepairStatus();
+  } catch (err) {
+    window.alert(`failed to toggle the self-repair loop: ${err.message}`);
+  }
+});
+
 function renderCrossSessionCharts(a) {
   renderHeatmap(a);
   renderSelectorGraph(a);
@@ -3791,6 +3877,7 @@ function renderCrossSessionCharts(a) {
   renderWasteBySession(a);
   renderPunchcard(a);
   renderMacroHealth(a);
+  renderRepairCost(a);
 }
 
 let frictionDismissed = false;
@@ -3856,6 +3943,7 @@ async function refreshAll() {
     await refreshSessionDetail();
     await refreshMacros();
     await refreshFriction();
+    await refreshRepairStatus();
     syncBannerStack();
   } catch (err) {
     document.body.classList.add('relay-down');
@@ -3895,6 +3983,7 @@ const KIND_REFRESH = {
   qa: refreshQA,
   macro: refreshMacros,
   verity: async () => { await refreshVerityRuns(); renderTimeline(); },
+  'repair-config': refreshRepairStatus,
 };
 
 function connectEvents() {
@@ -4260,6 +4349,8 @@ const PANELS = {
   selectorsSection: { group: 'global', label: 'Selectors', autoEmpty: true, failLabel: 'recurring', count: () => { const n = lastAnalyticsData?.topFailedSelectors?.length; return n === undefined ? null : { n, fail: n, title: 'selectors that failed more than once' }; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.topFailedSelectors ?? []) },
   burnSection: { group: 'global', wide: true, label: 'Burn', autoEmpty: true, failLabel: 'over budget', count: () => { const t = lastAnalyticsData?.sessionTokenTotals; return t ? { n: t.filter((s) => s.totalEstTokens > 0).length, fail: t.filter((s) => s.tokenBudget && s.totalEstTokens > s.tokenBudget).length, title: 'sessions with recorded token use' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.sessionTokenTotals ?? []) },
   savingsSection: { group: 'global', wide: true, label: 'Savings', autoEmpty: true, count: () => { const s = lastSavingsReport?.savings; return s?.ledgers ? { n: s.ledgers.filter((l) => l.countedInTotal).length, text: `~${fmtK(s.byKind?.storage?.estTokensSaved ?? 0)} tok-eq.`, title: 'savings mechanisms counted in the totals (disk bytes avoided, not tokens a caller avoided)' } : null; }, refresh: () => refreshSavings(true), exportRows: () => (lastSavingsReport?.savings?.ledgers ?? []).map((l) => ({ mechanism: l.label, kind: l.kind, counted: l.countedInTotal, bytesSaved: l.bytesSaved, estTokensEquivalent: l.estTokensSaved, reductionPct: l.reductionPct, refsTotal: l.refs?.total ?? null, refsStored: l.refs?.unique ?? null })) },
+  repairSection: { group: 'global', label: 'Self-repair', count: () => (lastRepairConfig ? { n: lastRepairConfig.enabled ? 1 : 0, title: lastRepairConfig.enabled ? 'self-repair loop is ENABLED' : 'self-repair loop is disabled' } : null), refresh: () => refreshRepairStatus(), exportRows: () => lastRepairConfig?.history ?? null },
+  repairCostSection: { group: 'global', wide: true, label: 'Self-repair cost', autoEmpty: true, count: () => { const t = lastAnalyticsData?.sessionTokenTotals; if (!t) return null; const rows = t.filter((s) => (s.tags || []).includes('self-repair')); const tok = rows.reduce((sum, r) => sum + r.totalEstTokens, 0); return { n: rows.length, text: rows.length ? `~${fmtK(tok)} tok` : undefined, title: 'sessions tagged self-repair, cumulative estimated tokens' }; }, refresh: () => refreshFriction(), exportRows: () => (lastAnalyticsData?.sessionTokenTotals ?? []).filter((s) => (s.tags || []).includes('self-repair')) },
   durationSection: { group: 'global', label: 'Duration', autoEmpty: true, count: () => (lastAnalyticsData ? { n: lastAnalyticsData.durationByType?.length ?? 0, title: 'action types with timing data' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.durationByType ?? []) },
   wasteBySessionSection: { group: 'global', label: 'Wasteful sessions', autoEmpty: true, failLabel: 'over 30%', count: () => { const w = lastAnalyticsData?.wasteBySession; return w ? { n: w.length, fail: w.filter((r) => r.wastePct > 0.3).length, title: 'sessions ranked by wasted-call share (5+ calls)' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.wasteBySession ?? []) },
   punchcardSection: { group: 'global', label: 'Punchcard', autoEmpty: true, count: () => (lastAnalyticsData ? { n: (lastAnalyticsData.activityPunchcard ?? []).flat().reduce((s, v) => s + v, 0), title: 'sessions started' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => (a.activityPunchcard ?? []).flatMap((hours, day) => hours.map((count, hour) => ({ day: PUNCHCARD_DAY_LABELS[day], hour, count })).filter((r) => r.count))) },
