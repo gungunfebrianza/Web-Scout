@@ -8,6 +8,11 @@
 // (see analytics-known-issues.test.mjs, the same pattern for actions). Real relay, a raw
 // WebSocket standing in for a page's event batch (no browser needed - the wire shape is just
 // {kind:'event', type:'net'|'console', entries:[...]}, the same envelope inject.js sends).
+//
+// Round 9 (below) closes two more: per-entry knownIssue decoration on the "net history"/
+// "console history" routes (previously only the cross-session aggregate carried a match), and
+// emergentFrictionForSession reaching net_entries/console_entries the same way it already
+// reached dom/idb/eval action failures.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -99,5 +104,71 @@ test('a one-off net failure and a warn-level console entry are not ranked (no re
     const a = await api('GET', '/analytics');
     assert.equal(a.topFailedNetUrls.find((x) => x.url === 'https://api.example.com/once'), undefined);
     assert.equal(a.topFailedConsoleMessages.find((x) => x.message.includes('deprecation warning')), undefined);
+  });
+});
+
+// Round-9 gap: the aggregate (topFailedNetUrls/topFailedConsoleMessages above) carried
+// knownIssues since round 8, but GET /sessions/:id/net and GET /sessions/:id/console - what
+// "net history"/"console history" actually return - handed back raw entries with no match of
+// their own, so reading a session's own net/console history required a separate /analytics
+// round trip to learn a failure was already a known bug. Checks the new per-entry decoration
+// (decorateEntriesWithKnownIssue, relay.mjs).
+test('"net history" and "console history" carry a per-entry knownIssue when the registry matches', async () => {
+  await withRelay([
+    { id: 'flaky-save-endpoint', signature: 'HTTP 500', description: 'save endpoint flakes under load', remediation: 'retry once after 500ms' },
+    { id: 'unhandled-null-deref', signature: 'Cannot read properties of undefined', description: 'a render races store hydration', remediation: 'guard with the loading flag' },
+  ], async ({ api, sendEvent }) => {
+    const id = (await api('POST', '/sessions', { goal: 'per-entry known-issue test', context: 'analytics-net-console-known-issues.test.mjs', briefing: false })).id;
+    const now = new Date().toISOString();
+    sendEvent('net', [{ via: 'fetch', method: 'POST', url: 'https://api.example.com/save', status: 500, error: null, startedAt: now, endedAt: now }]);
+    sendEvent('console', [{ level: 'error', message: "TypeError: Cannot read properties of undefined (reading 'id')", stack: null, at: now }]);
+
+    const netEntries = await waitUntil(async () => { const rows = await api('GET', `/sessions/${id}/net`); return rows.length >= 1 ? rows : null; });
+    assert.equal(netEntries[0].knownIssue?.id, 'flaky-save-endpoint');
+
+    const consoleEntries = await waitUntil(async () => { const rows = await api('GET', `/sessions/${id}/console`); return rows.length >= 1 ? rows : null; });
+    assert.equal(consoleEntries[0].knownIssue?.id, 'unhandled-null-deref');
+  });
+});
+
+test('a net/console entry with no matching signature carries no knownIssue field', async () => {
+  await withRelay([{ id: 'flaky-save-endpoint', signature: 'HTTP 500', description: 'unrelated', remediation: 'n/a' }], async ({ api, sendEvent }) => {
+    const id = (await api('POST', '/sessions', { goal: 'no-match test', context: 'analytics-net-console-known-issues.test.mjs', briefing: false })).id;
+    const now = new Date().toISOString();
+    sendEvent('net', [{ via: 'fetch', method: 'GET', url: 'https://api.example.com/ok', status: 200, error: null, startedAt: now, endedAt: now }]);
+    // console_entries.level has a CHECK constraint (db.mjs) of error/warn/uncaught/
+    // unhandledrejection only - 'warn' here, not 'log', which is not a legal value at all.
+    sendEvent('console', [{ level: 'warn', message: 'ordinary warning, not a known failure', stack: null, at: now }]);
+
+    const netEntries = await waitUntil(async () => { const rows = await api('GET', `/sessions/${id}/net`); return rows.length >= 1 ? rows : null; });
+    assert.equal('knownIssue' in netEntries[0], false);
+
+    const consoleEntries = await waitUntil(async () => { const rows = await api('GET', `/sessions/${id}/console`); return rows.length >= 1 ? rows : null; });
+    assert.equal('knownIssue' in consoleEntries[0], false);
+  });
+});
+
+// Round-9 gap: emergentFrictionForSession (relay.mjs) only ever scanned dbApi.listActions -
+// the dom/idb/eval command-dispatch table - so a session's first-ever repeated network failure
+// or console error never set the "session end" emergentFriction flag, even though it is exactly
+// the "first session to see this fail" moment that flag exists to surface for every other type.
+test('"session end" flags emergentFriction for a session\'s first-ever repeating net/console failure', async () => {
+  await withRelay([], async ({ api, sendEvent }) => {
+    const id = (await api('POST', '/sessions', { goal: 'emergent net/console test', context: 'analytics-net-console-known-issues.test.mjs', briefing: false })).id;
+    const now = new Date().toISOString();
+    sendEvent('net', [
+      { via: 'fetch', method: 'POST', url: 'https://api.example.com/brand-new-endpoint', status: 502, error: null, startedAt: now, endedAt: now },
+      { via: 'fetch', method: 'POST', url: 'https://api.example.com/brand-new-endpoint', status: 502, error: null, startedAt: now, endedAt: now },
+    ]);
+    sendEvent('console', [
+      { level: 'error', message: 'ReferenceError: brandNewThing is not defined', stack: null, at: now },
+      { level: 'error', message: 'ReferenceError: brandNewThing is not defined', stack: null, at: now },
+    ]);
+    await waitUntil(async () => (await api('GET', `/sessions/${id}/net`)).length >= 2);
+    await waitUntil(async () => (await api('GET', `/sessions/${id}/console`)).length >= 2);
+
+    const ended = await api('POST', `/sessions/${id}/end`, {});
+    assert.ok(ended.emergentFriction?.some((line) => line.includes('brand-new-endpoint')), `expected an emergent net line, got: ${JSON.stringify(ended.emergentFriction)}`);
+    assert.ok(ended.emergentFriction?.some((line) => line.includes('brandNewThing is not defined')), `expected an emergent console line, got: ${JSON.stringify(ended.emergentFriction)}`);
   });
 });

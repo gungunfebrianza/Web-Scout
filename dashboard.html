@@ -738,6 +738,20 @@
 <div id="goldenDiffsStillFailingEmpty" class="empty" hidden>No golden diff is currently dirty.</div>
 </section>
 
+<section class="hud-section hud-scroll-col" id="netUrlsSection">
+<h2>Recurring network failures</h2>
+<div class="muted">network requests that failed more than once, cross-session - the topFailedSelectors panel's own treatment, for net_entries instead of dispatched actions</div>
+<div class="hud-scroll-body" id="netUrlsContainer"></div>
+<div id="netUrlsEmpty" class="empty" hidden>No repeated network failures yet.</div>
+</section>
+
+<section class="hud-section hud-scroll-col" id="consoleMessagesSection">
+<h2>Recurring console errors</h2>
+<div class="muted">console messages that occurred more than once, cross-session - same treatment as the network panel above, for console_entries</div>
+<div class="hud-scroll-body" id="consoleMessagesContainer"></div>
+<div id="consoleMessagesEmpty" class="empty" hidden>No repeated console errors yet.</div>
+</section>
+
 <section class="hud-section" id="burnSection">
   <h2>Token burn, all sessions</h2>
   <div class="muted">cumulative estimated tokens across every session, chronological - a red dot marks a session that finished over its own declared budget</div>
@@ -4528,6 +4542,28 @@ function renderGoldenDiffsStillFailing(a) {
     </div>`).join('');
 }
 
+function renderTopFailedNetUrls(a) {
+  const container = el('netUrlsContainer');
+  const rows = a.topFailedNetUrls || [];
+  if (!rows.length) { container.innerHTML = ''; el('netUrlsEmpty').hidden = false; return; }
+  el('netUrlsEmpty').hidden = true;
+  container.innerHTML = rows.map((r) => `<div class="duration-bar-row">
+      <div class="duration-bar-label" title="${esc(r.url)}">${esc(r.url)}</div>
+      <div class="duration-bar-value">${r.failCount}x across ${r.sessionCount} session(s), last ${fmtTime(r.lastFailedAt)}</div>
+    </div>`).join('');
+}
+
+function renderTopFailedConsoleMessages(a) {
+  const container = el('consoleMessagesContainer');
+  const rows = a.topFailedConsoleMessages || [];
+  if (!rows.length) { container.innerHTML = ''; el('consoleMessagesEmpty').hidden = false; return; }
+  el('consoleMessagesEmpty').hidden = true;
+  container.innerHTML = rows.map((r) => `<div class="duration-bar-row">
+      <div class="duration-bar-label" title="${esc(r.message)}">${esc(r.message.length > 120 ? r.message.slice(0, 119) + '…' : r.message)}</div>
+      <div class="duration-bar-value">${r.failCount}x across ${r.sessionCount} session(s), last ${fmtTime(r.lastFailedAt)}</div>
+    </div>`).join('');
+}
+
 function renderCrossSessionCharts(a, opts = {}) {
   renderHeatmap(a);
   renderSelectorGraph(a);
@@ -4540,6 +4576,8 @@ function renderCrossSessionCharts(a, opts = {}) {
   renderRepairCost(a);
   renderVerityStillFailing(a);
   renderGoldenDiffsStillFailing(a);
+  renderTopFailedNetUrls(a);
+  renderTopFailedConsoleMessages(a);
 }
 
 let frictionDismissed = false;
@@ -5045,6 +5083,8 @@ const PANELS = {
   wasteBySessionSection: { group: 'global', label: 'Wasteful sessions', autoEmpty: true, failLabel: 'over 30%', count: () => { const w = lastAnalyticsData?.wasteBySession; return w ? { n: w.length, fail: w.filter((r) => r.wastePct > 0.3).length, title: 'sessions ranked by wasted-call share (5+ calls)' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.wasteBySession ?? []) },
   verityStillFailingSection: { group: 'global', label: 'Verity still failing', autoEmpty: true, failLabel: 'still failing', count: () => { const v = lastAnalyticsData?.verityLabelsStillFailing; return v ? { n: v.length, fail: v.length, title: 'Verity labels whose most recent import is still FAIL' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.verityLabelsStillFailing ?? []) },
   goldenDiffsStillFailingSection: { group: 'global', label: 'Golden diffs dirty', autoEmpty: true, failLabel: 'still dirty', count: () => { const g = lastAnalyticsData?.goldenDiffsStillFailing; return g ? { n: g.length, fail: g.length, title: '"diff-golden" comparisons whose most recent result was non-clean' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.goldenDiffsStillFailing ?? []) },
+  netUrlsSection: { group: 'global', label: 'Network failures', autoEmpty: true, failLabel: 'recurring', count: () => { const n = lastAnalyticsData?.topFailedNetUrls?.length; return n === undefined ? null : { n, fail: n, title: 'network requests that failed more than once' }; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.topFailedNetUrls ?? []) },
+  consoleMessagesSection: { group: 'global', label: 'Console errors', autoEmpty: true, failLabel: 'recurring', count: () => { const n = lastAnalyticsData?.topFailedConsoleMessages?.length; return n === undefined ? null : { n, fail: n, title: 'console messages that occurred more than once' }; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.topFailedConsoleMessages ?? []) },
   punchcardSection: { group: 'global', label: 'Punchcard', autoEmpty: true, count: () => (lastAnalyticsData ? { n: (lastAnalyticsData.activityPunchcard ?? []).flat().reduce((s, v) => s + v, 0), title: 'sessions started' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => (a.activityPunchcard ?? []).flatMap((hours, day) => hours.map((count, hour) => ({ day: PUNCHCARD_DAY_LABELS[day], hour, count })).filter((r) => r.count))) },
   timelineSection: { group: 'session', label: 'Timeline', autoEmpty: true, pausable: true, count: () => ({ n: timelineTotal(), title: 'events merged from every panel' }), refresh: async () => { renderTimeline(); } },
   actionsSection: { group: 'session', label: 'Actions', autoEmpty: true, failLabel: 'failed', count: () => ({ n: lastActions.length, fail: lastActions.filter((a) => !a.ok).length, title: 'actions recorded' }), refresh: () => refreshActions() },
