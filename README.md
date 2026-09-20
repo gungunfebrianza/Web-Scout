@@ -170,9 +170,14 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   `knownIssue` (id/remediation) folded straight into that failure's own reply; a selector
   that has failed 3+ times before gets an `x-webscout-selector-risk` warning header before
   it fails again; a session whose own recent action types match a recorded-but-never-run
-  macro gets an `x-webscout-macro-match` nudge; and `session end` reports
-  `emergentFriction` - a type/selector failing for the first time ever, flagged before it
-  has accumulated enough history to rank in the global `topFrictionItems` digest. The
+  macro gets an `x-webscout-macro-match` nudge (recording a macro mid-session makes it
+  immediately nudge-eligible for that same still-active session, not only future ones);
+  and `session end` reports `emergentFriction` - a type/selector failing for the first
+  time ever, flagged before it has accumulated enough history to rank in the global
+  `topFrictionItems` digest. A saved/exported session report (`GET /sessions/:id/report`)
+  carries the same known-issues matches for that session's own failed actions, and the
+  MCP server's tool-failure replies carry the same `knownIssue`/post-timeout-verification
+  info the CLI already prints - a failure looks the same whichever front end hit it. The
   per-session checks are read from a snapshot frozen at `session start` (from the same
   analytics `analytics` itself reads), never a live per-command analytics call, so they
   can never go stale mid-session or poison the shared 5s analytics cache
