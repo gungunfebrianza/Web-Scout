@@ -164,6 +164,10 @@ export const CLI_SPEC = [
   { cmd: 'net clear', pos: [0, 0], val: ['--agent'], mcp: 'webscout_net.clear' },
   { cmd: 'console log', pos: [0, 0], bool: SHAPE_BOOL, val: ['--limit', '--level', '--contains', '--fields', '--agent'], mcp: 'webscout_console.log', params: { '--limit': 'limit', '--level': 'level', '--contains': 'contains', '--fields': 'fields', ...SHAPE_PARAMS } },
   { cmd: 'console wait', pos: [1, 1], val: ['--timeout', '--grace', '--agent'], mcp: 'webscout_console.wait', params: { '--timeout': 'timeoutMs', '--grace': 'graceMs' } },
+  {
+    cmd: 'console history', pos: [0, 0], val: ['--contains', '--level', '--limit', '--session'], mcp: 'webscout_console.history',
+    params: { '--contains': 'contains', '--level': 'level', '--limit': 'limit', '--session': 'sessionId' },
+  },
   { cmd: 'console clear', pos: [0, 0], val: ['--agent'], mcp: 'webscout_console.clear' },
 
   { cmd: 'debug state', pos: [0, 0], val: ['--agent'], mcp: 'webscout_meta.debug_state' },

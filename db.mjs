@@ -1836,6 +1836,15 @@ export function listConsoleEntries(sessionId, { limit } = {}) {
   return rows.map(hydrateConsoleEntry);
 }
 
+// Cross-session, errors only (not a scan of every row console_entries can hold - see its own
+// "not pruned" note above) - feeds Friction Analytics' known-issue cross-reference for console
+// errors, the passively-captured sibling of listAllActions() that computeAnalytics already
+// scans for dom/idb/eval failures.
+const stmtListFailedConsole = db.prepare("SELECT id, session_id, level, message, message_hash, occurred_at FROM console_entries WHERE level = 'error' ORDER BY id ASC");
+export function listFailedConsoleEntries() {
+  return stmtListFailedConsole.all().map((r) => ({ ...r, message: resolveTextEmptySentinel(r.message, r.message_hash) }));
+}
+
 const stmtInsertNet = db.prepare(`
   INSERT INTO net_entries (session_id, agent_name, via, method, url, url_hash, status, error, started_at, ended_at, occurred_at, body_preview_hash, body_truncated)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1887,6 +1896,15 @@ export function listNetEntries(sessionId, { limit } = {}) {
   const lim = Number.isFinite(limit) && limit > 0 ? Number(limit) : -1;
   const rows = lim > 0 ? stmtListNetLimit.all(Number(sessionId), lim) : stmtListNet.all(Number(sessionId));
   return rows.map(hydrateNetEntry);
+}
+
+// Cross-session, failed/errored only (status>=400 or a transport error - not a scan of the
+// 60K+ rows net_entries alone can hold, see its own "not pruned" note above) - feeds Friction
+// Analytics' known-issue cross-reference for network failures, the passively-captured sibling
+// of listAllActions() that computeAnalytics already scans for dom/idb/eval failures.
+const stmtListFailedNet = db.prepare('SELECT id, session_id, method, url, url_hash, status, error, started_at, ended_at FROM net_entries WHERE (status IS NOT NULL AND status >= 400) OR error IS NOT NULL ORDER BY id ASC');
+export function listFailedNetEntries() {
+  return stmtListFailedNet.all().map((r) => ({ ...r, url: resolveTextNullSentinel(r.url, r.url_hash) }));
 }
 
 // ---------- macros (record/replay) ----------

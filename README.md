@@ -187,7 +187,20 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   saved/exported session report (`GET /sessions/:id/report`) carries the same known-issues matches for that
   session's own failed actions, and the MCP server's tool-failure replies carry the same
   `knownIssue`/post-timeout-verification info the CLI prints; the dashboard's "End session" button shows the same `emergentFriction`/savings receipt, and `macro run` / `crv run` steps carry the same risk warning and known-issue match as `/command`. History is read on demand (indexed by
-  target), never frozen at session start, and the per-command check never touches the shared 5s analytics cache
+  target), never frozen at session start, and the per-command check never touches the shared 5s analytics cache. can never go stale mid-session or poison the shared 5s analytics cache. `macro update`
+  (also `webscout_macro.update`) fixes a step in place through the same `PUT /macros/:id/steps`
+  the dashboard step inspector already used - previously CLI-only callers had to delete and
+  re-record a macro to fix one wrong step. The dashboard also surfaces `verityLabelsStillFailing`
+  (a Verity label whose most recent import is still FAIL) and `goldenDiffsStillFailing` (a
+  `diff-golden` comparison whose most recent result was non-clean - same gap, closed the same
+  way, for state-diff goldens) as their own cross-session panels, and each macro's stamped
+  cost/compaction stats as table columns, not only at replay time. The known-issues cross-
+  reference itself now also reaches network/console capture, not only dom/idb/eval actions:
+  a repeating HTTP failure or `console.error` that matches `known-issues.json` ranks in
+  `analytics`' `topFailedNetUrls`/`topFailedConsoleMessages` (and `topFrictionItems`) the same
+  way a repeating selector failure always has, and `console history` (durable
+  `console_entries`, also `webscout_console.history`) closes the last durable-history gap -
+  `net history` had one, console did not
 - `crv seed <store> <rows-json>` writes rows (`idb put-many`) and records every
   stored row's real key into a manifest file, so `crv cleanup` can delete exactly
   those ids later (`idb delete-many`, one call per store) without hand-tracking ids
@@ -429,6 +442,9 @@ net capture --off             # clears every armed filter
 net clear
 console log --limit 20
 console wait "Saved" --timeout 5000   # attach-and-wait instead of a sleep+poll loop
+console history --level error --limit 20   # the DURABLE console_entries table, not the live
+                               # capped ring buffer above - same gap "net history" closes for
+                               # network entries
 console clear
 ```
 

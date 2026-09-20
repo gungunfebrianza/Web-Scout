@@ -731,6 +731,13 @@
 <div id="verityStillFailingEmpty" class="empty" hidden>No Verity label is currently failing.</div>
 </section>
 
+<section class="hud-section hud-scroll-col" id="goldenDiffsStillFailingSection">
+<h2>Golden diffs still dirty</h2>
+<div class="muted">a "diff-golden" comparison whose most recent result was non-clean, cross-session - same gap the Verity panel above closes, for state-diff goldens instead of Verity imports</div>
+<div class="hud-scroll-body" id="goldenDiffsStillFailingContainer"></div>
+<div id="goldenDiffsStillFailingEmpty" class="empty" hidden>No golden diff is currently dirty.</div>
+</section>
+
 <section class="hud-section" id="burnSection">
   <h2>Token burn, all sessions</h2>
   <div class="muted">cumulative estimated tokens across every session, chronological - a red dot marks a session that finished over its own declared budget</div>
@@ -4510,6 +4517,17 @@ function renderVerityStillFailing(a) {
     </div>`).join('');
 }
 
+function renderGoldenDiffsStillFailing(a) {
+  const container = el('goldenDiffsStillFailingContainer');
+  const rows = a.goldenDiffsStillFailing || [];
+  if (!rows.length) { container.innerHTML = ''; el('goldenDiffsStillFailingEmpty').hidden = false; return; }
+  el('goldenDiffsStillFailingEmpty').hidden = true;
+  container.innerHTML = rows.map((r) => `<div class="duration-bar-row">
+      <div class="duration-bar-label" title="${esc(r.golden)}">${esc(r.golden)}</div>
+      <div class="duration-bar-value">${r.diffCount} diff(s), last ${fmtTime(r.lastDiffedAt)}</div>
+    </div>`).join('');
+}
+
 function renderCrossSessionCharts(a, opts = {}) {
   renderHeatmap(a);
   renderSelectorGraph(a);
@@ -4521,6 +4539,7 @@ function renderCrossSessionCharts(a, opts = {}) {
   renderMacroHealth(a);
   renderRepairCost(a);
   renderVerityStillFailing(a);
+  renderGoldenDiffsStillFailing(a);
 }
 
 let frictionDismissed = false;
@@ -5025,6 +5044,7 @@ const PANELS = {
   durationSection: { group: 'global', label: 'Duration', autoEmpty: true, count: () => (lastAnalyticsData ? { n: lastAnalyticsData.durationByType?.length ?? 0, title: 'action types with timing data' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.durationByType ?? []) },
   wasteBySessionSection: { group: 'global', label: 'Wasteful sessions', autoEmpty: true, failLabel: 'over 30%', count: () => { const w = lastAnalyticsData?.wasteBySession; return w ? { n: w.length, fail: w.filter((r) => r.wastePct > 0.3).length, title: 'sessions ranked by wasted-call share (5+ calls)' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.wasteBySession ?? []) },
   verityStillFailingSection: { group: 'global', label: 'Verity still failing', autoEmpty: true, failLabel: 'still failing', count: () => { const v = lastAnalyticsData?.verityLabelsStillFailing; return v ? { n: v.length, fail: v.length, title: 'Verity labels whose most recent import is still FAIL' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.verityLabelsStillFailing ?? []) },
+  goldenDiffsStillFailingSection: { group: 'global', label: 'Golden diffs dirty', autoEmpty: true, failLabel: 'still dirty', count: () => { const g = lastAnalyticsData?.goldenDiffsStillFailing; return g ? { n: g.length, fail: g.length, title: '"diff-golden" comparisons whose most recent result was non-clean' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.goldenDiffsStillFailing ?? []) },
   punchcardSection: { group: 'global', label: 'Punchcard', autoEmpty: true, count: () => (lastAnalyticsData ? { n: (lastAnalyticsData.activityPunchcard ?? []).flat().reduce((s, v) => s + v, 0), title: 'sessions started' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => (a.activityPunchcard ?? []).flatMap((hours, day) => hours.map((count, hour) => ({ day: PUNCHCARD_DAY_LABELS[day], hour, count })).filter((r) => r.count))) },
   timelineSection: { group: 'session', label: 'Timeline', autoEmpty: true, pausable: true, count: () => ({ n: timelineTotal(), title: 'events merged from every panel' }), refresh: async () => { renderTimeline(); } },
   actionsSection: { group: 'session', label: 'Actions', autoEmpty: true, failLabel: 'failed', count: () => ({ n: lastActions.length, fail: lastActions.filter((a) => !a.ok).length, title: 'actions recorded' }), refresh: () => refreshActions() },

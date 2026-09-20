@@ -16,14 +16,14 @@
 // cleaned up is a worse failure mode than a clear "relay unreachable" error.
 //
 // Session model: dom.*/idb.*(except snapshot/diff/restore)/net.*(except
-// history)/console.*/eval/page.* all dispatch through the relay's single
+// history)/console.*(except history)/eval/page.* all dispatch through the relay's single
 // server-side "active session" (POST /command's requireActiveSession() -
 // see relay.mjs) - there is no per-call session routing for these at the
 // relay level, so no `sessionId` param exists on those tool actions either;
 // inventing one that's silently ignored would be worse than not having it.
 // Only actions backed by a relay route that itself takes an explicit id
-// (session show/report/cleanup/assert/ask/verity_import, net history) take
-// one here.
+// (session show/report/cleanup/assert/ask/verity_import, net history, console
+// history) take one here.
 //
 // Registration:
 //   claude mcp add --transport stdio web-scout -- node tools/web-scout/mcp-server.mjs
@@ -34,7 +34,7 @@
 import fs from 'node:fs';
 import readline from 'node:readline';
 import {
-  request, BASE, netHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, collectNotes, ensureFreshRelayForNewSession,
+  request, BASE, netHistory, consoleHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, collectNotes, ensureFreshRelayForNewSession,
   manifestPath, readManifest, writeManifest,
 } from './client.mjs';
 import { describeFailureContext } from './friction.mjs';
@@ -381,13 +381,15 @@ const TOOLS = [
     name: 'webscout_console',
     description: 'Captured console.error/warn + uncaught error entries.\n'
       + 'Actions:\n'
-      + '  log {limit?, level?, contains?, fields?, +shape} - the captured entries; level (error|warn|uncaught|unhandledrejection, comma list ok) and contains filter, fields keeps only those keys per entry (drop stack), limit keeps the N most recent\n'
+      + '  log {limit?, level?, contains?, fields?, +shape} - LIVE in-page ring buffer since last clear, evicted by page noise within minutes; level (error|warn|uncaught|unhandledrejection, comma list ok) and contains filter, fields keeps only those keys per entry (drop stack), limit keeps the N most recent\n'
       + '  wait {substr, timeoutMs?, graceMs?} - attach-and-wait for an entry whose message contains substr, instead of a sleep+poll loop\n'
+      + '  history {sessionId?, contains?, level?, limit?} - the DURABLE, already-persisted console_entries table (defaults to the active session)\n'
       + '  clear {}\n'
-      + 'All take optional `agent` (multi-tab target name).',
+      + 'log/wait/clear take optional `agent` (multi-tab target name); history does not (it queries by sessionId, not by live agent connection).',
     actions: {
       log: (p) => sendCmd('console.log', { limit: numOrUndef(p?.limit), level: p?.level, contains: p?.contains, fields: p?.fields }, p?.agent, readOpts(p)),
       wait: (p) => sendCmd('console.wait', { substr: requireField(p, 'substr'), timeoutMs: numOrUndef(p?.timeoutMs), graceMs: numOrUndef(p?.graceMs) }, p?.agent),
+      history: (p) => consoleHistory({ sessionId: p?.sessionId, contains: p?.contains, level: p?.level, limit: p?.limit }),
       clear: (p) => sendCmd('console.clear', {}, p?.agent),
     },
   },
