@@ -399,6 +399,7 @@ const TOOLS = [
       + '  list {} - id, name, step count, source session per macro\n'
       + '  show {id} - full detail incl. every step\n'
       + '  run {id, continueOnError?, fromStep?, confirm?, full?} - replay against the ACTIVE session (409 if its goal looks unrelated to the macro\'s source session unless confirm:true); full:true returns every step\'s complete result instead of the compact summary\n'
+      + '  update {id, steps} - replace the whole step array (fix/reorder/remove a step without deleting and re-recording)\n'
       + '  delete {id}\n'
       + '  export_verity {id, outPath?} - skeleton Verity scenario JSON from dom.click/dom.wait steps (selectors left as TODO)',
     actions: {
@@ -408,6 +409,7 @@ const TOOLS = [
       run: (p) => request('POST', `/macros/${requireField(p, 'id')}/run`, {
         continueOnError: !!p.continueOnError, confirm: !!p.confirm, full: !!p.full, fromStep: p.fromStep !== undefined ? Number(p.fromStep) : undefined,
       }),
+      update: (p) => request('PUT', `/macros/${requireField(p, 'id')}/steps`, { steps: requireField(p, 'steps') }),
       delete: (p) => request('DELETE', `/macros/${requireField(p, 'id')}`),
       export_verity: async (p) => {
         const macro = await request('GET', `/macros/${requireField(p, 'id')}`);

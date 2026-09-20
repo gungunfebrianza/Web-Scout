@@ -578,6 +578,23 @@ async function handleMacro(sub, rawArgs) {
     printResult(await request('DELETE', `/macros/${id}`));
     return;
   }
+  if (sub === 'update') {
+    // Backs the same PUT /macros/:id/steps the dashboard's step inspector already uses
+    // (reorder/remove a step before replaying) - the CLI had no way to fix a stale macro
+    // step short of delete + re-record from scratch. usage.txt's savings section already
+    // refers to this path as "macro update" (step dedup/templating), so the CLI verb matches.
+    const [id, stepsJson] = rawArgs;
+    if (!id || !stepsJson) throw new Error('macro update requires an id and a JSON array of steps, e.g. macro update 3 \'[{"type":"dom.click","params":{"selector":"#ok"}}]\'');
+    let steps;
+    try {
+      steps = JSON.parse(stepsJson);
+    } catch (err) {
+      throw new Error(`steps is not valid JSON: ${err.message}`);
+    }
+    if (!Array.isArray(steps)) throw new Error('steps must be a JSON array');
+    printResult(await request('PUT', `/macros/${id}/steps`, { steps }));
+    return;
+  }
   if (sub === 'export-verity') {
     let args = rawArgs;
     let outPath;

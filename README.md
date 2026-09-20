@@ -185,7 +185,12 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   known to be flaky is most likely to recur). The
   per-session checks are read from a snapshot frozen at `session start` (from the same
   analytics `analytics` itself reads), never a live per-command analytics call, so they
-  can never go stale mid-session or poison the shared 5s analytics cache
+  can never go stale mid-session or poison the shared 5s analytics cache. `macro update`
+  (also `webscout_macro.update`) fixes a step in place through the same `PUT /macros/:id/steps`
+  the dashboard step inspector already used - previously CLI-only callers had to delete and
+  re-record a macro to fix one wrong step. The dashboard also surfaces `verityLabelsStillFailing`
+  (a Verity label whose most recent import is still FAIL) as its own cross-session panel and
+  each macro's stamped cost/compaction stats as table columns, not only at replay time
 - `crv seed <store> <rows-json>` writes rows (`idb put-many`) and records every
   stored row's real key into a manifest file, so `crv cleanup` can delete exactly
   those ids later (`idb delete-many`, one call per store) without hand-tracking ids
@@ -469,6 +474,9 @@ macro run <id>                # prints an estimated-cost NOTE (from the macro's 
                                # before replaying, no live lookup needed
 macro list                    # id, name, step count, source session, stamped cost
 macro show <id>               # every step
+macro update <id> '<steps-json>'   # replace the whole step array - fix/reorder/remove a step
+                               # without delete + re-record; same endpoint the dashboard step
+                               # inspector uses
 macro delete <id>
 macro export-verity <id> --out ./scenario.json   # skeleton Verity scenario from the click/wait steps
 suite run ./checks/my-suite.json

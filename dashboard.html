@@ -666,6 +666,13 @@
 <div id="wasteBySessionEmpty" class="empty" hidden>No sessions with 5+ calls yet.</div>
 </section>
 
+<section class="hud-section hud-scroll-col" id="verityStillFailingSection">
+<h2>Verity labels still failing</h2>
+<div class="muted">a Verity label whose most recent import is still FAIL, cross-session - was previously only visible if it happened to rank in the top-5 topFrictionItems digest</div>
+<div class="hud-scroll-body" id="verityStillFailingContainer"></div>
+<div id="verityStillFailingEmpty" class="empty" hidden>No Verity label is currently failing.</div>
+</section>
+
 <section class="hud-section" id="burnSection">
   <h2>Token burn, all sessions</h2>
   <div class="muted">cumulative estimated tokens across every session, chronological - a red dot marks a session that finished over its own declared budget</div>
@@ -1043,7 +1050,7 @@
     <button id="recordMacroBtn">Record macro from this session</button>
     <span class="muted">saves this session's own replayable actions (dom/idb/page.reload/eval) as a named, replayable sequence</span>
   </div>
-  <div class="hud-scroll-body"><table id="macrosTable"><thead><tr><th>ID</th><th>Name</th><th>Steps</th><th>Source session</th><th>Created</th><th>Last run</th><th></th></tr></thead><tbody></tbody></table></div>
+  <div class="hud-scroll-body"><table id="macrosTable"><thead><tr><th>ID</th><th>Name</th><th>Steps</th><th title="stamped once at record/update time">Est cost</th><th title="duplicate/templated steps folded out at record time">Compacted</th><th>Source session</th><th>Created</th><th>Last run</th><th></th></tr></thead><tbody></tbody></table></div>
   <div id="macrosEmpty" class="empty" hidden>No macros recorded yet.</div>
   <div id="macroHealthStrip" style="margin-top:8px;"></div>
   </section>
@@ -2686,7 +2693,10 @@ async function refreshMacros() {
     tr.className = 'expandable';
     const lastRunAt = macroLastRun.get(m.id);
     const lastRunText = lastRunAt ? `${fmtUptime(Date.now() - lastRunAt)} ago` : 'n/a';
-    tr.innerHTML = `<td>${m.id}</td><td>${esc(m.name)}</td><td>${m.steps.length}</td><td>${m.source_session_id ?? ''}</td><td>${fmtTime(m.created_at)}</td><td class="muted">${lastRunText}</td><td><button class="runMacroBtn">Run</button> <button class="delMacroBtn">Delete</button></td>`;
+    const estCostText = Number.isFinite(m.steps_cost_est) ? `~${m.steps_cost_est}tok` : 'n/a';
+    const compactedTotal = (m.compacted_steps_removed || 0) + (m.templated_steps_removed || 0);
+    const compactedText = compactedTotal ? `${compactedTotal}` : '-';
+    tr.innerHTML = `<td>${m.id}</td><td>${esc(m.name)}</td><td>${m.steps.length}</td><td class="muted">${estCostText}</td><td class="muted">${compactedText}</td><td>${m.source_session_id ?? ''}</td><td>${fmtTime(m.created_at)}</td><td class="muted">${lastRunText}</td><td><button class="runMacroBtn">Run</button> <button class="delMacroBtn">Delete</button></td>`;
     tr.querySelector('.runMacroBtn').addEventListener('click', async (e) => {
       e.stopPropagation();
       try {
@@ -3790,6 +3800,17 @@ el('wasteBySessionContainer').addEventListener('click', (e) => {
   if (row) openSessionById(Number(row.dataset.sessionId));
 });
 
+function renderVerityStillFailing(a) {
+  const container = el('verityStillFailingContainer');
+  const rows = a.verityLabelsStillFailing || [];
+  if (!rows.length) { container.innerHTML = ''; el('verityStillFailingEmpty').hidden = false; return; }
+  el('verityStillFailingEmpty').hidden = true;
+  container.innerHTML = rows.map((r) => `<div class="duration-bar-row">
+      <div class="duration-bar-label" title="${esc(r.label)}">${esc(r.label)}</div>
+      <div class="duration-bar-value">${r.importCount} import(s), last ${fmtTime(r.lastImportedAt)}</div>
+    </div>`).join('');
+}
+
 function renderCrossSessionCharts(a) {
   renderHeatmap(a);
   renderSelectorGraph(a);
@@ -3798,6 +3819,7 @@ function renderCrossSessionCharts(a) {
   renderWasteBySession(a);
   renderPunchcard(a);
   renderMacroHealth(a);
+  renderVerityStillFailing(a);
 }
 
 let frictionDismissed = false;
@@ -4284,6 +4306,7 @@ const PANELS = {
   savingsSection: { group: 'global', wide: true, label: 'Savings', autoEmpty: true, count: () => { const s = lastSavingsReport?.savings; return s?.ledgers ? { n: s.ledgers.filter((l) => l.countedInTotal).length, text: `~${fmtK(s.byKind?.storage?.estTokensSaved ?? 0)} tok-eq.`, title: 'savings mechanisms counted in the totals (disk bytes avoided, not tokens a caller avoided)' } : null; }, refresh: () => refreshSavings(true), exportRows: () => (lastSavingsReport?.savings?.ledgers ?? []).map((l) => ({ mechanism: l.label, kind: l.kind, counted: l.countedInTotal, bytesSaved: l.bytesSaved, estTokensEquivalent: l.estTokensSaved, reductionPct: l.reductionPct, refsTotal: l.refs?.total ?? null, refsStored: l.refs?.unique ?? null })) },
   durationSection: { group: 'global', label: 'Duration', autoEmpty: true, count: () => (lastAnalyticsData ? { n: lastAnalyticsData.durationByType?.length ?? 0, title: 'action types with timing data' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.durationByType ?? []) },
   wasteBySessionSection: { group: 'global', label: 'Wasteful sessions', autoEmpty: true, failLabel: 'over 30%', count: () => { const w = lastAnalyticsData?.wasteBySession; return w ? { n: w.length, fail: w.filter((r) => r.wastePct > 0.3).length, title: 'sessions ranked by wasted-call share (5+ calls)' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.wasteBySession ?? []) },
+  verityStillFailingSection: { group: 'global', label: 'Verity still failing', autoEmpty: true, failLabel: 'still failing', count: () => { const v = lastAnalyticsData?.verityLabelsStillFailing; return v ? { n: v.length, fail: v.length, title: 'Verity labels whose most recent import is still FAIL' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.verityLabelsStillFailing ?? []) },
   punchcardSection: { group: 'global', label: 'Punchcard', autoEmpty: true, count: () => (lastAnalyticsData ? { n: (lastAnalyticsData.activityPunchcard ?? []).flat().reduce((s, v) => s + v, 0), title: 'sessions started' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => (a.activityPunchcard ?? []).flatMap((hours, day) => hours.map((count, hour) => ({ day: PUNCHCARD_DAY_LABELS[day], hour, count })).filter((r) => r.count))) },
   timelineSection: { group: 'session', label: 'Timeline', autoEmpty: true, pausable: true, count: () => ({ n: timelineTotal(), title: 'events merged from every panel' }), refresh: async () => { renderTimeline(); } },
   actionsSection: { group: 'session', label: 'Actions', autoEmpty: true, failLabel: 'failed', count: () => ({ n: lastActions.length, fail: lastActions.filter((a) => !a.ok).length, title: 'actions recorded' }), refresh: () => refreshActions() },

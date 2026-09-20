@@ -22,7 +22,10 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 // real-browser incident named directly; raised again, same commit, same convention.
 // Measured 17,437 when V39 added session start's ifStaleMin (webscout_session) and named preflight's
 // agents[]/knownIssueMatches in crv_preflight (webscout_idb) - raised to 17450, same commit, same convention.
-const MCP_TOTAL_MAX_BYTES = 17450;
+// Measured 17,561 when the round-7 coherence pass added macro.update (webscout_macro) - the CLI's
+// only way to fix a stale macro step used to be delete + re-record from scratch. Raised to 17580,
+// same commit, same convention.
+const MCP_TOTAL_MAX_BYTES = 17580;
 // Raised to 3550 when V38 added crv_preflight/crv_seed/crv_cleanup to webscout_idb (already the
 // biggest single tool, from crv_run) - same commit-with-the-text convention as above.
 // Raised to 3650 when V39 extended crv_preflight's one-line description (webscout_idb measured 3,606).
