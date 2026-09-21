@@ -1186,3 +1186,52 @@ parse and the `hashchange` listener accept either. A session-scoped panel's head
 run once per session, grouping the SAME `listAllActions()` rows every other Friction Analytics metric
 already scans (no extra query) by `session_id` in JS first. A `WASTE_MIN_CALLS` floor (5) excludes a
 session too small for its wasted-call percentage to mean anything.
+
+## CRV process helpers: seed-template, serve/stop, launch (V40)
+
+Three commands closing real friction from a P4.10 CRV pass, none of them page-dispatched (no
+`inject.js`/`command-registry.mjs` change for `crv serve`/`crv stop`/`crv launch` - `idb
+seed-template` is the one exception, a real `inject.js` read command).
+
+**`idb.seedTemplate`** (`inject.js`) answers a store's real `keyPath`/`autoIncrement`/index
+metadata (always real, from `IDBObjectStore`/`IDBIndex`) plus, when at least one row exists, that
+row's field-name/value-TYPE shape via `shapeOf(value, depth=2)` - never the values themselves.
+Depth 2 is deliberate: it catches a NESTED field's own shape one level down (the real bug this
+closes - a hand-seeded row missed a nested field one level in) without becoming a general schema
+inferencer. `openCursor()` (not `getAll()`) so the example is one real row, in key order, not a
+full-store read.
+
+**`serve-control.mjs` / `static-server.mjs`** give `crv serve <dir> --port <n>` / `crv stop --port
+<n>` the same detached-process-plus-pidfile shape `relay-control.mjs` already uses for the relay
+itself, generalized: one pidfile per port (`webscout-serve-<port>.json` in the OS tmpdir, not one
+shared file, so several worktrees can be served on different ports at once), `process.kill(pid)`
+for the stop (SIGTERM on POSIX, `TerminateProcess` on Windows - the same call that already replaces
+a manual `netstat`+`taskkill` dance for the relay). `static-server.mjs` is a from-scratch
+`node:http` static file server (zero npm dependencies, per this repo's hardest-enforced
+convention) with a `path.relative`-based traversal guard (`resolveSafe`) - not `express`/
+`serve-static`. Its `isMainModule` guard uses the same `pathToFileURL`-based comparison
+`relay.mjs` uses, not a manual pathname-string transform - a first attempt at the latter matched
+nothing on Windows and silently bound no port at all, with no error (see the comment in the file).
+
+**`browser-harness.mjs`'s `buildLaunchUrl`/`launchTab`** back `crv launch <url> --agent <name>
+[--headless|--headed]`. `buildLaunchUrl` is pure (no process spawn, unit-tested directly): it
+merges `webscout=1`, `webscout_name=<agent>` and `webscout_port=<this CLI's own configured
+port>` onto whatever query string `<url>` already has via `URL`/`URLSearchParams` (never
+clobbering an existing param or the hash) - `webscout_port` is always stamped, not only when it
+looks non-default, since `inject.js` defaults to port 8973 when it is absent and a CLI configured
+against a different relay must not silently launch a tab that connects to the wrong one.
+`launchTab` is a lighter, deliberately non-CDP sibling of `launchBrowser` (used by the browser
+test suite): no `Runtime.evaluate` attachment, a profile directory that PERSISTS across relaunches
+(keyed by the URL's own port, under the OS tmpdir) rather than a throwaway one cleaned up at
+teardown, and nothing in it ever closes the tab - `launchBrowser`'s tests own their tab's whole
+lifecycle including teardown, `crv launch`'s tab is the operator's for the rest of the CRV
+session. `crv launch` requires `--agent` (not optional): two tabs sharing the relay's `default`
+slot is the exact tab-collision incident V38's `tabCollision` guard exists to catch, and a
+convenience launcher must not reintroduce that failure mode by omission.
+
+**Tests don't spawn a real browser to prove the launch itself** - `crv-launch.test.mjs` unit-tests
+`buildLaunchUrl`'s merge/stamp behavior and the CLI's `--agent`/URL validation without a browser,
+and gates the one true end-to-end case (open a real tab, confirm the relay sees it connect) behind
+the same `browserSkip()` every other connected-tab test in this repo already uses - a fake "the tab
+connected" would prove nothing about the one thing this command exists to get right (the query
+params a real tab actually needs).

@@ -289,6 +289,7 @@ const TOOLS = [
     name: 'webscout_idb',
     description: 'IndexedDB read/write plus persisted snapshot/diff/verify/restore, against the active session\'s tab. Every action takes optional agent.\n'
       + 'Actions:\n'
+      + '  seed_template {store} - keyPath/indexes + a row\'s field-name/type shape, no values\n'
       + '  list {stores?, nonEmpty?, +shape} - store names + cheap row counts (not a dump) - check before an unscoped snapshot; stores: only those (unknown ones come back as missing), nonEmpty: skip empty stores\n'
       + '  dump {store, where?, fields?, limit?, countOnly?, +shape} - rows + real keyPath. where (exact-equality map), fields, limit filter IN THE PAGE - use on any large store; countOnly: counts, no rows\n'
       + '  get {store, key, fields?, +shape} - single-key lookup (store.get), not a scan; fields: keep only those keys\n'
@@ -310,6 +311,7 @@ const TOOLS = [
       + '  wait {store, countGte?, timeoutMs?} - poll the row count until >= countGte or timeout (default 10000)\n'
       + '(No watch action: use wait for a bounded check.)',
     actions: {
+      seed_template: (p) => sendCmd('idb.seedTemplate', { store: requireField(p, 'store') }, p?.agent),
       list: (p) => sendCmd('idb.list', { stores: p?.stores, nonEmpty: p?.nonEmpty || undefined }, p?.agent, readOpts(p)),
       dump: (p) => sendCmd('idb.dump', { store: requireField(p, 'store'), where: p?.where, fields: p?.fields, limit: numOrUndef(p?.limit), countOnly: p?.countOnly || undefined }, p?.agent, readOpts(p)),
       get: (p) => sendCmd('idb.get', { store: requireField(p, 'store'), key: requireField(p, 'key'), fields: p?.fields }, p?.agent, readOpts(p)),

@@ -755,7 +755,7 @@ async function verifyAfterTimeout(type, params, agentName) {
   return { attempted: false, reason: `no verification strategy for type '${type}'` };
 }
 
-async function dispatchTracked(session, type, params, agentName, dispatchTimeoutMs) {
+async function dispatchTracked(session, type, params, agentName, dispatchTimeoutMs, autoRemediate = false) {
   try {
     return await withLoggedAction(session.id, type, params ?? {}, () => dispatchCommand(type, params ?? {}, dispatchTimeoutMs, agentName), agentName);
   } catch (err) {
@@ -785,6 +785,25 @@ async function dispatchTracked(session, type, params, agentName, dispatchTimeout
       const emergentNow = liveEmergentFriction(session.id, type, facts);
       if (emergentNow.length) err.extra = { ...err.extra, emergentFriction: emergentNow };
     } catch { /* best-effort */ }
+    queueFrictionBroadcast(session, agentName, type, params, known);
+    // Opt-in (--auto-remediate) one-shot retry of the matched issue's own structured alternate
+    // action. The ORIGINAL failure is still rethrown either way - a retry that succeeds is
+    // reported next to it (extra.remediationAttempt), never silently substituted for it, so the
+    // caller decides whether the run counts as recovered. Logged as its own action (via:
+    // 'auto-remediate') like the auto-screenshot below, so the session trail shows it happened.
+    // Never retried for a timeout (the page may still be mid-command - a second dispatch on top
+    // would race it), and never recursive: the retry goes through dispatchCommand directly.
+    if (autoRemediate && known?.retry && !(err instanceof HttpError && err.status === 504)) {
+      const { type: retryType, params: retryParams } = known.retry;
+      try {
+        const { result: retryResult } = await withLoggedAction(session.id, retryType, { ...retryParams, via: 'auto-remediate', for: type, knownIssueId: known.id }, () => dispatchCommand(retryType, retryParams, LONG_POLL_TYPES.has(retryType) ? (Number(retryParams?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS, agentName), agentName);
+        if (MUTATING_TYPES.has(retryType)) bumpMutationCounter(session.id);
+        err.extra = { ...err.extra, remediationAttempt: { knownIssueId: known.id, type: retryType, params: retryParams, ok: true, result: retryResult } };
+      } catch (retryErr) {
+        err.extra = { ...err.extra, remediationAttempt: { knownIssueId: known.id, type: retryType, params: retryParams, ok: false, error: retryErr.message } };
+      }
+      broadcastUpdate('action', session.id);
+    }
     if (AUTO_SCREENSHOT_ON_FAILURE_TYPES.has(type) && params?.selector) {
       // Logged as its own action EITHER way (success or failure) - a
       // silent swallow on failure would hide exactly the case confirmed
@@ -1071,6 +1090,145 @@ function liveEmergentFriction(sessionId, type, facts) {
   return lines;
 }
 
+// ---------- Pre-run macro risk preview ----------
+//
+// riskySelectorWarningText above fires PER STEP, as each one is about to dispatch - an agent
+// running a 10-step macro only learns step 7 is about to hit a selector with a 12x fail history
+// right as step 7 starts, after steps 1-6 already ran. This scans every step against the SAME
+// frozen per-session snapshot up front, so the whole risk shape of a macro is visible before any
+// step runs (worst offender first) rather than trickling in one warning at a time. Purely
+// additive: never changes which steps run or in what order, and empty (field omitted from the
+// reply, per the macro-run handler below) for a macro with no risky steps - a clean macro stays
+// exactly as quiet as it is today.
+function buildMacroRiskPreview(sessionId, steps, stepOffset, agentName) {
+  const preview = [];
+  steps.forEach((step, i) => {
+    let facts = null;
+    try { facts = frictionFactsFor(sessionId, step.type, step.params ?? {}, agentName); } catch { /* one unreadable step must not hide the rest */ }
+    const e = facts?.entry;
+    if (!facts || !e) return;
+    const { assessment } = friction.evaluateSelectorRisk({ type: step.type, selector: facts.target.value, targetKind: facts.target.kind, entry: e, live: facts.live, state: null, origin: facts.origin });
+    if (!assessment) return;
+    preview.push({
+      stepIndex: i + stepOffset, type: step.type, selector: facts.target.value, failCount: e.failCount, sessionCount: e.sessionCount,
+      lastFailedAt: e.lastFailedAt, knownIssue: e.knownIssues?.[0] ?? null,
+    });
+  });
+  preview.sort((x, y) => y.failCount - x.failCount);
+  return preview;
+}
+
+// ---------- Friction-aware macro authoring ----------
+//
+// "macro record" bakes in whatever selector each step literally used, including one with a
+// 12x failure history - the very selector the risky-selector warning would fire on at every
+// replay. This checks a recorded step's fragile selector against the session's OWN evidence
+// for a different selector that reached the SAME element. The only identity signal web-scout
+// really has is dom.query's reply: it carries the element's tag and id, and an id is unique
+// within a document - so two successful dom.query results with the same tag + non-null id but
+// different queried selectors are the same element, reached two ways. dom.click/fill results
+// carry no element identity, and text/position similarity would be a guess, so neither is used:
+// no id-bearing query evidence means no suggestion. SUGGESTION ONLY - the recorded steps are
+// never rewritten here; the caller swaps one deliberately via "macro update". An alternative
+// must itself be non-risky (same type, per the same analytics threshold), or it is no upgrade.
+function buildMacroSelectorSuggestions(sessionId, steps, actions) {
+  try {
+    // The same ranked list the pre-action warning is built from: a selector is "risky" when it has at least
+    // RISKY_SELECTOR_FAIL_THRESHOLD unresolved failures. Keyed by type + selector as the lookups below expect.
+    const risky = new Map(getAnalytics().selectorFriction
+      .filter((f) => f.targetKind === 'selector' && friction.historyForOrigin(f, null).unresolved >= friction.RISKY_SELECTOR_FAIL_THRESHOLD)
+      .map((f) => [f.key, f]));
+    if (!risky.size) return [];
+    const selectorsByElement = new Map(); // "TAG#id" -> Set<selector>
+    for (const a of actions) {
+      if (!a.ok || a.type !== 'dom.query' || typeof a.params?.selector !== 'string') continue;
+      const r = a.result;
+      if (!r || r.found !== true || typeof r.tag !== 'string' || typeof r.id !== 'string' || !r.id) continue;
+      const key = `${r.tag}#${r.id}`;
+      if (!selectorsByElement.has(key)) selectorsByElement.set(key, new Set());
+      selectorsByElement.get(key).add(a.params.selector);
+    }
+    if (!selectorsByElement.size) return [];
+    const suggestions = [];
+    steps.forEach((step, stepIndex) => {
+      const selector = step.params?.selector;
+      const hit = typeof selector === 'string' ? risky.get(friction.frictionKeyFor(step.type, { selector })) : null;
+      if (!hit) return;
+      for (const [element, selectors] of selectorsByElement) {
+        if (!selectors.has(selector)) continue;
+        const alternatives = [...selectors].filter((s) => s !== selector && !risky.has(friction.frictionKeyFor(step.type, { selector: s }))).sort((a, b) => a.length - b.length);
+        if (!alternatives.length) continue;
+        suggestions.push({
+          stepIndex, type: step.type, selector, failCount: hit.failCount, sessionCount: hit.sessionCount,
+          alternative: alternatives[0], element,
+          evidence: `dom.query on "${selector}" and on "${alternatives[0]}" both returned ${element} in this session`,
+        });
+        return;
+      }
+    });
+    return suggestions;
+  } catch { return []; /* best-effort - a suggestion bug must never fail the macro recording itself */ }
+}
+
+// ---------- Live cross-agent friction broadcast ----------
+//
+// Two agents (two tabs named via webscout_name, each driven by its own CLI/MCP caller) share ONE
+// relay and ONE active session, but a failure one of them hits only ever reached the other via
+// a later "analytics" call - by which point it had usually hit the same wall itself. There is
+// no push channel to a CLI/MCP caller (they are request/response), so this reuses the one
+// delivery convention every other nudge here already uses: queue a notice per OTHER connected
+// agent and drain it into an x-webscout-friction-broadcast header on that agent's NEXT /command
+// reply - never blocks or interrupts anything in flight, never touches a result body. The
+// dashboard's existing SSE channel gets the same event ('friction') for free via broadcastUpdate.
+// Fires only on the two signals that already mean something elsewhere: a failure carrying an
+// inline knownIssue, or a selector's failure count in THIS session reaching the same 3-fail
+// risky threshold the cross-session warning uses (exactly at the crossing, not every failure
+// after it). Per-agent queue is capped and keyed by session so it can never outlive one.
+const pendingFrictionNotices = new Map(); // `${sessionId}::${agentName}` -> [{ fromAgent, type, selector, failCount, knownIssue, reason }]
+const FRICTION_NOTICE_CAP = 5;
+
+function queueFrictionBroadcast(session, fromAgent, type, params, known) {
+  try {
+    // A remediation retry is dispatched by the relay on the failing agent's behalf - its own
+    // failure is already reported on that reply, not news for the other agent.
+    if (params?.via === 'auto-remediate') return;
+    const selector = typeof params?.selector === 'string' && params.selector ? params.selector : null;
+    let failCount = null;
+    let crossed = false;
+    if (selector) {
+      failCount = dbApi.listActions(session.id).filter((a) => !a.ok && a.type === type && a.params?.selector === selector).length;
+      crossed = failCount === friction.RISKY_SELECTOR_FAIL_THRESHOLD;
+    }
+    if (!known && !crossed) return;
+    const notice = { fromAgent, type, selector, failCount, knownIssue: known ?? null, reason: known ? 'known-issue' : 'repeated-failure' };
+    for (const other of connectedAgentNames()) {
+      if (other === fromAgent) continue;
+      const key = `${session.id}::${other}`;
+      const queue = pendingFrictionNotices.get(key) ?? [];
+      queue.push(notice);
+      pendingFrictionNotices.set(key, queue.slice(-FRICTION_NOTICE_CAP));
+    }
+    broadcastUpdate('friction', session.id, notice);
+  } catch { /* best-effort - a broadcast bug must never change the failing command's own error */ }
+}
+
+function frictionNoticeText(n) {
+  const target = n.selector ? ` on "${n.selector}"` : '';
+  const known = n.knownIssue ? ` - known issue: ${n.knownIssue.id}${n.knownIssue.remediation ? ` (${n.knownIssue.remediation})` : ''}` : '';
+  const count = n.failCount ? ` (${n.failCount}x this session)` : '';
+  return `agent "${n.fromAgent}" just failed ${n.type}${target}${count}${known}`;
+}
+
+function maybeFrictionBroadcastNotice(sessionId, agentName, res) {
+  try {
+    const key = `${sessionId}::${agentName}`;
+    const queue = pendingFrictionNotices.get(key);
+    if (!queue?.length) return;
+    pendingFrictionNotices.delete(key);
+    res.setHeader('x-webscout-friction-broadcast', `${queue.map(frictionNoticeText).join('; ')} - check before repeating it.`.replace(/[\r\n]+/g, ' '));
+  } catch { /* best-effort - never block a command reply on this */ }
+}
+
 // ---------- Proactive macro-match nudge ----------
 //
 // A macro that was recorded but never replayed (or a proven one that simply was not reused) was
@@ -1135,6 +1293,9 @@ function dropSessionMemory(sessionId) {
   frictionTracker.dropSession(sessionId);
   frictionHydrated.delete(sessionId);
   try { dbApi.clearFrictionSessionState(sessionId); } catch { /* best-effort */ }
+  for (const key of pendingFrictionNotices.keys()) {
+    if (key.startsWith(`${sessionId}::`)) pendingFrictionNotices.delete(key);
+  }
   readPipeline.endSession(sessionId);
   lastReportedSessionTokens.delete(sessionId);
 }
@@ -1182,7 +1343,23 @@ function loadKnownIssues() {
       return;
     }
     try {
-      issues.push({ id: entry.id, description: entry.description ?? null, remediation: entry.remediation ?? null, matches: compileSignature(entry.signature) });
+      // `remediation` stays a plain string everywhere it is printed/returned (backward compatible
+      // with every existing entry). It MAY instead be { text, retry: { type, params } } - `text` is
+      // then what every existing surface shows, and `retry` (same {type, params} shape /command
+      // takes) is what --auto-remediate re-dispatches once. A malformed retry drops the retry
+      // only, never the entry: the text hint is still worth having.
+      let remediation = entry.remediation ?? null;
+      let retry = null;
+      if (remediation && typeof remediation === 'object') {
+        const r = remediation.retry;
+        if (r && typeof r.type === 'string' && r.type && r.type !== 'idb.snapshot' && (r.params === undefined || (r.params && typeof r.params === 'object' && !Array.isArray(r.params)))) {
+          retry = { type: r.type, params: r.params ?? {} };
+        } else if (r !== undefined) {
+          warnings.push(`entry ${i} (${entry.id}): remediation.retry ignored - needs { type: <command type, not idb.snapshot>, params?: object }`);
+        }
+        remediation = typeof remediation.text === 'string' ? remediation.text : null;
+      }
+      issues.push({ id: entry.id, description: entry.description ?? null, remediation, retry, matches: compileSignature(entry.signature) });
     } catch (err) {
       warnings.push(`entry ${i} (${entry.id}) skipped: bad signature regex: ${err.message}`);
     }
@@ -1228,7 +1405,9 @@ function matchKnownIssueForError(errorText) {
   try { loaded = loadKnownIssues(); } catch (err) { return { match: null, checkError: err.message }; }
   if (!loaded?.issues.length) return { match: null, checkError: null };
   const hit = loaded.issues.find((issue) => issue.matches(errorText));
-  return { match: hit ? { id: hit.id, description: hit.description, remediation: hit.remediation } : null, checkError: null };
+  // `retry` rides along only when the entry declared one, so a text-only entry's match keeps
+  // exactly the shape every existing consumer/test already sees.
+  return { match: hit ? { id: hit.id, description: hit.description, remediation: hit.remediation, ...(hit.retry ? { retry: hit.retry } : {}) } : null, checkError: null };
 }
 
 // Round-9 gap: matchKnownIssueForError above decorates a failed ACTION's error inline
@@ -2870,7 +3049,8 @@ const routes = [
       }
       const macro = dbApi.updateMacroSteps(Number(m[1]), body.steps);
       broadcastUpdate('macro', null);
-      return macro;
+      const selectorSuggestions = buildMacroSelectorSuggestions(Number(body.sessionId), steps, actions);
+      return selectorSuggestions.length ? { ...macro, selectorSuggestions } : macro;
     },
   },
   {
@@ -2962,6 +3142,8 @@ const routes = [
 
       const results = [];
       const frictionWarnings = [];
+      // The whole macro's risk shape up front, worst first - before any step runs.
+      const riskPreview = buildMacroRiskPreview(session.id, macro.steps.slice(fromStep), fromStep, agentName);
       for (const step of macro.steps.slice(fromStep)) {
         if (await isNoOpPut(step)) {
           results.push({ type: step.type, ok: true, skipped: true, reason: 'idb.put: identical row already present' });
@@ -3046,6 +3228,7 @@ const routes = [
         skippedCount,
         results: compactResults,
         ...(frictionWarnings.length ? { frictionWarnings } : {}),
+        ...(riskPreview.length ? { riskPreview } : {}),
         ...(priorNeverSucceeding
           ? { warning: `macro "${macro.name}" (#${macro.id}) has run ${priorNeverSucceeding.attemptedSteps} step(s) before this and never once succeeded - check "macro inspect ${macro.id}" or the dashboard's macro health strip before relying on it again.` }
           : {}),
@@ -3148,6 +3331,7 @@ const routes = [
       let resultOut;
       let freshActionId;
       // idb.put/idb.putMany --dry-run write nothing (readonly transaction,
+      maybeFrictionBroadcastNotice(session.id, agentName, res);
       // no .put() call in inject.js) - wrapping either in a before/after
       // auto-snapshot+diff pair would pay real snapshot cost to prove a
       // diff that can never be anything but empty.
@@ -3161,7 +3345,7 @@ const routes = [
         const before = await withLoggedAction(session.id, 'idb.snapshot', { auto: true, phase: 'before', for: type, stores: autoStores }, () => dispatchCommand('idb.snapshot', { stores: autoStores }, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
         const beforeSnap = dbApi.saveSnapshot({ sessionId: session.id, actionId: before.actionId, stores: before.result.stores, agentName });
 
-        const triggering = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
+        const triggering = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs, !!body.autoRemediate);
 
         const after = await withLoggedAction(session.id, 'idb.snapshot', { auto: true, phase: 'after', for: type, triggered_by_action_id: triggering.actionId, stores: autoStores }, () => dispatchCommand('idb.snapshot', { stores: autoStores }, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
         const afterSnap = dbApi.saveSnapshot({ sessionId: session.id, actionId: after.actionId, stores: after.result.stores, agentName });
@@ -3196,12 +3380,12 @@ const routes = [
         let outcome;
         let ranParams = params;
         try {
-          outcome = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
+          outcome = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs, !!body.autoRemediate);
         } catch (err) {
           const retry = body.tryRecovery === true || (body.tryRecovery !== false && session.auto_recover) ? recoveryRetryFor(session.id, type, params, agentName, err) : null;
           if (!retry) throw err;
           // If the alternative fails too, its own error (with its own friction context) is what the caller gets.
-          outcome = await dispatchTracked(session, type, retry.params, agentName, dispatchTimeoutMs);
+          outcome = await dispatchTracked(session, type, retry.params, agentName, dispatchTimeoutMs, !!body.autoRemediate);
           ranParams = retry.params;
           res.setHeader('x-webscout-recovered', `"${params.selector}" (${type}) failed; ran "${retry.recovery.selector}" instead (it worked ${retry.recovery.worked} of ${retry.recovery.of} times after this failure)`.replace(/[^\x20-\x7e]/g, '?'));
         }

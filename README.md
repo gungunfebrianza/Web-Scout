@@ -211,10 +211,39 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   `verity show` (also `webscout_session.verity_history`/`verity_show`) close the same
   durable-history gap for imported Verity runs that `console history` closed for console - `verity
   import` was write-only before
+- Friction awareness acts, not only reports: `macro run` prints a `RISK PREVIEW` (riskiest step
+  first, silent for a macro with no history) before any step runs; a `known-issues.json`
+  `remediation` may be `{ text, retry: { type, params } }` and `--auto-remediate` on `dom click`/
+  `dom fill`/`dom click-wait` re-dispatches that retry once (the original failure still exits 1,
+  the attempt's outcome rides beside it as `remediationAttempt`; CLI-only - MCP callers get
+  `knownIssue.retry` and dispatch it themselves); a failure that matches a known issue, or a
+  selector's 3rd failure in a session, queues a note for every OTHER connected agent, delivered
+  on its next command via the `x-webscout-friction-broadcast` header (CLI/client library only -
+  the MCP server does not read it); and `macro record` returns `selectorSuggestions` (CLI prints
+  `SUGGESTION:`) when two `dom.query` results in the session show the same tag+id for a risky
+  recorded selector and a stable one - a suggestion only, the recorded step is never rewritten.
+  Sharing one friction history across checkouts/worktrees needs no new code: point every
+  relay at the same file with `WEBSCOUT_DB_PATH` (see CONTRIBUTING.md)
 - `crv seed <store> <rows-json>` writes rows (`idb put-many`) and records every
   stored row's real key into a manifest file, so `crv cleanup` can delete exactly
   those ids later (`idb delete-many`, one call per store) without hand-tracking ids
   across a session's separate `idb put` calls
+- `idb seed-template <store>` answers real store metadata (keyPath, autoIncrement,
+  indexes) plus one real row's field-name/value-TYPE shape (never its values, and
+  never a full dump) - checked before hand-writing a seed row instead of after a
+  guessed nested field turns out wrong (confirmed real: a hand-seeded CRV row missed
+  a nested `authorized_scope.dimensions` field this way)
+- `crv serve <dir> --port <n>` / `crv stop --port <n>` spawn and stop a throwaway
+  static file server for a CRV worktree/checkout, tracked by a local pidfile -
+  replaces `python -m http.server` (an extra runtime dependency) plus the manual
+  `netstat`+`taskkill` dance to stop it (`pkill` silently does nothing against a
+  native Windows process), using the same cross-platform kill `relay start`/`relay
+  stop` already use
+- `crv launch <url> --agent <name> [--headless|--headed]` opens a real browser tab
+  at `<url>` with `?webscout=1&webscout_name=<name>` appended and polls the relay
+  up to 15s for that agent to connect - replaces navigating by hand and typing the
+  query params from memory. `--agent` is required: two tabs sharing the relay's
+  `default` slot is exactly the tab-collision incident this command exists to avoid
 - `session start` pins itself to its own agent's current origin: a later dom/idb/eval
   call is refused if that SAME agent name is now connected from a DIFFERENT origin
   (confirmed real: an agent name silently served two different origins/databases
@@ -407,6 +436,9 @@ dom query --selector-file ./selector.txt   # reads the selector from a file - si
 
 **IndexedDB**
 ```bash
+idb seed-template my_store    # real keyPath/indexes + one real row's field-name/type shape (never
+                               # its values) - check before hand-writing a seed row, not after a
+                               # guessed nested field turns out wrong
 idb list                      # store names + a cheap per-store row count (check before an
                                # unscoped snapshot on a store you suspect is large)
 idb dump my_store

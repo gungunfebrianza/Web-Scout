@@ -243,6 +243,10 @@ export async function request(method, pathName, body, { autostart = true } = {})
   // --try-recovery ran a different selector than the one asked for: the caller must know which one acted.
   const recovered = res.headers.get('x-webscout-recovered');
   if (recovered) emitNote(`recovered: ${recovered}`);
+  // Another connected agent just hit a known issue / repeated failure (relay.mjs's
+  // queueFrictionBroadcast) - informational only, same header-not-body convention.
+  const frictionBroadcast = res.headers.get('x-webscout-friction-broadcast');
+  if (frictionBroadcast) emitNote(frictionBroadcast);
   // The relay process is running OLDER code than what is on disk (an edit to
   // relay.mjs/db.mjs/... is invisible to it until restart) - once per process
   // is enough for a long-lived caller; the warnCacheDue check below is what

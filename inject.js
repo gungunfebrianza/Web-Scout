@@ -385,6 +385,17 @@
   const isFieldList = (v) => Array.isArray(v) && v.length > 0;
   // "a.b.0" walked through nested objects/arrays; undefined when any step is missing.
   const valueAtPath = (root, dotted) => dotted.split('.').reduce((cur, k) => (cur === null || cur === undefined ? undefined : cur[k]), root);
+  // Field-name + type "shape" of a real row for idb.seedTemplate - never the values
+  // themselves (this is a template, not a data dump). Depth 2 is deliberate: it catches a
+  // NESTED field's own shape one level down, which is the real bug this closes (a hand-
+  // seeded CRV row that missed a nested `authorized_scope.dimensions` field, confirmed
+  // live) - without becoming a full recursive schema inferencer nobody asked for.
+  function shapeOf(value, depth = 2) {
+    if (value === null || value === undefined) return typeof value;
+    if (Array.isArray(value)) return value.length === 0 ? 'array(empty)' : (depth > 0 ? [shapeOf(value[0], depth - 1)] : `array(${typeof value[0]})`);
+    if (typeof value === 'object') return depth <= 0 ? 'object' : Object.fromEntries(Object.entries(value).map(([k, v]) => [k, shapeOf(v, depth - 1)]));
+    return typeof value;
+  }
 
   function previewOf(el, i) {
     const cls = el.className ? `.${String(el.className).trim().split(/\s+/).join('.')}` : '';
@@ -680,6 +691,41 @@
     // diagnostic paid its own full ~15-20s timeout in serial.
     ping: () => ({ pong: Date.now() }),
     'page.epoch': () => ({ epoch: pageEpoch }),
+    // Answers "what does a row in this store actually look like" BEFORE hand-seeding one -
+    // a real CRV pass hit two seeding bugs from guessing wrong (a missing nested field, a
+    // stale sibling field left over from an earlier edit) purely from typing a row shape
+    // from memory. keyPath/indexes are always-real store metadata; `shape` (when the store
+    // has at least one row) is one real row's field names + value types via shapeOf() -
+    // never the values themselves, so this stays a template, not a dump.
+    'idb.seedTemplate': async ({ store } = {}) => {
+      const db = await openDb();
+      if (!db.objectStoreNames.contains(store)) {
+        db.close();
+        throw new Error(`no such store: ${store}`);
+      }
+      const tx = db.transaction(store, 'readonly');
+      const os = tx.objectStore(store);
+      const keyPath = os.keyPath;
+      const autoIncrement = os.autoIncrement;
+      const indexes = [...os.indexNames].map((name) => {
+        const idx = os.index(name);
+        return { name, keyPath: idx.keyPath, unique: idx.unique, multiEntry: idx.multiEntry };
+      });
+      const countReq = os.count();
+      const cursorReq = os.openCursor();
+      const [rowCount, exampleRow] = await Promise.all([
+        new Promise((resolve, reject) => { countReq.onsuccess = () => resolve(countReq.result); countReq.onerror = () => reject(countReq.error); }),
+        new Promise((resolve, reject) => { cursorReq.onsuccess = () => resolve(cursorReq.result ? cursorReq.result.value : null); cursorReq.onerror = () => reject(cursorReq.error); }),
+      ]);
+      db.close();
+      return {
+        store, keyPath, autoIncrement, indexes, rowCount,
+        shape: exampleRow ? shapeOf(exampleRow) : null,
+        note: rowCount === 0
+          ? 'store is empty - only keyPath/indexes are real structure here, no example row to shape'
+          : 'shape is field names + value TYPES from one real row, not a data dump - no values included',
+      };
+    },
     // Biased, not hard-scoped, toward the same "prefer a rendered match"
     // rule as dom.click/dom.fill: `querySelector`'s own first-DOM-order
     // match can easily be a hidden tab/page's element (same cross-page id

@@ -24,6 +24,8 @@ import { sweepStale, formatSweep, scratchStats } from './scratch.mjs';
 // Above this many dirs a real (non-dry-run) cleanup needs --confirm: it shows the dry-run first.
 const SCRATCH_CONFIRM_ABOVE = 200;
 const SCRATCH_WARN_AT = 20;
+import { startStaticServer, stopStaticServer } from './serve-control.mjs';
+import { launchTab, buildLaunchUrl } from './browser-harness.mjs';
 import { rankAutoTraces } from './trace.mjs';
 
 // Set once near the top of main() from a `--agent <name>` flag found
@@ -41,8 +43,13 @@ let shapeOpts;
 let prettyFlag = false;
 const wantPretty = () => prettyFlag || process.env.WEBSCOUT_PRETTY === '1' || (process.stdout.isTTY === true && process.env.WEBSCOUT_COMPACT !== '1');
 
+// --auto-remediate (dom click/fill/click-wait only, see cli-spec.mjs): re-dispatch the matched
+// known issue's structured `retry` once when the action fails. Sent only when set so every
+// other command's request body is byte-identical to before.
+let autoRemediateFlag = false;
+
 function send(type, params) {
-  return request('POST', '/command', { type, params, agent: agentFlag, opts: shapeOpts, ...(ackRiskFlag ? { ackRisk: true } : {}), ...(tryRecoveryFlag ? { tryRecovery: true } : {}) });
+  return request('POST', '/command', { type, params, agent: agentFlag, opts: shapeOpts, ...(ackRiskFlag ? { ackRisk: true } : {}), ...(tryRecoveryFlag ? { tryRecovery: true } : {}), ...(autoRemediateFlag ? { autoRemediate: true } : {}) });
 }
 
 // chars/4 - same rough estimate as db.mjs's getActionCostReport, applied
@@ -539,7 +546,13 @@ async function handleMacro(sub, rawArgs) {
     ({ args, value: all } = extractBooleanFlag(args, '--all'));
     const [name, sessionId] = args;
     if (!name || !sessionId) throw new Error('macro record requires "<name>" <sessionId>');
-    printResult(await request('POST', '/macros', { name, sessionId: Number(sessionId), all }));
+    const recorded = await request('POST', '/macros', { name, sessionId: Number(sessionId), all });
+    // Suggestion only (relay.mjs's buildMacroSelectorSuggestions) - the recorded steps are
+    // untouched; printed on stderr, before the result, so it reads as a note about the macro.
+    for (const s of recorded.selectorSuggestions ?? []) {
+      console.error(`SUGGESTION: step ${s.stepIndex} used ${s.type} selector "${s.selector}" (failed ${s.failCount}x historically); a more stable alternative was seen this session: "${s.alternative}" (${s.evidence}) - consider "macro show ${recorded.id}" then "macro update ${recorded.id} '<steps-json>'" to swap it.`);
+    }
+    printResult(recorded);
     return;
   }
   if (sub === 'list') {
@@ -576,6 +589,16 @@ async function handleMacro(sub, rawArgs) {
       console.error(`NOTE: estimated cost of this replay ~${estTokens} tokens across ${macro.steps.length} step(s)${compactNote} (historical per-type averages - see "token-report").`);
     } catch { /* best-effort estimate only, never block the run */ }
     const result = await request('POST', `/macros/${id}/run`, { continueOnError, confirm, full, fromStep: fromStep !== undefined ? Number(fromStep) : undefined });
+    // riskPreview is the whole macro's risk shape, computed BEFORE any step ran (riskiest
+    // first) - printed ahead of printResult's per-step output so it reads as a preview, not
+    // a recap of what just happened. Omitted server-side entirely for a macro with no risky
+    // steps, so a clean macro prints nothing extra here.
+    if (result.riskPreview?.length) {
+      console.error(`RISK PREVIEW: ${result.riskPreview.length} of this macro's step(s) have prior failure history, riskiest first:`);
+      for (const p of result.riskPreview) {
+        console.error(`  step ${p.stepIndex}: ${p.type} "${p.selector}" failed ${p.failCount}x before across ${p.sessionCount} session(s), last at ${p.lastFailedAt}${p.knownIssue ? ` - known issue: ${p.knownIssue.id}${p.knownIssue.remediation ? ` (${p.knownIssue.remediation})` : ''}` : ''}`);
+      }
+    }
     if (result.warning) {
       console.error(`WARNING: ${result.warning}`);
     }
@@ -1057,6 +1080,7 @@ async function main() {
   // `--try-recovery`: if a click/fill/wait fails and one alternative selector has repeatedly been what
   // worked after that failure, run it once (relay.mjs's recoveryRetryFor). The reply header says what ran.
   ({ args, value: tryRecoveryFlag } = extractBooleanFlag(args, '--try-recovery'));
+  ({ args, value: autoRemediateFlag } = extractBooleanFlag(args, '--auto-remediate'));
   {
     const shape = {};
     for (const [flag, key] of [['--table', 'table'], ['--if-changed', 'ifChanged'], ['--delta', 'delta'], ['--peek', 'peek'], ['--no-guard', 'noGuard']]) {
@@ -1155,6 +1179,14 @@ async function main() {
   // separate CLI invocations - see the crv.seed/crv.cleanup entries below.
   let manifestValue;
   ({ args, value: manifestValue } = extractFlag(args, '--manifest'));
+  // "crv serve"/"crv stop": the port a throwaway static server for a CRV worktree runs on.
+  // "crv launch": the same port a browser tab should register the connecting agent under.
+  let portValue;
+  let headlessValue;
+  let headedValue;
+  ({ args, value: portValue } = extractFlag(args, '--port'));
+  ({ args, value: headlessValue } = extractBooleanFlag(args, '--headless'));
+  ({ args, value: headedValue } = extractBooleanFlag(args, '--headed'));
 
   if (command === 'page' && args[0] === 'reload') {
     let a = args.slice(1);
@@ -1309,6 +1341,7 @@ async function main() {
       tree: () => send('react.tree', { selector: domSelector, nth: nthValue !== undefined ? Number(nthValue) : undefined, maxDepth: subArgs[1] !== undefined ? Number(subArgs[1]) : undefined }),
     },
     idb: {
+      'seed-template': () => send('idb.seedTemplate', { store: subArgs[0] }),
       list: () => send('idb.list', { stores: csv(storesValue), nonEmpty: nonEmptyValue || undefined }),
       // where/fields/limit are now filtered/projected IN-PAGE (inject.js) -
       // this dispatches them as params instead of re-filtering a full dump
@@ -1462,6 +1495,51 @@ async function main() {
         try { fs.unlinkSync(file); } catch { /* already gone, or never written - either way nothing left to clean */ }
         return { cleaned, manifest: file };
       },
+      // Replaces `python -m http.server` (an extra runtime dependency this Node-only tool
+      // otherwise never needs) for serving a throwaway worktree/checkout during CRV, and the
+      // netstat+taskkill dance to stop it afterward (pkill silently does nothing against a
+      // Windows-native process - the exact same problem "relay start/stop" already solved for
+      // the relay itself, generalized here). Detached: outlives this CLI process.
+      serve: async () => {
+        if (!subArgs[0]) throw new Error('crv serve requires a directory, e.g. "crv serve . --port 9100"');
+        if (!portValue) throw new Error('crv serve requires --port <n>');
+        const result = await startStaticServer({ dir: subArgs[0], port: Number(portValue) });
+        if (!result.started) process.exitCode = 1;
+        return result;
+      },
+      stop: async () => {
+        if (!portValue) throw new Error('crv stop requires --port <n>');
+        const result = await stopStaticServer({ port: Number(portValue) });
+        if (!result.stopped) process.exitCode = 1;
+        return result;
+      },
+      // One-shot replacement for the single most repetitive step of every CRV pass: navigate a
+      // tab to the target URL with ?webscout=1&webscout_name=<agent> appended (merged onto any
+      // query string the URL already has, never clobbering it), then wait for the relay to
+      // report that agent actually connected - instead of opening a tab by hand, typing the
+      // query params from memory, and switching back to check "status" until it shows up.
+      launch: async () => {
+        const target = subArgs[0];
+        if (!target) throw new Error('crv launch requires a URL, e.g. "crv launch http://127.0.0.1:9100/#capital-flow --agent p410"');
+        if (!agentFlag) throw new Error('crv launch requires --agent <name> - two tabs sharing the relay\'s "default" slot is exactly the tab-collision incident this command exists to avoid');
+        const url = buildLaunchUrl(target, agentFlag, PORT);
+        const { pid, profile } = launchTab(url.toString(), { headless: !!headlessValue && !headedValue });
+        const deadline = Date.now() + 15000;
+        let health = null;
+        while (Date.now() < deadline) {
+          try { health = await request('GET', '/health'); } catch { /* relay not up yet / transient */ }
+          if (health?.agents_connected?.includes(agentFlag)) break;
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        const connected = !!health?.agents_connected?.includes(agentFlag);
+        if (!connected) process.exitCode = 1;
+        return {
+          launched: true, connected, agent: agentFlag, url: url.toString(), pid, profile,
+          headless: !!headlessValue && !headedValue,
+          origin: health?.agents_detail?.find((a) => a.name === agentFlag)?.origin ?? null,
+          ...(connected ? {} : { reason: `browser launched (pid ${pid}) but agent '${agentFlag}' never connected within 15s - check the URL loads and has ?webscout=1, or that the relay is reachable` }),
+        };
+      },
     },
     net: {
       // --limit N keeps only the N most recent entries and --url <substr> only
@@ -1563,6 +1641,15 @@ main().catch((err) => {
   // a bug already root-caused once is named here instead of read identically to a new one.
   if (err.knownIssue) {
     console.error(`Known issue: ${err.knownIssue.id}${err.knownIssue.description ? ` - ${err.knownIssue.description}` : ''}${err.knownIssue.remediation ? ` (remediation: ${err.knownIssue.remediation})` : ''}`);
+    if (err.knownIssue.retry && !err.remediationAttempt) {
+      console.error(`  (this issue carries a structured retry: ${err.knownIssue.retry.type} ${JSON.stringify(err.knownIssue.retry.params)} - pass --auto-remediate on dom click/fill/click-wait to have it attempted once automatically)`);
+    }
+  }
+  // The ORIGINAL failure above still stands (and still exits 1) - this reports what the
+  // one-shot --auto-remediate retry then did, so a recovered run is visible, not assumed.
+  if (err.remediationAttempt) {
+    const a = err.remediationAttempt;
+    console.error(`Auto-remediation (known issue ${a.knownIssueId}): retried ${a.type} ${JSON.stringify(a.params)} - ${a.ok ? `SUCCEEDED: ${JSON.stringify(a.result)}` : `FAILED: ${a.error}`}`);
   }
   // What friction awareness knew about THIS failure (see relay.mjs's dispatchTracked): the error
   // class, how many times it has failed this session, what worked after a failure last time,

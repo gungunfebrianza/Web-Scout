@@ -37,6 +37,7 @@ export const COMMAND_TYPES = {
   ping: {},
   // Internal: the relay probes it before serving a cached read (inject.js pageEpoch).
   'page.epoch': {},
+  'idb.seedTemplate': { ...READ },
   'dom.query': { ...READ },
   'dom.rect': { ...READ },
   'dom.computedStyle': { ...READ },
