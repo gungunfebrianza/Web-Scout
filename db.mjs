@@ -747,6 +747,15 @@ const stmtSnapshotUpsert = db.prepare(`
   ON CONFLICT (day, kind) DO UPDATE SET bytes = excluded.bytes
 `);
 const stmtSnapshotsByKind = db.prepare('SELECT day, bytes FROM savings_snapshots WHERE kind = ? ORDER BY day');
+// Golden-diff cache hits (see getGoldenDiffCacheSavings below) only ever had a lifetime total -
+// the trend below plots every other mechanism per day, so this one gets the same treatment
+// instead of staying invisible between polls of the cumulative stat tile.
+const stmtGoldenDiffPerDay = db.prepare(`
+  SELECT date(sd.computed_at) AS day, COUNT(*) AS hits, SUM(LENGTH(rb.json)) AS bytes
+  FROM state_diffs sd JOIN result_blobs rb ON sd.diff_hash = rb.hash
+  WHERE sd.served_from_diff_id IS NOT NULL AND sd.computed_at >= ?
+  GROUP BY day
+`);
 
 export function snapshotSavings(kind, bytes) {
   stmtSnapshotUpsert.run(new Date().toISOString().slice(0, 10), kind, Math.max(0, Math.round(Number(bytes) || 0)));
@@ -869,7 +878,7 @@ export function getSavingsTrend(days = 14) {
   const since = new Date(Date.now() - (Math.max(1, days) - 1) * 86400000).toISOString().slice(0, 10);
   const byDay = new Map();
   const slot = (day) => {
-    if (!byDay.has(day)) byDay.set(day, { day, calls: 0, deliveredBytes: 0, scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0, reReads: 0, shapedBytes: 0, storageBytesSaved: null, storageDeltaBytes: null });
+    if (!byDay.has(day)) byDay.set(day, { day, calls: 0, deliveredBytes: 0, scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0, reReads: 0, shapedBytes: 0, storageBytesSaved: null, storageDeltaBytes: null, goldenHits: 0, goldenBytes: 0 });
     return byDay.get(day);
   };
   for (const r of stmtDeliveredPerDay.all(`${since}T00:00:00`)) { const s = slot(r.day); s.calls = r.calls; s.deliveredBytes = r.bytes || 0; }
@@ -886,6 +895,7 @@ export function getSavingsTrend(days = 14) {
     if (r.day >= since) { const s = slot(r.day); s.storageBytesSaved = r.bytes; s.storageDeltaBytes = previousStorage === null ? null : r.bytes - previousStorage; }
     previousStorage = r.bytes;
   }
+  for (const r of stmtGoldenDiffPerDay.all(`${since}T00:00:00`)) { const s = slot(r.day); s.goldenHits = r.hits; s.goldenBytes = r.bytes || 0; }
   return [...byDay.values()].sort((a, b) => (a.day < b.day ? -1 : 1)).map((s) => {
     const wouldHave = s.deliveredBytes + s.avoidedBytes;
     return {
@@ -893,6 +903,7 @@ export function getSavingsTrend(days = 14) {
       deliveredTokens: Math.round(s.deliveredBytes / CHARS_PER_TOKEN_ESTIMATE),
       avoidedTokens: Math.round(s.avoidedBytes / CHARS_PER_TOKEN_ESTIMATE),
       avoidedPct: wouldHave ? Math.round((s.avoidedBytes / wouldHave) * 1000) / 10 : 0,
+      goldenTokens: Math.round(s.goldenBytes / CHARS_PER_TOKEN_ESTIMATE),
     };
   });
 }
@@ -1416,6 +1427,47 @@ export function getActionCostByTarget(sessionId) {
       };
     })
     .sort((a, b) => b.estTokens - a.estTokens);
+}
+
+// A "biggest single target" in getActionCostByTarget above is often big BECAUSE it keeps
+// failing and getting retried, not just because it's naturally verbose - but that table has
+// no failure signal of its own to say so. All-time, same type set (idb.dump/dom.query) and
+// same redundancyKey grouping so a caller can join on `${type}::${target}` directly. Capped
+// at 10 error strings per target (joined into one match call by the caller) - a known-issue
+// signature either matches within the first handful of repeats or it doesn't.
+const stmtActionFailuresForTarget = db.prepare(
+  "SELECT a.type AS type, COALESCE(a.params_json, pb.json) AS params_json, a.error AS error FROM actions a LEFT JOIN params_blobs pb ON a.params_hash = pb.hash WHERE a.type IN ('idb.dump','dom.query') AND a.ok = 0 ORDER BY a.id ASC",
+);
+// byType (getActionCostReport) covers every dispatchable type, not just idb.dump/dom.query -
+// a failing eval/net.log/console.log/idb.put/timeout.verify loop drives up its own spend row
+// exactly the same way, but stmtActionFailuresForTarget above can't see it (no meaningful
+// target to group on for those types via redundancyKey). Grouped by type ALONE so it can join
+// on report.byType's own key, same 10-error cap and same all-time scope as the target version.
+const stmtActionFailuresForType = db.prepare(
+  "SELECT type, error FROM actions WHERE ok = 0 ORDER BY id ASC",
+);
+export function getActionFailureTextsByType() {
+  const byType = new Map(); // type -> error text[]
+  for (const r of stmtActionFailuresForType.all()) {
+    if (!r.error) continue;
+    const list = byType.get(r.type) ?? [];
+    if (list.length < 10) list.push(r.error);
+    byType.set(r.type, list);
+  }
+  return byType;
+}
+
+export function getActionFailureTextsByTarget() {
+  const byTarget = new Map(); // `${type}::${target}` -> error text[]
+  for (const r of stmtActionFailuresForTarget.all()) {
+    if (!r.error) continue;
+    const target = redundancyKey(r.type, r.params_json);
+    const key = `${r.type}::${target}`;
+    const list = byTarget.get(key) ?? [];
+    if (list.length < 10) list.push(r.error);
+    byTarget.set(key, list);
+  }
+  return byTarget;
 }
 
 // ---------- token cost by macro (which CRV phase actually cost what) ----------

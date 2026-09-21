@@ -1424,6 +1424,34 @@ function decorateEntriesWithKnownIssue(entries, textFor) {
   });
 }
 
+// getActionCostByTarget's "biggest single targets" ranks by bytes alone - a target near the
+// top because it keeps failing and getting retried looks identical to one that's just
+// naturally verbose, so the dashboard's cut-hint column had no way to point at the real fix
+// (the known-issue's remediation) instead of a generic scoping tip. Joins on the same
+// `${type}::${target}` key getActionFailureTextsByTarget groups on.
+function decorateTargetsWithKnownIssue(rows, failureTextsByTarget) {
+  return rows.map((r) => {
+    const errors = failureTextsByTarget.get(`${r.type}::${r.target}`);
+    if (!errors?.length) return r;
+    const { match } = matchKnownIssueForError(errors.join('\n'));
+    return match ? { ...r, knownIssue: match } : r;
+  });
+}
+
+// decorateTargetsWithKnownIssue above only reaches idb.dump/dom.query rows - the only two types
+// getActionCostByTarget can extract a meaningful target for. Every other spend-driving type
+// (eval, net.log, console.log, idb.put, timeout.verify - all of which already have their own
+// SV_CUT_HINTS entry client-side) had no known-issue path at all. Joins on type ALONE against
+// getActionFailureTextsByType, so it reaches the full byType spend table instead.
+function decorateTypesWithKnownIssue(rows, failureTextsByType) {
+  return rows.map((r) => {
+    const errors = failureTextsByType.get(r.type);
+    if (!errors?.length) return r;
+    const { match } = matchKnownIssueForError(errors.join('\n'));
+    return match ? { ...r, knownIssue: match } : r;
+  });
+}
+
 // One row per currently-connected agent, so a single preflight can answer "is some tab fighting
 // another over this agent name" instead of several manual `eval location.href` round trips.
 function connectedAgentsSummary() {
@@ -2723,7 +2751,8 @@ const routes = [
       const neverCalledTypes = Object.keys(COMMAND_TYPES).filter((t) => t !== 'ping' && t !== 'page.epoch' && !calledTypes.has(t)).sort();
       return {
         ...cost,
-        byTarget: dbApi.getActionCostByTarget(),
+        byType: decorateTypesWithKnownIssue(cost.byType, dbApi.getActionFailureTextsByType()),
+        byTarget: decorateTargetsWithKnownIssue(dbApi.getActionCostByTarget(), dbApi.getActionFailureTextsByTarget()),
         // One row per session, tags included (db.mjs's getSessionTokenTotals) - the caller (dashboard)
         // does the tag-matching client-side, same reasoning as that function's own comment. Lets
         // "tokens spent by the self-repair loop" (sessions tagged 'self-repair') answer from data
@@ -3028,7 +3057,8 @@ const routes = [
       // The mid-session macro-match nudge reads macroCandidates() on demand, and this broadcast drops
       // its cache - a macro recorded during a still-active session is offered to that same session.
       broadcastUpdate('macro', null);
-      return macro;
+      const selectorSuggestions = buildMacroSelectorSuggestions(Number(body.sessionId), steps, actions);
+      return selectorSuggestions.length ? { ...macro, selectorSuggestions } : macro;
     },
   },
   { method: 'GET', pattern: /^\/macros$/, handler: async () => dbApi.listMacros() },
@@ -3049,8 +3079,7 @@ const routes = [
       }
       const macro = dbApi.updateMacroSteps(Number(m[1]), body.steps);
       broadcastUpdate('macro', null);
-      const selectorSuggestions = buildMacroSelectorSuggestions(Number(body.sessionId), steps, actions);
-      return selectorSuggestions.length ? { ...macro, selectorSuggestions } : macro;
+      return macro;
     },
   },
   {
@@ -3140,6 +3169,7 @@ const routes = [
         ? getAnalytics().macrosNeverSucceeding.find((mns) => mns.id === macro.id)
         : undefined;
 
+
       const results = [];
       const frictionWarnings = [];
       // The whole macro's risk shape up front, worst first - before any step runs.
@@ -3191,7 +3221,7 @@ const routes = [
           if (MUTATING_TYPES.has(step.type)) bumpMutationCounter(session.id);
           noteScopedRead(session.id, result, { agentName, type: step.type, params: step.params });
           if (cacheKey) storeReadCache(session.id, cacheKey, result);
-          results.push({ type: step.type, ok: true, result, durationMs: Date.now() - stepStartedAt, ...(riskWarning ? { riskWarning } : {}) });
+          results.push({ type: step.type, ok: true, result, durationMs: Date.now() - stepStartedAt });
         } catch (err) {
           let stepContext = null;
           try { stepContext = frictionFactsFor(session.id, step.type, step.params ?? {}, agentName)?.context ?? null; } catch { /* best-effort */ }
@@ -3302,6 +3332,7 @@ const routes = [
       const session = requireActiveSession();
       const dispatchTimeoutMs = LONG_POLL_TYPES.has(type) ? (Number(params?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS;
       maybeRiskySelectorWarn(session.id, type, params, res, agentName, body.ackRisk);
+      maybeFrictionBroadcastNotice(session.id, agentName, res);
 
       const cacheKey = readCacheKey(agentName, type, params);
       const budget = cacheKey ? currentBudget(session) : null;
@@ -3331,7 +3362,6 @@ const routes = [
       let resultOut;
       let freshActionId;
       // idb.put/idb.putMany --dry-run write nothing (readonly transaction,
-      maybeFrictionBroadcastNotice(session.id, agentName, res);
       // no .put() call in inject.js) - wrapping either in a before/after
       // auto-snapshot+diff pair would pay real snapshot cost to prove a
       // diff that can never be anything but empty.
@@ -3621,12 +3651,7 @@ const routes = [
       const baseline = dbApi.getSnapshot(savedBaseline.id);
       broadcastUpdate('snapshot', session.id);
       const dispatchTimeoutMs = LONG_POLL_TYPES.has(type) ? (Number(params?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS;
-      // Same pre-dispatch risky-selector warning /command already gets (maybeRiskySelectorWarn)
-      // - "crv run" takes an identical {type,params} action and is arguably higher-stakes to
-      // warn on: it burns a whole snapshot+diff round trip on an action already known to fail
-      // repeatedly. dispatchTracked below already covers the ON-FAILURE knownIssue match; this
-      // was the missing BEFORE-failure half.
-      maybeRiskySelectorWarn(session.id, type, params, res);
+      // The pre-dispatch risky-selector warning for this action was issued before the baseline snapshot (above).
       const { result: actionResult, actionId } = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
       broadcastUpdate('action', session.id);
       if (MUTATING_TYPES.has(type)) bumpMutationCounter(session.id);

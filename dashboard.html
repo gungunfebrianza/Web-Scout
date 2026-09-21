@@ -629,6 +629,11 @@
 .sv-tip { color: var(--ink-muted); font-size: 11px; }
   .sv-tip code { color: var(--accent-alien); }
   #savingsSection table { font-size: 12px; }
+  #savingsSection .hud-tile[data-hint]:focus { outline: 1px solid var(--accent-info); }
+  #savingsSection .hud-tile[data-hint]:focus::after { opacity: 1; }
+  .sv-trend-row.sv-trend-regress .sv-nowrap { color: var(--accent-danger); }
+  .sv-known { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 8px; font-size: 10px; letter-spacing: .04em; text-transform: uppercase; border: 1px solid var(--accent-danger); color: var(--accent-danger); }
+  .sv-cost { color: var(--ink-muted); }
 </style>
 </head>
 <body>
@@ -760,7 +765,7 @@
 </section>
 
 <section class="hud-section" id="savingsSection">
-  <h2>Token savings, all-time</h2>
+  <h2>Token savings, all-time <span id="savingsAsOf" class="muted" style="font-size:11px; font-weight:400; text-transform:none;"></span></h2>
   <div class="muted">what each waste-prevention mechanism has saved across every session, split by what it actually measures - and where the spend still is</div>
   <div id="savingsStatStrip" class="hud-stat-strip" style="margin-top:8px;"></div>
   <div id="savingsNote" class="sv-note" hidden></div>
@@ -770,16 +775,21 @@
     <div id="savingsTrend"></div>
     <div id="readStrategyNote" class="sv-note" hidden></div>
   </div>
+  <div class="sv-h3">Top sessions by spend</div>
+  <div id="savingsTopSessions" class="hud-scroll-body" style="max-height:160px;"></div>
   <div class="hud-grid-2" style="margin-top:6px;">
     <div>
-      <div class="sv-h3">Savings by mechanism</div>
-      <div style="overflow-x:auto;"><table id="savingsLedgerTable"><thead><tr><th>Mechanism</th><th>Saved</th><th>Reduction</th><th>Evidence</th></tr></thead><tbody></tbody></table></div>
+      <div class="row" style="justify-content:space-between; align-items:baseline;">
+        <div class="sv-h3">Savings by mechanism</div>
+        <label class="inline muted" style="font-size:11px;"><input type="checkbox" id="savingsHideUncounted"> hide rows not counted in the totals</label>
+      </div>
+      <div style="overflow-x:auto;"><table id="savingsLedgerTable"><thead><tr><th>Mechanism</th><th id="savingsLedgerSortHeader" class="sortable" title="Click to sort by bytes saved">Saved</th><th>Reduction</th><th>Evidence</th></tr></thead><tbody></tbody></table></div>
     </div>
     <div>
       <div class="sv-h3">Where the spend still is</div>
-      <div style="overflow-x:auto;"><table id="savingsSpendTable"><thead><tr><th>Command type</th><th>Est. tokens</th><th>Share</th><th>Calls</th><th>Avg</th></tr></thead><tbody></tbody></table></div>
+      <div style="overflow-x:auto;"><table id="savingsSpendTable"><thead><tr><th>Command type</th><th id="savingsSpendSortHeader" class="sortable" title="Click to sort by estimated tokens">Est. tokens</th><th>Share</th><th>Calls</th><th>Avg</th></tr></thead><tbody></tbody></table></div>
       <div class="sv-h3">Biggest single targets</div>
-      <div style="overflow-x:auto;"><table id="savingsTargetTable"><thead><tr><th>Type / target</th><th>Est. tokens</th><th>Calls</th><th>How to cut it</th></tr></thead><tbody></tbody></table></div>
+      <div style="overflow-x:auto;"><table id="savingsTargetTable"><thead><tr><th>Type / target</th><th id="savingsTargetSortHeader" class="sortable" title="Click to sort by estimated tokens">Est. tokens</th><th>Calls</th><th>How to cut it</th></tr></thead><tbody></tbody></table></div>
     </div>
   </div>
   <div id="savingsEmpty" class="empty" hidden>No token report yet - the relay may be unreachable.</div>
@@ -936,6 +946,7 @@
       <label>Console/net rows fetched (cap)<input id="setConsoleNetLimit" type="number" min="100" step="100"></label>
       <label>Slow-request highlight threshold (ms)<input id="setNetSlowMs" type="number" min="500" step="500"></label>
       <label>Collapse runs of N+ identical actions (0 = never collapse)<input id="setActionGroupMin" type="number" min="0" step="1"></label>
+      <label>Cost rate for Token savings ($ / 1M tokens - edit to match your model's actual input price)<input id="setCostPerMTok" type="number" min="0" step="0.1"></label>
       <div class="row" style="margin-top:10px;">
         <button type="button" id="settingsApplyBtn">Apply</button>
         <button type="button" id="settingsResetBtn">Reset to defaults</button>
@@ -1278,7 +1289,7 @@ let allSessions = [];
 // target app, or a user who just wants different tradeoffs (more history
 // vs. less render/fetch cost), doesn't need to edit this file to get them.
 const SETTINGS_STORAGE_KEY = 'webscoutDashboardSettings';
-const DEFAULT_SETTINGS = { pollIntervalMs: 3000, actionsRenderCap: 500, consoleNetFetchLimit: 2000, netSlowMs: 10000, actionGroupMin: 3 };
+const DEFAULT_SETTINGS = { pollIntervalMs: 3000, actionsRenderCap: 500, consoleNetFetchLimit: 2000, netSlowMs: 10000, actionGroupMin: 3, costPerMTok: 3 };
 
 function loadSettings() {
   try {
@@ -2392,37 +2403,67 @@ function svBytes(n) {
   return `${(n / 1024 / 1024).toFixed(2)} MB`;
 }
 const svNum = (n) => (n === null || n === undefined ? '-' : Number(n).toLocaleString());
+// $ is never authoritative here - it's settings.costPerMTok (edited in Settings > Display,
+// default an arbitrary $3/1M) applied to a chars/4 token ESTIMATE. Shown as a secondary
+// line under the token figure, never in place of it, so nobody mistakes it for a billed cost.
+const svCost = (tokens) => (tokens === null || tokens === undefined || !settings.costPerMTok ? '' : `<span class="sv-cost sv-sub">&asymp; $${((tokens / 1e6) * settings.costPerMTok).toFixed(2)}</span>`);
 
 function renderSavingsPanel(report) {
   const sv = report?.savings;
   if (!sv?.ledgers) { el('savingsEmpty').hidden = false; return; }
   el('savingsEmpty').hidden = true;
+  el('savingsAsOf').textContent = `(as of ${new Date().toLocaleTimeString()})`;
   const spend = sv.spend || { calls: report.totalCalls, estTokens: report.totalEstTokens };
   const storage = sv.byKind?.storage || { bytesSaved: 0, estTokensSaved: 0 };
   const cache = sv.runtimeReadCache || { hits: 0, bytesSaved: 0 };
   const golden = sv.goldenDiffCache || { cacheHits: 0 };
   const scoped = sv.byKind?.delivery || { bytesSaved: 0, estTokensSaved: 0 };
   const ctx = sv.storageContext || {};
-  const tile = (label, value, hint, band) => `<div class="hud-tile${band ? ` hud-tile-${band}` : ''}" data-hint="${esc(hint)}"><div class="hud-tile-label">${esc(label)}</div><div class="hud-tile-value">${value}</div></div>`;
+  const tile = (label, value, hint, band, cost) => `<div class="hud-tile${band ? ` hud-tile-${band}` : ''}" data-hint="${esc(hint)}" tabindex="0" role="note" aria-label="${esc(hint)}"><div class="hud-tile-label">${esc(label)}</div><div class="hud-tile-value">${value}</div>${cost ? svCost(cost) : ''}</div>`;
   el('savingsStatStrip').innerHTML = [
-    tile('Read by callers', `~${svNum(spend.estTokens)}`, `Estimated tokens (chars/4) callers actually read off stdout across ${svNum(spend.calls)} calls - the real context-window spend. It counts what was DELIVERED: a peeked, tabulated, delta or pointer reply counts as the reply the caller got, not the full logged result. The storage-dedup ledgers below do not change it.`, 'warn'),
+    tile('Read by callers', `~${svNum(spend.estTokens)}`, `Estimated tokens (chars/4) callers actually read off stdout across ${svNum(spend.calls)} calls - the real context-window spend. It counts what was DELIVERED: a peeked, tabulated, delta or pointer reply counts as the reply the caller got, not the full logged result. The storage-dedup ledgers below do not change it.`, 'warn', spend.estTokens),
     tile('Disk avoided', svBytes(storage.bytesSaved), `Bytes dedup kept out of webscout.db. About ${svNum(storage.estTokensSaved)} tokens-EQUIVALENT (bytes / 4) - a storage saving, not tokens a caller avoided.`, 'ok'),
     tile('DB size cut', ctx.reductionPct === null || ctx.reductionPct === undefined ? '-' : `${ctx.reductionPct}%`, ctx.dbFileBytes ? `webscout.db is ${svBytes(ctx.dbFileBytes)} on disk; without dedup it would be about ${svBytes(ctx.bytesWithoutDedup)} (approximate - SQLite keeps freed pages).` : 'database size unavailable', 'ok'),
-    tile('Left out by scoping', `~${svNum(scoped.estTokensSaved)}`, `Tokens (bytes / 4) that scoped reads (--where / --fields / --limit / --meta / whole-page outline) did not return, measured against the unscoped call in the page. An upper bound: the caller may never have made the unscoped call.`, 'ok'),
+    tile('Left out by scoping', `~${svNum(scoped.estTokensSaved)}`, `Tokens (bytes / 4) that scoped reads (--where / --fields / --limit / --meta / whole-page outline) did not return, measured against the unscoped call in the page. An upper bound: the caller may never have made the unscoped call.`, 'ok', scoped.estTokensSaved),
     tile('Read-cache hits', svNum(cache.hits), `Repeat reads answered from memory (${svBytes(cache.bytesSaved)} not re-fetched from the page). The caller still received the full result - a round-trip saving, not a token one.`),
     tile('Golden-diff hits', svNum(golden.cacheHits), 'Repeat diff-golden checks answered with a pointer instead of the whole diff body again - a genuine delivery saving (excluded from the totals: it overlaps Action results).'),
   ].join('');
 
   const note = el('savingsNote');
   note.hidden = false;
-  note.innerHTML = `<strong>How to read this.</strong> Callers read ~${svNum(spend.estTokens)} estimated tokens; dedup kept ~${svBytes(storage.bytesSaved)} off disk (${svNum(storage.estTokensSaved)} tokens-<em>equivalent</em>${ctx.reductionPct !== null && ctx.reductionPct !== undefined ? `, ${ctx.reductionPct}% of the database` : ''}). Those are different currencies: dedup makes the database smaller, it does not shrink what a call returns. The one delivery-side saving is <em>Scoped reads</em> (<code>--where</code>, <code>--fields</code>, <code>--limit</code>, <code>--meta</code>, whole-page outlines): measured in the page against the unscoped call, so it is an upper bound. <code>--since</code> and other server-side scoping are not measured.`;
+  note.innerHTML = `<strong>How to read this.</strong> Callers read ~${svNum(spend.estTokens)} estimated tokens${settings.costPerMTok ? ` (&asymp; $${((spend.estTokens / 1e6) * settings.costPerMTok).toFixed(2)} at $${settings.costPerMTok}/1M tok, edit in Settings)` : ''}; dedup kept ~${svBytes(storage.bytesSaved)} off disk (${svNum(storage.estTokensSaved)} tokens-<em>equivalent</em>${ctx.reductionPct !== null && ctx.reductionPct !== undefined ? `, ${ctx.reductionPct}% of the database` : ''}). Those are different currencies: dedup makes the database smaller, it does not shrink what a call returns. The one delivery-side saving is <em>Scoped reads</em> (<code>--where</code>, <code>--fields</code>, <code>--limit</code>, <code>--meta</code>, whole-page outlines): measured in the page against the unscoped call, so it is an upper bound. <code>--since</code> and other server-side scoping are not measured. The $ figure is this estimate applied to an edited $/1M rate - never a billed amount.`;
   renderUsageEvidence(report.neverCalled, report.helpUsage);
   renderSavingsTrend(sv.trend || [], sv.readStrategy, sv.estimator);
+  renderSavingsTopSessions(report.bySession || []);
 
-  const counted = sv.ledgers.filter((l) => l.countedInTotal);
-  const maxSaved = Math.max(1, ...counted.map((l) => l.bytesSaved));
+  lastSavingsLedgers = sv.ledgers;
+  renderSavingsLedgerTable();
+  lastSavingsTypes = [...(report.byType || [])].sort((a, b) => b.estTokens - a.estTokens).slice(0, 7);
+  renderSavingsSpendTable(spend.estTokens);
+  lastSavingsTargets = [...(report.byTarget || [])].sort((a, b) => b.estTokens - a.estTokens).slice(0, 6);
+  renderSavingsTargetTable();
+}
+
+// ---------- Savings tables: re-sortable / filterable client-side without a re-fetch ----------
+// (see savingsLedgerSortHeader/savingsSpendSortHeader/savingsTargetSortHeader listeners below,
+// and the "hide rows not counted" checkbox) - each keeps its last dataset so a sort click or
+// filter toggle re-renders instead of needing the full /token-report round trip again.
+let lastSavingsLedgers = [];
+let lastSavingsTypes = [];
+let lastSavingsTargets = [];
+let savingsLedgerSortAsc = false; // default: biggest saver first
+let savingsSpendSortAsc = false;
+let savingsTargetSortAsc = false;
+
+function renderSavingsLedgerTable() {
   const order = { storage: 0, roundtrip: 1, delivery: 2, workflow: 3 };
-  const rows = [...sv.ledgers].sort((a, b) => (b.countedInTotal - a.countedInTotal) || (order[a.kind] - order[b.kind]) || (b.bytesSaved - a.bytesSaved));
+  const hideUncounted = el('savingsHideUncounted').checked;
+  let rows = hideUncounted ? lastSavingsLedgers.filter((l) => l.countedInTotal) : lastSavingsLedgers;
+  rows = [...rows].sort((a, b) => savingsLedgerSortAsc
+    ? a.bytesSaved - b.bytesSaved
+    : (b.countedInTotal - a.countedInTotal) || (order[a.kind] - order[b.kind]) || (b.bytesSaved - a.bytesSaved));
+  const counted = lastSavingsLedgers.filter((l) => l.countedInTotal);
+  const maxSaved = Math.max(1, ...counted.map((l) => l.bytesSaved));
   const evidence = (l) => {
     if (!l.refs) return '<span class="muted">-</span>';
     const unit = esc(l.refs.unit || '');
@@ -2430,33 +2471,107 @@ function renderSavingsPanel(report) {
     return `${svNum(l.refs.total)} ${unit}`;
   };
   document.querySelector('#savingsLedgerTable tbody').innerHTML = rows.map((l) => {
+    // $ only for kind 'delivery' - the one ledger kind that's actually tokens a caller avoided
+    // reading (see SV_KIND_HELP). storage/roundtrip savings are disk bytes or round trips, a
+    // different currency - pricing them here would contradict the "Disk avoided" tile above,
+    // which deliberately carries no $ of its own.
     const bytesCell = l.kind === 'workflow'
       ? '<span class="muted">count only</span>'
-      : `<div class="sv-bar-cell"><span>${svBytes(l.bytesSaved)}<span class="sv-sub">&asymp; ${svNum(l.estTokensSaved)} tok-equiv.</span></span><div class="sv-bar" style="width:${l.countedInTotal ? Math.max(2, (l.bytesSaved / maxSaved) * 100) : 0}%"></div></div>`;
+      : `<div class="sv-bar-cell"><span>${svBytes(l.bytesSaved)}<span class="sv-sub">&asymp; ${svNum(l.estTokensSaved)} tok-equiv.${l.kind === 'delivery' && settings.costPerMTok ? ` / $${((l.estTokensSaved / 1e6) * settings.costPerMTok).toFixed(2)}` : ''}</span></span><div class="sv-bar" style="width:${l.countedInTotal ? Math.max(2, (l.bytesSaved / maxSaved) * 100) : 0}%"></div></div>`;
     const reduction = l.reductionPct === null || l.reductionPct === undefined
       ? '<span class="muted">-</span>'
       : `${l.reductionPct}%<span class="sv-sub">${svBytes(l.logicalBytes)} &rarr; ${svBytes(l.uniqueBytes)}</span>`;
     return `<tr class="${l.countedInTotal ? '' : 'sv-row-uncounted'}">
       <td>${esc(l.label)}<span class="sv-kind sv-kind-${esc(l.kind)}" title="${esc(SV_KIND_HELP[l.kind] || '')}">${esc(l.kind)}</span><span class="sv-what">${esc(l.what)}${l.excludedBecause ? ` <em>(not in the totals: ${esc(l.excludedBecause)})</em>` : ''}</span></td>
       <td>${bytesCell}</td><td>${reduction}</td><td>${evidence(l)}</td></tr>`;
-  }).join('');
+  }).join('') || '<tr><td colspan="4" class="muted">nothing to show</td></tr>';
+}
+el('savingsHideUncounted').addEventListener('change', () => {
+  panelPrefs.savingsView.hideUncounted = el('savingsHideUncounted').checked;
+  savePanelPrefs();
+  renderSavingsLedgerTable();
+});
+el('savingsLedgerSortHeader').addEventListener('click', () => {
+  savingsLedgerSortAsc = !savingsLedgerSortAsc;
+  panelPrefs.savingsView.ledgerSortAsc = savingsLedgerSortAsc;
+  savePanelPrefs();
+  el('savingsLedgerSortHeader').textContent = savingsLedgerSortAsc ? 'Saved ▲' : 'Saved';
+  renderSavingsLedgerTable();
+});
 
-  const types = [...(report.byType || [])].sort((a, b) => b.estTokens - a.estTokens).slice(0, 7);
+function renderSavingsSpendTable(totalEstTokens) {
+  const types = [...lastSavingsTypes].sort((a, b) => savingsSpendSortAsc ? a.estTokens - b.estTokens : b.estTokens - a.estTokens);
   const maxTok = Math.max(1, ...types.map((t) => t.estTokens));
   document.querySelector('#savingsSpendTable tbody').innerHTML = types.map((t) => {
-    const share = spend.estTokens ? (t.estTokens / spend.estTokens) * 100 : 0;
-    return `<tr><td>${esc(t.type)}</td>
-      <td><div class="sv-bar-cell"><span>${svNum(t.estTokens)}</span><div class="sv-bar sv-bar-spend" style="width:${Math.max(2, (t.estTokens / maxTok) * 100)}%"></div></div></td>
+    const share = totalEstTokens ? (t.estTokens / totalEstTokens) * 100 : 0;
+    const known = t.knownIssue ? ` <span class="sv-known" title="${esc(t.knownIssue.description || '')}">known issue</span>` : '';
+    return `<tr><td>${esc(t.type)}${known}</td>
+      <td><div class="sv-bar-cell"><span>${svNum(t.estTokens)}${svCost(t.estTokens)}</span><div class="sv-bar sv-bar-spend" style="width:${Math.max(2, (t.estTokens / maxTok) * 100)}%"></div></div></td>
       <td>${share.toFixed(1)}%</td><td>${svNum(t.calls)}</td><td>${svBytes(t.avgResultBytes)}</td></tr>`;
   }).join('') || '<tr><td colspan="5" class="muted">no actions recorded yet</td></tr>';
+}
+el('savingsSpendSortHeader').addEventListener('click', () => {
+  savingsSpendSortAsc = !savingsSpendSortAsc;
+  panelPrefs.savingsView.spendSortAsc = savingsSpendSortAsc;
+  savePanelPrefs();
+  el('savingsSpendSortHeader').textContent = savingsSpendSortAsc ? 'Est. tokens ▲' : 'Est. tokens';
+  renderSavingsSpendTable(lastSavingsReport?.savings?.spend?.estTokens);
+});
 
-  const targets = [...(report.byTarget || [])].sort((a, b) => b.estTokens - a.estTokens).slice(0, 6);
+// A target ranked high here only because it keeps failing and getting retried (not because
+// it's naturally verbose) now carries the matched known-issue's own remediation instead of the
+// generic SV_CUT_HINTS text (see relay.mjs's decorateTargetsWithKnownIssue) - a real fix beats
+// a generic scoping tip. Any type with neither still gets SOME advice rather than a bare "-".
+function svCutHint(t) {
+  if (t.knownIssue) {
+    return `<span class="sv-known" title="${esc(t.knownIssue.description || '')}">known issue</span> ${esc(t.knownIssue.remediation || t.knownIssue.id)}`;
+  }
+  if (SV_CUT_HINTS[t.type]) return esc(SV_CUT_HINTS[t.type]);
+  return `<span class="muted">no documented flag for "${esc(t.type)}" - check <code>cli --help ${esc(t.type)}</code> for --where/--fields/--limit support</span>`;
+}
+function renderSavingsTargetTable() {
+  const targets = [...lastSavingsTargets].sort((a, b) => savingsTargetSortAsc ? a.estTokens - b.estTokens : b.estTokens - a.estTokens);
   document.querySelector('#savingsTargetTable tbody').innerHTML = targets.map((t) => `<tr>
       <td>${esc(t.type)}<span class="sv-target">${esc(t.target || '(none)')}</span></td>
-      <td>${svNum(t.estTokens)}<span class="sv-sub sv-nowrap">avg ${svNum(t.avgEstTokens)}/call</span></td>
+      <td>${svNum(t.estTokens)}${svCost(t.estTokens)}<span class="sv-sub sv-nowrap">avg ${svNum(t.avgEstTokens)}/call</span></td>
       <td>${svNum(t.calls)}</td>
-      <td class="sv-tip">${SV_CUT_HINTS[t.type] ? esc(SV_CUT_HINTS[t.type]) : '<span class="muted">-</span>'}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">no targets recorded yet</td></tr>';
+      <td class="sv-tip">${svCutHint(t)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">no targets recorded yet</td></tr>';
 }
+el('savingsTargetSortHeader').addEventListener('click', () => {
+  savingsTargetSortAsc = !savingsTargetSortAsc;
+  panelPrefs.savingsView.targetSortAsc = savingsTargetSortAsc;
+  savePanelPrefs();
+  el('savingsTargetSortHeader').textContent = savingsTargetSortAsc ? 'Est. tokens ▲' : 'Est. tokens';
+  renderSavingsTargetTable();
+});
+
+// ---------- Top sessions by spend (drill-down: click through to the session itself) ----------
+// bySession (GET /token-report) already has per-session totals for the self-repair-cost panel -
+// the savings panel never surfaced it, so "which session actually spent this" had no answer
+// short of opening every session by hand. Same row/click pattern as renderWasteBySession.
+function renderSavingsTopSessions(bySession) {
+  const container = el('savingsTopSessions');
+  const rows = [...bySession].filter((s) => s.totalEstTokens > 0).sort((a, b) => b.totalEstTokens - a.totalEstTokens).slice(0, 8);
+  if (!rows.length) { container.innerHTML = '<div class="empty">no sessions with recorded spend yet</div>'; return; }
+  const max = Math.max(1, ...rows.map((s) => s.totalEstTokens));
+  container.innerHTML = rows.map((s) => {
+    // Budget comparison used to live only in this track's title tooltip - same hover-only gap
+    // already fixed for the stat tiles (data-hint/tabindex), reintroduced here. Now visible text.
+    const overBudget = s.tokenBudget && s.totalEstTokens > s.tokenBudget;
+    const budgetNote = s.tokenBudget ? `<span class="sv-sub${overBudget ? ' sv-cost' : ''}" style="${overBudget ? 'color:var(--accent-danger);' : ''}">/ ${svNum(s.tokenBudget)} budget${overBudget ? ' (over)' : ''}</span>` : '';
+    return `<div class="duration-bar-row" data-session-id="${s.sessionId}" style="cursor:pointer;">
+      <div class="duration-bar-label" title="#${s.sessionId} ${esc(s.goal)}">#${s.sessionId} ${esc(clip(s.goal, 26))}</div>
+      <div class="duration-bar-track" title="${svNum(s.totalEstTokens)} est. tokens${settings.costPerMTok ? ` (${'$' + ((s.totalEstTokens / 1e6) * settings.costPerMTok).toFixed(2)})` : ''}${s.tokenBudget ? `, budget ${svNum(s.tokenBudget)}` : ''}">
+        <div class="duration-bar-max" style="width:${Math.max(2, (s.totalEstTokens / max) * 100).toFixed(1)}%; background: ${overBudget ? 'var(--accent-danger)' : 'var(--accent-info)'};"></div>
+      </div>
+      <div class="sv-nowrap" style="min-width:90px; flex-shrink:0; text-align:right;">${svNum(s.totalEstTokens)}${svCost(s.totalEstTokens)} ${budgetNote}</div>
+    </div>`;
+  }).join('');
+}
+el('savingsTopSessions').addEventListener('click', (e) => {
+  const row = e.target.closest('[data-session-id]');
+  if (row) openSessionById(Number(row.dataset.sessionId));
+});
 
 // Real usage evidence (GET /token-report's neverCalled/helpUsage) - measurement that would
 // otherwise only ever live in raw JSON nobody looks at. neverCalled is what a future "trim the
@@ -2484,10 +2599,23 @@ function renderSavingsTrend(trend, strategy, estimator) {
   wrap.hidden = !trend.length;
   if (!trend.length) return;
   const max = Math.max(1, ...trend.map((t) => t.deliveredTokens + t.avoidedTokens));
-  el('savingsTrend').innerHTML = trend.map((t) => `<div class="sv-trend-row" title="${esc(`${t.calls} calls, ${svNum(t.deliveredTokens)} tokens delivered, ${svNum(t.avoidedTokens)} tokens left out by ${t.scopedCalls} scoped reads, ${t.cacheHits} cache hits`)}">
+  // A day whose left-out share fell 10+ points from the day before is flagged (sv-trend-regress)
+  // - the two stat tiles above only ever show a lifetime cumulative number, which can't show a
+  // days-long slide back toward unscoped reads the way a day-over-day comparison can.
+  el('savingsTrend').innerHTML = trend.map((t, i) => {
+    const prev = trend[i - 1];
+    const regressed = prev && (prev.avoidedPct - t.avoidedPct) >= 10;
+    const extras = [
+      t.shapedBytes > 0 ? `shaped ${svBytes(t.shapedBytes)}` : '',
+      t.storageDeltaBytes > 0 ? `disk +${svBytes(t.storageDeltaBytes)}` : '',
+      t.cacheHits > 0 ? `${t.cacheHits} cache hit(s)` : '',
+      t.goldenHits > 0 ? `${t.goldenHits} golden-diff hit(s)` : '',
+    ].filter(Boolean).join(' &middot; ');
+    return `<div class="sv-trend-row${regressed ? ' sv-trend-regress' : ''}" title="${esc(`${t.calls} calls, ${svNum(t.deliveredTokens)} tokens delivered, ${svNum(t.avoidedTokens)} tokens left out by ${t.scopedCalls} scoped reads, ${t.cacheHits} cache hits, ${t.goldenHits} golden-diff hits${regressed ? ` - left-out share fell from ${prev.avoidedPct}% the day before` : ''}`)}">
       <span>${esc(t.day.slice(5))}</span>
       <div class="sv-trend-bars"><div class="sv-trend-read" style="width:${(t.deliveredTokens / max) * 100}%"></div><div class="sv-trend-avoided" style="width:${(t.avoidedTokens / max) * 100}%"></div></div>
-      <span class="sv-nowrap">${svNum(t.deliveredTokens)} read &middot; ${t.avoidedPct}% left out${t.shapedBytes > 0 ? ` &middot; shaped ${svBytes(t.shapedBytes)}` : ''}${t.storageDeltaBytes > 0 ? ` &middot; disk +${svBytes(t.storageDeltaBytes)}` : ''}</span></div>`).join('');
+      <span class="sv-nowrap">${svNum(t.deliveredTokens)} read &middot; ${t.avoidedPct}% left out${regressed ? ' &darr;' : ''}${extras ? ` &middot; ${extras}` : ''}</span></div>`;
+  }).join('');
   // Bytes left out only count if the caller did not then ask for them anyway.
   const note = el('readStrategyNote');
   const rr = strategy?.reRead;
@@ -2519,7 +2647,7 @@ async function refreshSavings(strict = false) {
   try {
     lastSavingsReport = await api('GET', '/token-report');
     renderSavingsPanel(lastSavingsReport);
-    return panelTickSig('savingsSection', JSON.stringify([lastSavingsReport?.totalEstTokens, (lastSavingsReport?.savings?.ledgers ?? []).map((l) => l.bytesSaved), (lastSavingsReport?.savings?.trend ?? []).map((t) => [t.day, t.deliveredBytes, t.avoidedBytes, t.storageDeltaBytes, t.reReads, t.shapedBytes]), lastSavingsReport?.savings?.readStrategy]));
+    return panelTickSig('savingsSection', JSON.stringify([lastSavingsReport?.totalEstTokens, (lastSavingsReport?.savings?.ledgers ?? []).map((l) => l.bytesSaved), (lastSavingsReport?.savings?.trend ?? []).map((t) => [t.day, t.deliveredBytes, t.avoidedBytes, t.storageDeltaBytes, t.reReads, t.shapedBytes, t.goldenHits]), lastSavingsReport?.savings?.readStrategy, (lastSavingsReport?.byTarget ?? []).map((t) => t.knownIssue?.id), (lastSavingsReport?.bySession ?? []).map((s) => s.totalEstTokens)]));
   } catch (e) {
     // best-effort on the timers - the rest of the dashboard must not depend on this panel; the panel's own refresh button surfaces the failure
     if (strict) throw e;
@@ -5061,12 +5189,25 @@ const analyticsRows = (pick) => { const a = lastAnalyticsData; return a ? pick(a
 // Registry order = default on-screen order. `count` returns {n, fail?, text?,
 // title?} or null when nothing is loaded; `exportRows` returns plain row
 // objects (list responses already redact heavy payloads) or null.
+// exportRows used to cover only the ledger mechanisms - the spend-by-type table, the
+// biggest-single-targets table and the top-sessions list all render real data now with no
+// export path of their own. One flat array, a `table` column tells the 4 shapes apart
+// (rowsToMarkdown/JSON already handle heterogeneous keys via a union of columns).
+function savingsExportRows() {
+  const r = lastSavingsReport;
+  return [
+    ...(r?.savings?.ledgers ?? []).map((l) => ({ table: 'ledger', mechanism: l.label, kind: l.kind, counted: l.countedInTotal, bytesSaved: l.bytesSaved, estTokensEquivalent: l.estTokensSaved, reductionPct: l.reductionPct, refsTotal: l.refs?.total ?? null, refsStored: l.refs?.unique ?? null })),
+    ...(r?.byType ?? []).map((t) => ({ table: 'spend', type: t.type, estTokens: t.estTokens, calls: t.calls, avgResultBytes: t.avgResultBytes, knownIssueId: t.knownIssue?.id ?? null })),
+    ...(r?.byTarget ?? []).map((t) => ({ table: 'target', type: t.type, target: t.target, estTokens: t.estTokens, avgEstTokens: t.avgEstTokens, calls: t.calls, knownIssueId: t.knownIssue?.id ?? null })),
+    ...(r?.bySession ?? []).map((x) => ({ table: 'session', sessionId: x.sessionId, goal: x.goal, totalEstTokens: x.totalEstTokens, tokenBudget: x.tokenBudget ?? null })),
+  ];
+}
 const PANELS = {
   allSessionsHero: { group: 'global', wide: true, label: 'Overview', count: () => (lastAnalyticsData ? { n: lastAnalyticsData.totals.sessions, title: 'sessions ever recorded' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => Object.entries(a.totals).map(([metric, value]) => ({ metric, value }))) },
   heatmapSection: { group: 'global', label: 'Heatmap', autoEmpty: true, count: () => (lastAnalyticsData ? { n: lastAnalyticsData.heatmap?.types?.length ?? 0, title: 'action types tracked' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.heatmap?.cells ?? []) },
   selectorsSection: { group: 'global', label: 'Selectors', autoEmpty: true, failLabel: 'recurring', count: () => { const n = lastAnalyticsData?.selectorFriction?.length; return n === undefined ? null : { n, fail: n, title: 'selectors that failed more than once' }; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.selectorFriction ?? []) },
   burnSection: { group: 'global', wide: true, label: 'Burn', autoEmpty: true, failLabel: 'over budget', count: () => { const t = lastAnalyticsData?.sessionTokenTotals; return t ? { n: t.filter((s) => s.totalEstTokens > 0).length, fail: t.filter((s) => s.tokenBudget && s.totalEstTokens > s.tokenBudget).length, title: 'sessions with recorded token use' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.sessionTokenTotals ?? []) },
-  savingsSection: { group: 'global', wide: true, label: 'Savings', autoEmpty: true, count: () => { const s = lastSavingsReport?.savings; return s?.ledgers ? { n: s.ledgers.filter((l) => l.countedInTotal).length, text: `~${fmtK(s.byKind?.storage?.estTokensSaved ?? 0)} tok-eq.`, title: 'savings mechanisms counted in the totals (disk bytes avoided, not tokens a caller avoided)' } : null; }, refresh: () => refreshSavings(true), exportRows: () => (lastSavingsReport?.savings?.ledgers ?? []).map((l) => ({ mechanism: l.label, kind: l.kind, counted: l.countedInTotal, bytesSaved: l.bytesSaved, estTokensEquivalent: l.estTokensSaved, reductionPct: l.reductionPct, refsTotal: l.refs?.total ?? null, refsStored: l.refs?.unique ?? null })) },
+  savingsSection: { group: 'global', wide: true, label: 'Savings', autoEmpty: true, count: () => { const s = lastSavingsReport?.savings; return s?.ledgers ? { n: s.ledgers.filter((l) => l.countedInTotal).length, text: `~${fmtK(s.byKind?.storage?.estTokensSaved ?? 0)} tok-eq.`, title: 'savings mechanisms counted in the totals (disk bytes avoided, not tokens a caller avoided)' } : null; }, refresh: () => refreshSavings(true), exportRows: savingsExportRows },
   repairSection: { group: 'global', label: 'Self-repair', count: () => (lastRepairConfig ? { n: lastRepairConfig.enabled ? 1 : 0, title: lastRepairConfig.enabled ? 'self-repair loop is ENABLED' : 'self-repair loop is disabled' } : null), refresh: () => refreshRepairStatus(), exportRows: () => lastRepairConfig?.history ?? null },
   repairCostSection: { group: 'global', wide: true, label: 'Self-repair cost', autoEmpty: true, count: () => { const t = lastAnalyticsData?.sessionTokenTotals; if (!t) return null; const rows = t.filter((s) => (s.tags || []).includes('self-repair')); const tok = rows.reduce((sum, r) => sum + r.totalEstTokens, 0); return { n: rows.length, text: rows.length ? `~${fmtK(tok)} tok` : undefined, title: 'sessions tagged self-repair, cumulative estimated tokens' }; }, refresh: () => refreshFriction(), exportRows: () => (lastAnalyticsData?.sessionTokenTotals ?? []).filter((s) => (s.tags || []).includes('self-repair')) },
   repairFunnelSection: { group: 'global', label: 'Self-repair funnel', autoEmpty: true, count: () => { const f = lastRepairActivity?.funnel; return f ? { n: f.patchesAttempted, text: `${f.verifiesPassed}/${f.verifiesRun} confirmed`, title: 'patches attempted, across every session' } : null; }, refresh: () => refreshRepairActivity(), exportRows: () => (lastRepairActivity?.funnel ? Object.entries(lastRepairActivity.funnel).map(([stage, count]) => ({ stage, count })) : null) },
@@ -5116,15 +5257,25 @@ const PANEL_FEEDS = {
 };
 
 function loadPanelPrefs() {
-  const base = { collapsed: {}, hidden: {}, height: {}, order: {}, autoCollapseEmpty: true };
+  // savingsView: the 3 sort directions + hide-uncounted toggle for savingsSection's tables -
+  // every other display pref in this app survives a reload via settings/panelPrefs; these reset
+  // to defaults on every load until now, the odd one out.
+  const base = { collapsed: {}, hidden: {}, height: {}, order: {}, autoCollapseEmpty: true, savingsView: { hideUncounted: false, ledgerSortAsc: false, spendSortAsc: false, targetSortAsc: false } };
   try {
     const p = JSON.parse(localStorage.getItem(PANEL_PREFS_KEY));
-    if (p && typeof p === 'object') return { ...base, ...p, collapsed: { ...p.collapsed }, hidden: { ...p.hidden }, height: { ...p.height }, order: { ...p.order } };
+    if (p && typeof p === 'object') return { ...base, ...p, collapsed: { ...p.collapsed }, hidden: { ...p.hidden }, height: { ...p.height }, order: { ...p.order }, savingsView: { ...base.savingsView, ...p.savingsView } };
   } catch { /* private window / blocked storage - layout just won't persist */ }
   return base;
 }
 let panelPrefs = loadPanelPrefs();
 function savePanelPrefs() { try { localStorage.setItem(PANEL_PREFS_KEY, JSON.stringify(panelPrefs)); } catch { /* still applies for this page load */ } }
+savingsLedgerSortAsc = panelPrefs.savingsView.ledgerSortAsc;
+savingsSpendSortAsc = panelPrefs.savingsView.spendSortAsc;
+savingsTargetSortAsc = panelPrefs.savingsView.targetSortAsc;
+el('savingsHideUncounted').checked = panelPrefs.savingsView.hideUncounted;
+if (savingsLedgerSortAsc) el('savingsLedgerSortHeader').textContent = 'Saved ▲';
+if (savingsSpendSortAsc) el('savingsSpendSortHeader').textContent = 'Est. tokens ▲';
+if (savingsTargetSortAsc) el('savingsTargetSortHeader').textContent = 'Est. tokens ▲';
 
 const panelStates = {};
 function panelState(id) {
@@ -5761,6 +5912,7 @@ function populateSettingsForm() {
   el('setConsoleNetLimit').value = settings.consoleNetFetchLimit;
   el('setNetSlowMs').value = settings.netSlowMs;
   el('setActionGroupMin').value = settings.actionGroupMin;
+  el('setCostPerMTok').value = settings.costPerMTok;
 }
 
 function showSettingsTab(name) {
@@ -5794,14 +5946,17 @@ el('settingsApplyBtn').addEventListener('click', () => {
     consoleNetFetchLimit: Math.max(100, Number(el('setConsoleNetLimit').value) || DEFAULT_SETTINGS.consoleNetFetchLimit),
     netSlowMs: Math.max(500, Number(el('setNetSlowMs').value) || DEFAULT_SETTINGS.netSlowMs),
     actionGroupMin: Number.isFinite(Number(el('setActionGroupMin').value)) && el('setActionGroupMin').value !== '' ? Math.max(0, Math.floor(Number(el('setActionGroupMin').value))) : DEFAULT_SETTINGS.actionGroupMin,
+    costPerMTok: Number.isFinite(Number(el('setCostPerMTok').value)) && el('setCostPerMTok').value !== '' ? Math.max(0, Number(el('setCostPerMTok').value)) : DEFAULT_SETTINGS.costPerMTok,
   });
   applyDisplaySettingsNow();
+  renderSavingsPanel(lastSavingsReport);
 });
 
 el('settingsResetBtn').addEventListener('click', () => {
   saveSettings({ ...DEFAULT_SETTINGS });
   populateSettingsForm();
   applyDisplaySettingsNow();
+  renderSavingsPanel(lastSavingsReport);
 });
 
 async function loadConfigTabs() {
