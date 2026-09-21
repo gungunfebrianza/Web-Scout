@@ -1225,6 +1225,34 @@ function decorateEntriesWithKnownIssue(entries, textFor) {
   });
 }
 
+// getActionCostByTarget's "biggest single targets" ranks by bytes alone - a target near the
+// top because it keeps failing and getting retried looks identical to one that's just
+// naturally verbose, so the dashboard's cut-hint column had no way to point at the real fix
+// (the known-issue's remediation) instead of a generic scoping tip. Joins on the same
+// `${type}::${target}` key getActionFailureTextsByTarget groups on.
+function decorateTargetsWithKnownIssue(rows, failureTextsByTarget) {
+  return rows.map((r) => {
+    const errors = failureTextsByTarget.get(`${r.type}::${r.target}`);
+    if (!errors?.length) return r;
+    const { match } = matchKnownIssueForError(errors.join('\n'));
+    return match ? { ...r, knownIssue: match } : r;
+  });
+}
+
+// decorateTargetsWithKnownIssue above only reaches idb.dump/dom.query rows - the only two types
+// getActionCostByTarget can extract a meaningful target for. Every other spend-driving type
+// (eval, net.log, console.log, idb.put, timeout.verify - all of which already have their own
+// SV_CUT_HINTS entry client-side) had no known-issue path at all. Joins on type ALONE against
+// getActionFailureTextsByType, so it reaches the full byType spend table instead.
+function decorateTypesWithKnownIssue(rows, failureTextsByType) {
+  return rows.map((r) => {
+    const errors = failureTextsByType.get(r.type);
+    if (!errors?.length) return r;
+    const { match } = matchKnownIssueForError(errors.join('\n'));
+    return match ? { ...r, knownIssue: match } : r;
+  });
+}
+
 // One row per currently-connected agent, so a single preflight can answer "is some tab fighting
 // another over this agent name" instead of several manual `eval location.href` round trips.
 function connectedAgentsSummary() {
@@ -2373,7 +2401,8 @@ const routes = [
       const neverCalledTypes = Object.keys(COMMAND_TYPES).filter((t) => t !== 'ping' && t !== 'page.epoch' && !calledTypes.has(t)).sort();
       return {
         ...cost,
-        byTarget: dbApi.getActionCostByTarget(),
+        byType: decorateTypesWithKnownIssue(cost.byType, dbApi.getActionFailureTextsByType()),
+        byTarget: decorateTargetsWithKnownIssue(dbApi.getActionCostByTarget(), dbApi.getActionFailureTextsByTarget()),
         // One row per session, tags included (db.mjs's getSessionTokenTotals) - the caller (dashboard)
         // does the tag-matching client-side, same reasoning as that function's own comment. Lets
         // "tokens spent by the self-repair loop" (sessions tagged 'self-repair') answer from data
@@ -2687,7 +2716,8 @@ const routes = [
         if (snapshot && !snapshot.neverRunMacros.some((m) => m.id === macro.id)) snapshot.neverRunMacros.push(macro);
       }
       broadcastUpdate('macro', null);
-      return macro;
+      const selectorSuggestions = buildMacroSelectorSuggestions(Number(body.sessionId), steps, actions);
+      return selectorSuggestions.length ? { ...macro, selectorSuggestions } : macro;
     },
   },
   { method: 'GET', pattern: /^\/macros$/, handler: async () => dbApi.listMacros() },
@@ -2708,8 +2738,7 @@ const routes = [
       }
       const macro = dbApi.updateMacroSteps(Number(m[1]), body.steps);
       broadcastUpdate('macro', null);
-      const selectorSuggestions = buildMacroSelectorSuggestions(Number(body.sessionId), steps, actions);
-      return selectorSuggestions.length ? { ...macro, selectorSuggestions } : macro;
+      return macro;
     },
   },
   {
@@ -2799,6 +2828,8 @@ const routes = [
         ? getAnalytics().macrosNeverSucceeding.find((mns) => mns.id === macro.id)
         : undefined;
 
+      const riskPreview = buildMacroRiskPreview(session.id, macro.steps.slice(fromStep), fromStep);
+
       const results = [];
       for (const step of macro.steps.slice(fromStep)) {
         if (await isNoOpPut(step)) {
@@ -2828,8 +2859,6 @@ const routes = [
         // Macro replay previously never touched the live-friction-awareness system at all -
         // /command's dispatchTracked (inline knownIssue-on-failure) and maybeRiskySelectorWarn
         // were both wired to exactly one dispatch surface. Macros exist specifically for
-      const riskPreview = buildMacroRiskPreview(session.id, macro.steps.slice(fromStep), fromStep);
-
         // REPEATED command shapes, which is exactly where a selector already known to fail 3+
         // times is most likely to recur - this was the one place the whole system was silently
         // absent. No response-header slot for N steps in one reply, so both surface as fields
@@ -2880,6 +2909,7 @@ const routes = [
         totalSteps: macro.steps.length,
         skippedCount,
         results: compactResults,
+        ...(riskPreview.length ? { riskPreview } : {}),
         ...(priorNeverSucceeding
           ? { warning: `macro "${macro.name}" (#${macro.id}) has run ${priorNeverSucceeding.attemptedSteps} step(s) before this and never once succeeded - check "macro inspect ${macro.id}" or the dashboard's macro health strip before relying on it again.` }
           : {}),
@@ -2909,7 +2939,6 @@ const routes = [
             sessionId: s.id, sessionGoal: s.goal, sessionStatus: s.status,
             actionId: a.id, type: a.type, ok: a.ok, startedAt: a.started_at,
             snippet: haystack.slice(Math.max(0, idx - 40), idx + q.length + 80),
-        ...(riskPreview.length ? { riskPreview } : {}),
           });
           if (matches.length >= 200) break;
         }
@@ -2954,6 +2983,7 @@ const routes = [
       const session = requireActiveSession();
       const dispatchTimeoutMs = LONG_POLL_TYPES.has(type) ? (Number(params?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS;
       maybeRiskySelectorWarn(session.id, type, params, res);
+      maybeFrictionBroadcastNotice(session.id, agentName, res);
 
       const cacheKey = readCacheKey(agentName, type, params);
       const budget = cacheKey ? currentBudget(session) : null;
@@ -2983,7 +3013,6 @@ const routes = [
       let resultOut;
       let freshActionId;
       // idb.put/idb.putMany --dry-run write nothing (readonly transaction,
-      maybeFrictionBroadcastNotice(session.id, agentName, res);
       // no .put() call in inject.js) - wrapping either in a before/after
       // auto-snapshot+diff pair would pay real snapshot cost to prove a
       // diff that can never be anything but empty.
