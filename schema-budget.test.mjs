@@ -35,11 +35,17 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 // Measured 19,632 when merging in the self-repair loop's webscout_repair (status/enable/
 // disable/patch/verify/causal_diff - see self-repair.mjs, webscout2.md) on top of the round-10
 // baseline above - raised to 19700, same commit, same convention.
-const MCP_TOTAL_MAX_BYTES = 19700;
+// Measured 19,734 when idb.seedTemplate (a CRV pass hit two real seeding bugs from guessing a
+// row's shape from memory - see [[project_agent-os-capital-flow-authority-pilot-p48-p410]])
+// added seed_template to webscout_idb (already the biggest single tool) - raised to 19750,
+// same commit, same convention.
+const MCP_TOTAL_MAX_BYTES = 19750;
 // Raised to 3550 when V38 added crv_preflight/crv_seed/crv_cleanup to webscout_idb (already the
 // biggest single tool, from crv_run) - same commit-with-the-text convention as above.
 // Raised to 3650 when V39 extended crv_preflight's one-line description (webscout_idb measured 3,606).
-const MCP_TOOL_MAX_BYTES = 3650;
+// Raised to 3720 when idb.seedTemplate's one-line description landed on the same tool (measured
+// 3,708) - same convention, same commit as the text.
+const MCP_TOOL_MAX_BYTES = 3720;
 // The biggest slice of help (a whole group) and the index a bare `cli.mjs` prints.
 // Raised to 14300 when "session viz" (round-2 session-viz.mjs's own CLI access) was added to the
 // already-tightest group - same commit as the text, same convention as MCP_TOTAL_MAX_BYTES above.

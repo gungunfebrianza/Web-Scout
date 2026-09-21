@@ -219,6 +219,48 @@ could not check (unreadable file, or entries loaded but no console result), with
 This file is per-checkout and operator-maintained. Never commit real entries into the tool's own
 generic docs or the example file; it is git-ignored for that reason.
 
+`remediation` is normally a plain string. It MAY instead be `{ "text": "...", "retry": { "type": "dom.click", "params": { "selector": "..." } } }`
+(`retry` is the same `{type, params}` a `POST /command` takes; `idb.snapshot` is refused). Every surface
+that prints a remediation still shows `text` (an entry with only a string keeps working unchanged), and the
+matched `knownIssue` additionally carries `retry`. `dom click`/`dom fill`/`dom click-wait --auto-remediate`
+(a `POST /command` `autoRemediate: true`) then re-dispatches that retry ONCE after the original action fails
+and reports it as `remediationAttempt: { ok, result | error }` beside the failure - the original failure is
+never swallowed or rewritten as a success, so the caller decides whether the run recovered. Not attempted
+after a timeout (the page may still be mid-command). MCP callers get `knownIssue.retry` in the failure reply
+and dispatch it themselves.
+
+Three more places friction reaches an agent, all additive and silent when there is nothing to say:
+(1) `macro run`'s reply carries `riskPreview` - every step whose selector is over the 3-fail threshold,
+worst offender first, computed BEFORE any step runs (the CLI prints it as `RISK PREVIEW` ahead of the
+results); omitted entirely for a clean macro. `crv run` is a single action, so its existing pre-dispatch
+`x-webscout-selector-risk` header already is its preview. (2) When one connected agent's failure carries an
+inline `knownIssue`, or a selector's failure count in the session reaches the 3-fail threshold (exactly at
+the crossing), the relay queues a notice for every OTHER connected agent and drains it into an
+`x-webscout-friction-broadcast` header on that agent's next `/command` reply (the dashboard's SSE stream gets
+a `friction` event) - CLI/MCP callers are request/response, so a header on the next reply is the only
+delivery slot; it never interrupts a command in flight. (3) `macro record` adds `selectorSuggestions` (the CLI
+prints `SUGGESTION:`) when a recorded step's selector is over the threshold and two successful `dom.query`
+results in the session returned the same tag + non-null id for it and for another non-risky selector - the one
+real same-element signal (`dom.click`/`fill` results carry no element identity, and similar-looking is a
+guess, so neither is used). Suggestion only: the recorded steps are never rewritten; swap one via `macro update`.
+
+## Sharing friction history across checkouts (e.g. a git worktree)
+
+Every piece of friction awareness above (`topFailedSelectors`, `macrosNeverRun`, the risky-selector
+warning, `crv preflight`'s digest, ...) reads `webscout.db`, and each checkout normally has its own -
+a git worktree checked out for a feature branch starts with an EMPTY friction history even when it's
+driving CRV against the exact same host-app selectors/stores the primary checkout already has a
+learned history for. `WEBSCOUT_DB_PATH` (already in the README's env var table) already solves this:
+point a worktree's relay at the primary checkout's `webscout.db` (`WEBSCOUT_DB_PATH=/path/to/primary/tools/web-scout/webscout.db node tools/web-scout/relay.mjs`,
+or the same env var before any `cli.mjs`/MCP invocation that autostarts one) and its friction
+analytics, known-issue matches, and risky-selector warnings are the SAME learned history, live, not a
+stale export. This is safe to run concurrently from two checkouts' relays at once (on two different
+`WEBSCOUT_PORT`s, one SQLite file) because `db.mjs` already opens it in WAL mode with a 5s
+`busy_timeout` - built for one relay process, but multi-process-safe as a consequence. No export/import
+step exists or is needed for this case; if a checkout genuinely cannot share a filesystem path with
+another (a remote sandbox, no shared mount), fall back to reading the other checkout's `GET /analytics`
+directly instead of the DB file.
+
 The same registry now reaches an agent in several more places, not only `crv preflight`'s boot-error
 check: (1) a failed `/command` whose own error text matches a signature gets `extra.knownIssue`
 folded straight into that command's error reply (`cli.mjs` prints it as `Known issue: ...`, and the

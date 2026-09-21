@@ -34,6 +34,7 @@ const COVERED = {
   'dom.settle': { timeoutMs: 800, quietMs: 100 },
   'dom.screenshot': { selector: '#list', expectOk: null },
   'idb.list': {},
+  'idb.seedTemplate': { store: 'notes' },
   'idb.dump': { store: 'notes' },
   'idb.get': { store: 'notes', key: 1 },
   'idb.wait': { store: 'notes', countGte: 1, timeoutMs: 400 },

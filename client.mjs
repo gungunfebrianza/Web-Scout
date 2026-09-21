@@ -198,6 +198,10 @@ export async function request(method, pathName, body, { autostart = true } = {})
   if (selectorRisk) emitNote(selectorRisk);
   const macroMatch = res.headers.get('x-webscout-macro-match');
   if (macroMatch) emitNote(macroMatch);
+  // Another connected agent just hit a known issue / repeated failure (relay.mjs's
+  // queueFrictionBroadcast) - informational only, same header-not-body convention.
+  const frictionBroadcast = res.headers.get('x-webscout-friction-broadcast');
+  if (frictionBroadcast) emitNote(frictionBroadcast);
   // The relay process is running OLDER code than what is on disk (an edit to
   // relay.mjs/db.mjs/... is invisible to it until restart) - once per process
   // is enough, and CLI/MCP results are otherwise trustworthy-looking.

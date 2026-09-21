@@ -2917,6 +2917,93 @@ session, so use it only when nothing else shares the relay.
 
 Versions: relay 0.26.0, MCP server 0.27.0. Full suite: 393 tests, 387 pass, 2 skipped (need a live tab), 4 failing that predate this round and are unrelated (2 in `auto-restart.test.mjs`, the same fire-and-forget `session end`/`session start` race V38 documented; the `--peek` read-shaping case; and the committed-calibration freshness check, the known stray-local-`token-calibration.json` trigger). 9 new tests: 8 in `preflight-diagnostics.test.mjs` (registry match/absent/broken, example file, tab collision, agents[] when not connected, `--if-stale-min` over HTTP and via the CLI) and 1 in `db.mjs.test.mjs` (threshold arithmetic with a stubbed clock).
 
+## V40 - CRV workflow friction closed after a real P4.10 pass (implemented)
+
+A real-browser CRV pass against a P4.10 (Capital Flow "limited authority pilot outcome
+evaluation") worktree surfaced ten friction points. Auditing each one against this file's own
+prior rounds first (per this repo's own "check `usage.txt`/roadmap before assuming a gap"
+lesson - see the friction-analytics entry above) found six were **already closed** by earlier
+rounds and never actually blocked the pass: the relay-side tab-collision guard and
+`agentStale`/`dbVersionDrift` reporting on `crv preflight` (V38/V39), the `sw.js`
+stale-reload warning on `page reload`, and `idb diff`'s "`--agent` is not a param here" already
+being explicit in `usage.txt` - the friction that round hit was not reading it, the exact
+pattern the friction-analytics entries above exist to prevent. `--auto-snapshot` (`session
+start`) was also found already doing exactly what a "make CRV auto-snapshot" ask would have
+asked for, opt-in and `--stores`-gated on purpose (an unscoped auto-snapshot risks the same
+60s timeout an unscoped `idb snapshot` does) - not a gap.
+
+Four were real gaps, closed here:
+- `idb seed-template <store>` (also `webscout_idb.seed_template`) - a store's real
+  `keyPath`/`autoIncrement`/indexes plus one real row's field-name/value-TYPE shape (never its
+  values, depth 2 - `inject.js`'s `shapeOf()`) before hand-writing a seed row. The P4.10 pass hit
+  two real seeding bugs purely from guessing a row's shape from memory (a missing nested field, a
+  stale sibling field) - this answers "what does a row here actually look like" structurally,
+  without becoming a data dump.
+- `crv serve <dir> --port <n>` / `crv stop --port <n>` (`serve-control.mjs`,
+  `static-server.mjs`) - a throwaway static file server for a CRV worktree/checkout, tracked by
+  a per-port pidfile, replacing `python -m http.server` (an extra runtime dependency this
+  Node-only tool otherwise never needs) and the manual `netstat`+`taskkill` dance to stop it
+  (`pkill` silently does nothing against a native Windows process - the exact problem
+  `relay start`/`relay stop` already solved for the relay process itself, generalized here).
+- `crv launch <url> --agent <name> [--headless|--headed]` (`browser-harness.mjs`'s
+  `buildLaunchUrl`/`launchTab`) - opens a real tab at `<url>` with `?webscout=1&webscout_name=
+  <name>&webscout_port=<this CLI's configured port>` merged onto any existing query string, then
+  polls the relay up to 15s for that agent to connect. Closes the single most repetitive manual
+  step of every CRV pass (navigate, hand-type the query params, switch back to check `status`).
+  `--agent` is required, not optional - two tabs sharing the relay's `default` slot is the exact
+  tab-collision incident V38's guard exists to catch, and this command must not reintroduce it by
+  omission. Deliberately thin: no CDP attachment, no scripted interaction inside the page, and the
+  tab is never auto-closed - this opens one tab at a known local dev URL, it does not drive one
+  (see "Explicit non-goals" below on not becoming a Playwright/Puppeteer replacement).
+
+**Why:** almost every real CRV friction point since V38 has been "the tool already answers this
+and the pass didn't check" rather than a true capability gap - re-verifying against the roadmap
+and `usage.txt` before building anything is now cheaper than guessing, and this round is itself
+a second confirming data point for that pattern, not just the P4.10 pass's own report.
+
+**How to apply:** before proposing a new web-scout command from CRV friction, grep this file and
+`usage.txt` for the exact pain point first - six of ten "gaps" this round turned out to already
+exist. `idb seed-template` before any hand-written `idb put`/`idb seed`. `crv serve`/`crv stop`
+replace a hand-run `python -m http.server` for a worktree's own throwaway origin - never point
+either at the live app's own port. `crv launch` always stamps its own relay port, so it stays
+correct against a non-default `--port`.
+
+Full suite (from the primary checkout, `node --test --test-force-exit tools/web-scout/*.test.mjs`):
+458 tests, 441 pass. 15 failing, all pre-existing and unrelated to this round (confirmed by running
+the identical full suite against the pre-round tree via `git stash`): the same `auto-restart.test.mjs`/
+`relay-control.test.mjs` relay-spawn timing flakiness under full-suite parallel load documented in
+earlier rounds, the `--peek` read-shaping case, the committed-calibration freshness check, and one
+flaky full-suite-only failure in `tool-usage.test.mjs` (passes cleanly in isolation - same timing-
+under-load class as the relay-spawn failures, not a real regression). 16 new tests across
+`serve-control.test.mjs` (7), `crv-launch.test.mjs` (7), and one new case each in
+`inject-browser.test.mjs` and `read-only-contract.test.mjs`'s registry cross-check for
+`idb.seedTemplate`. `schema-budget.test.mjs`'s MCP tool-list budget was raised (19700 -> 19750 total,
+3650 -> 3720 for `webscout_idb`, already the biggest single tool) in this same commit, per this
+file's own "raise a cap only in the commit that adds the text" convention.
+
+## V41 - friction analytics reaches the moment it matters, round 2 (implemented)
+
+Follow-up to V40's question "what would make friction awareness worth more to an agent mid-CRV". Five
+gaps, each closing a place where the learned history existed but arrived too late or in the wrong place:
+
+- **Cross-checkout history** - already solved by `WEBSCOUT_DB_PATH` (WAL + 5s `busy_timeout` make one
+  SQLite file safe for two relays); it had never been documented as THE answer for a git worktree that
+  starts with an empty history. Documented in CONTRIBUTING.md, no code.
+- **`macro run` risk preview** - the per-step `riskWarning` only fired as each step began, so step 7's
+  12x-failure selector was announced after steps 1-6 had already run. `riskPreview` (worst first, before any
+  step runs; `RISK PREVIEW` on stderr in the CLI) shows the whole shape up front; omitted for a clean macro.
+- **Runnable remediation** - a `known-issues.json` `remediation` may now be `{ text, retry: {type, params} }`;
+  `dom click/fill/click-wait --auto-remediate` re-dispatches the retry once and reports `remediationAttempt`
+  beside the original failure (never swallowed, never after a timeout). A string remediation is unchanged.
+- **Live cross-agent broadcast** - a known-issue failure, or a selector reaching 3 failures in the session,
+  on one agent is queued for every other connected agent and delivered as `x-webscout-friction-broadcast`
+  on its next `/command` reply (CLI/MCP are request/response, so a reply header is the only slot; the
+  dashboard's SSE stream also gets a `friction` event).
+- **Friction-aware `macro record`** - `selectorSuggestions` when two `dom.query` results (same tag + non-null
+  id, the one real same-element signal) show a non-risky selector reaching the element a fragile recorded
+  step targets. Suggestion only; no id evidence means no suggestion, by design (a guess would be worse
+  than silence).
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

@@ -83,3 +83,42 @@ export async function launchBrowser(browserPath = findBrowser()) {
     throw err;
   }
 }
+
+// Merges the activation query params onto whatever query string `target` already has, never
+// clobbering it - "crv launch" against a URL that already carries its own params (e.g. a hash
+// route, or an app-specific query flag) must not silently drop them. Exported (pure, no
+// process spawn) so its merge behavior is unit-testable without a real browser.
+export function buildLaunchUrl(target, agentName, relayPort) {
+  const url = new URL(target);
+  url.searchParams.set('webscout', '1');
+  url.searchParams.set('webscout_name', agentName);
+  // inject.js defaults to port 8973 when webscout_port is absent (see its own comment) - always
+  // stamping the CLI's actual configured port here (not only when it differs from the default)
+  // means the launched tab connects to the SAME relay this CLI is talking to, not silently the
+  // default one, whenever a caller runs a non-default relay (confirmed needed: an ephemeral test
+  // relay is never on 8973, and this is exactly how such a mismatch would go unnoticed).
+  if (relayPort !== undefined && relayPort !== null) url.searchParams.set('webscout_port', String(relayPort));
+  return url;
+}
+
+// Launches a REAL tab navigated directly to `url`, for the CLI's "crv launch" - unlike
+// launchBrowser() above (CDP-attached, throwaway profile, auto-closed at test teardown), this
+// tab is meant to stay open for the rest of an operator's CRV session: no CDP attached (the
+// caller confirms the agent connected by polling the relay, not by evaluating page JS), and
+// the profile persists across relaunches, keyed by the URL's own port, so repeating "crv
+// launch" against the same throwaway static server reuses the same tab identity instead of
+// starting from a blank profile every time. Nothing here closes it - the operator (or the OS)
+// closes the window when the CRV pass is done.
+export function launchTab(url, { headless = false } = {}) {
+  const browserPath = findBrowser();
+  if (!browserPath) throw new Error('no Chromium/Edge binary found (set WEBSCOUT_BROWSER)');
+  let port = '0';
+  try { port = new URL(url).port || '0'; } catch { /* keep '0' - still a valid, if shared, profile key */ }
+  const profile = path.join(os.tmpdir(), `webscout-crv-tab-profile-${port}`);
+  fs.mkdirSync(profile, { recursive: true });
+  const args = ['--no-first-run', `--user-data-dir=${profile}`];
+  if (headless) args.push('--headless=new', '--disable-gpu');
+  const child = spawn(browserPath, [...args, url], { stdio: 'ignore', detached: true, windowsHide: true });
+  child.unref();
+  return { pid: child.pid, profile, browserPath };
+}

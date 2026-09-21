@@ -217,6 +217,25 @@ test('idb reads can be narrowed to counts, named stores, non-empty stores and a 
   assert.equal(whole.row.body.length, 500);
 });
 
+test('idb.seedTemplate answers real store metadata plus a real row\'s field/type shape, never its values', { skip }, async () => {
+  // kv has rows {id:1}, {id:2}, {id:9,title,body,tag} by this point (earlier tests seeded
+  // them) - openCursor() walks ascending by key, so the example row is the lowest key (id:1).
+  const kv = (await command('idb.seedTemplate', { store: 'kv' })).json.result;
+  assert.equal(kv.keyPath, 'id');
+  assert.equal(kv.rowCount, 3);
+  assert.deepEqual(kv.shape, { id: 'number' });
+  assert.ok(!JSON.stringify(kv.shape).includes('nine'), 'a shape is field names/types, never the real values');
+
+  const empty = (await command('idb.seedTemplate', { store: 'empty_one' })).json.result;
+  assert.equal(empty.rowCount, 0);
+  assert.equal(empty.shape, null);
+  assert.match(empty.note, /store is empty/);
+
+  const missing = await command('idb.seedTemplate', { store: 'ghost' });
+  assert.equal(missing.json.ok, false);
+  assert.match(missing.json.error, /no such store/);
+});
+
 test('net.log and console.log filter by failure, level, text and field in the page', { skip }, async () => {
   await page.evaluate(`fetch('http://127.0.0.1:1/unreachable').catch(() => true)`);
   await page.evaluate(`fetch('/inject.js?ok=1').then((r) => r.text())`);

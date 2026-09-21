@@ -283,6 +283,291 @@ test('macro replay carries the same risky-selector warning and knownIssue match 
   });
 });
 
+test('macro run carries a riskPreview of every risky step, worst offender first, computed BEFORE any step runs', async () => {
+  await withRelay(async ({ api }) => {
+    // #verybad fails 5x, #risky fails 3x (both cross the 3-fail threshold); #clean never fails.
+    const a = await api('POST', '/sessions', { goal: 'seed risky-selector history', context: 'friction-awareness.test.mjs', briefing: false });
+    for (let i = 0; i < 5; i += 1) {
+      try { await api('POST', '/command', { type: 'dom.click', params: { selector: '#verybad' } }); } catch { /* expected */ }
+    }
+    for (let i = 0; i < 3; i += 1) {
+      try { await api('POST', '/command', { type: 'dom.click', params: { selector: '#risky' } }); } catch { /* expected */ }
+    }
+    await api('POST', `/sessions/${a.id}/end`);
+
+    // Record a 3-step macro (clean, then the two risky selectors, deliberately out of severity
+    // order) in a fresh session - all three calls succeed live so all three record.
+    const b = await api('POST', '/sessions', { goal: 'record macro', context: 'friction-awareness.test.mjs', briefing: false });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#clean' } });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#risky' } });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#verybad' } });
+    const macro = await api('POST', '/macros', { name: 'risk-preview-macro', sessionId: b.id });
+    assert.equal(macro.steps.length, 3);
+
+    const run = await api('POST', `/macros/${macro.id}/run`, {});
+    assert.ok(run.riskPreview, 'expected a riskPreview field');
+    assert.equal(run.riskPreview.length, 2, 'only the two selectors over the fail threshold appear');
+    // Riskiest first: #verybad (5 fails, step 2) before #risky (3 fails, step 1), even though
+    // #risky runs first in the macro - this is a preview computed up front, not a step-order echo.
+    assert.equal(run.riskPreview[0].selector, '#verybad');
+    assert.equal(run.riskPreview[0].failCount, 5);
+    assert.equal(run.riskPreview[0].stepIndex, 2);
+    assert.equal(run.riskPreview[1].selector, '#risky');
+    assert.equal(run.riskPreview[1].failCount, 3);
+    assert.equal(run.riskPreview[1].stepIndex, 1);
+  }, {
+    handlers: {
+      // Each selector fails exactly its seed count, then succeeds - so the history-seeding
+      // loops above fail as intended, but the SAME selectors can still be clicked successfully
+      // afterward to record the macro and to replay it (a macro only records successful steps).
+      'dom.click': (() => {
+        const calls = { '#verybad': 0, '#risky': 0 };
+        const threshold = { '#verybad': 5, '#risky': 3 };
+        return (params) => {
+          const sel = params.selector;
+          if (sel === '#clean') return { clicked: true };
+          calls[sel] += 1;
+          if (calls[sel] <= threshold[sel]) throw new Error('still broken');
+          return { clicked: true };
+        };
+      })(),
+    },
+  });
+});
+
+test('macro run omits riskPreview entirely for a macro with no risky steps', async () => {
+  await withRelay(async ({ api }) => {
+    const s = await api('POST', '/sessions', { goal: 'record clean macro', context: 'friction-awareness.test.mjs', briefing: false });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#clean' } });
+    const macro = await api('POST', '/macros', { name: 'clean-macro', sessionId: s.id });
+    const run = await api('POST', `/macros/${macro.id}/run`, {});
+    assert.equal(run.riskPreview, undefined);
+  }, { handlers: { 'dom.click': () => ({ clicked: true }) } });
+});
+
+test('macro record suggests a non-risky alternative selector that dom.query evidence shows reaches the SAME element, and never rewrites the recorded step', async () => {
+  let clicks = 0;
+  await withRelay(async ({ api }) => {
+    const a = await api('POST', '/sessions', { goal: 'seed risky-selector history', context: 'friction-awareness.test.mjs', briefing: false });
+    for (let i = 0; i < 3; i += 1) {
+      try { await api('POST', '/command', { type: 'dom.click', params: { selector: '.btn.primary > span' } }); } catch { /* expected */ }
+    }
+    await api('POST', `/sessions/${a.id}/end`);
+
+    const b = await api('POST', '/sessions', { goal: 'record macro', context: 'friction-awareness.test.mjs', briefing: false });
+    await api('POST', '/command', { type: 'dom.query', params: { selector: '.btn.primary > span' } });
+    await api('POST', '/command', { type: 'dom.query', params: { selector: '#save-btn' } });
+    await api('POST', '/command', { type: 'dom.query', params: { selector: '#unrelated' } });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '.btn.primary > span' } });
+    const macro = await api('POST', '/macros', { name: 'suggest-macro', sessionId: b.id });
+
+    assert.equal(macro.steps.length, 1);
+    assert.equal(macro.steps[0].params.selector, '.btn.primary > span', 'the recorded step is never auto-swapped');
+    assert.equal(macro.selectorSuggestions.length, 1);
+    const s = macro.selectorSuggestions[0];
+    assert.equal(s.stepIndex, 0);
+    assert.equal(s.selector, '.btn.primary > span');
+    assert.equal(s.alternative, '#save-btn');
+    assert.equal(s.element, 'BUTTON#save');
+    assert.equal(s.failCount, 3);
+    assert.match(s.evidence, /both returned BUTTON#save/);
+  }, {
+    handlers: {
+      'dom.click': () => { clicks += 1; if (clicks <= 3) throw new Error('still broken'); return { clicked: true }; },
+      'dom.query': (params) => (params.selector === '#unrelated' ? { found: true, tag: 'DIV', id: 'other' } : { found: true, tag: 'BUTTON', id: 'save' }),
+    },
+  });
+});
+
+test('macro record makes no suggestion without same-element evidence (a query with no id, or no query at all), even for a risky selector', async () => {
+  let clicks = 0;
+  await withRelay(async ({ api }) => {
+    const a = await api('POST', '/sessions', { goal: 'seed risky-selector history', context: 'friction-awareness.test.mjs', briefing: false });
+    for (let i = 0; i < 3; i += 1) {
+      try { await api('POST', '/command', { type: 'dom.click', params: { selector: '.fragile' } }); } catch { /* expected */ }
+    }
+    await api('POST', `/sessions/${a.id}/end`);
+
+    const b = await api('POST', '/sessions', { goal: 'record macro', context: 'friction-awareness.test.mjs', briefing: false });
+    await api('POST', '/command', { type: 'dom.query', params: { selector: '.fragile' } });
+    await api('POST', '/command', { type: 'dom.query', params: { selector: '.other-way' } });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '.fragile' } });
+    const macro = await api('POST', '/macros', { name: 'no-evidence-macro', sessionId: b.id });
+    assert.equal(macro.steps.length, 1);
+    assert.equal(macro.selectorSuggestions, undefined, 'id-less query results identify nothing - similar-looking is a guess, not evidence');
+  }, {
+    handlers: {
+      'dom.click': () => { clicks += 1; if (clicks <= 3) throw new Error('still broken'); return { clicked: true }; },
+      'dom.query': () => ({ found: true, tag: 'BUTTON', id: null }),
+    },
+  });
+});
+
+async function withTwoAgents(fn, { envOverride = {}, alphaHandlers = {}, betaHandlers = {} } = {}) {
+  const relay = await startTestRelay({ env: envOverride });
+  const alpha = await connectFakeAgent(relay.port, alphaHandlers, { name: 'alpha' });
+  const beta = await connectFakeAgent(relay.port, betaHandlers, { name: 'beta' });
+  const apiRaw = async (method, route, body) => {
+    const res = await fetch(`http://127.0.0.1:${relay.port}${route}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
+    return { res, json: await res.json() };
+  };
+  try {
+    await fn({ apiRaw });
+  } finally {
+    await alpha.close();
+    await beta.close();
+    await relay.stop();
+  }
+}
+
+test('a known-issue failure on one agent reaches the OTHER connected agent as a live x-webscout-friction-broadcast header, once, and never the failing agent itself', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-broadcast-'));
+  const registryPath = path.join(dir, 'known-issues.json');
+  fs.writeFileSync(registryPath, JSON.stringify([{ id: 'shared-flaky-el', signature: 'detached from DOM', remediation: 'use dom.click-wait' }]));
+  await withTwoAgents(async ({ apiRaw }) => {
+    await apiRaw('POST', '/sessions', { goal: 'friction broadcast', context: 'friction-awareness.test.mjs', briefing: false });
+    const failed = await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#shared' }, agent: 'alpha' });
+    assert.equal(failed.json.ok, false);
+    assert.equal(failed.res.headers.get('x-webscout-friction-broadcast'), null, 'the failing agent already has the failure in its own reply');
+
+    const betaNext = await apiRaw('POST', '/command', { type: 'dom.query', params: { selector: '#other' }, agent: 'beta' });
+    assert.equal(betaNext.json.ok, true, 'informational only - beta\'s own command is unaffected');
+    const notice = betaNext.res.headers.get('x-webscout-friction-broadcast');
+    assert.ok(notice, 'expected the broadcast header on beta\'s next reply');
+    assert.match(notice, /agent "alpha" just failed dom\.click on "#shared"/);
+    assert.match(notice, /shared-flaky-el/);
+    assert.match(notice, /use dom\.click-wait/);
+
+    const betaAgain = await apiRaw('POST', '/command', { type: 'dom.query', params: { selector: '#other' }, agent: 'beta' });
+    assert.equal(betaAgain.res.headers.get('x-webscout-friction-broadcast'), null, 'drained after one delivery');
+    const alphaNext = await apiRaw('POST', '/command', { type: 'dom.query', params: { selector: '#other' }, agent: 'alpha' });
+    assert.equal(alphaNext.res.headers.get('x-webscout-friction-broadcast'), null);
+  }, {
+    envOverride: { WEBSCOUT_KNOWN_ISSUES: registryPath },
+    alphaHandlers: { 'dom.click': () => { throw new Error('Element not found: #shared (detached from DOM)'); }, 'dom.query': () => ({ matches: [] }) },
+    betaHandlers: { 'dom.query': () => ({ matches: [] }) },
+  });
+});
+
+test('a selector crossing the 3-failure threshold in one session is broadcast exactly at the crossing, not before and not on every failure after', async () => {
+  await withTwoAgents(async ({ apiRaw }) => {
+    await apiRaw('POST', '/sessions', { goal: 'threshold broadcast', context: 'friction-awareness.test.mjs', briefing: false });
+    const betaPoll = () => apiRaw('POST', '/command', { type: 'dom.query', params: { selector: '#other' }, agent: 'beta' });
+    for (let i = 0; i < 2; i += 1) await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#flaky' }, agent: 'alpha' });
+    assert.equal((await betaPoll()).res.headers.get('x-webscout-friction-broadcast'), null, '2 failures is below the threshold and no known issue matched');
+    await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#flaky' }, agent: 'alpha' });
+    const notice = (await betaPoll()).res.headers.get('x-webscout-friction-broadcast');
+    assert.ok(notice, 'the 3rd failure crosses the threshold');
+    assert.match(notice, /dom\.click on "#flaky" \(3x this session\)/);
+    await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#flaky' }, agent: 'alpha' });
+    assert.equal((await betaPoll()).res.headers.get('x-webscout-friction-broadcast'), null, 'the 4th failure is past the crossing, not a new one');
+  }, {
+    alphaHandlers: { 'dom.click': () => { throw new Error('still broken'); } },
+    betaHandlers: { 'dom.query': () => ({ matches: [] }) },
+  });
+});
+
+test('a failure with only ONE agent connected queues nothing and does not error', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-broadcast-solo-'));
+  const registryPath = path.join(dir, 'known-issues.json');
+  fs.writeFileSync(registryPath, JSON.stringify([{ id: 'solo', signature: 'detached from DOM', remediation: 'x' }]));
+  await withRelay(async ({ apiRaw }) => {
+    await apiRaw('POST', '/sessions', { goal: 'solo', context: 'friction-awareness.test.mjs', briefing: false });
+    const failed = await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#a' } });
+    assert.equal(failed.json.extra.knownIssue.id, 'solo');
+    const next = await apiRaw('POST', '/command', { type: 'dom.query', params: { selector: '#a' } });
+    assert.equal(next.res.headers.get('x-webscout-friction-broadcast'), null);
+  }, {
+    handlers: { 'dom.click': () => { throw new Error('Element not found (detached from DOM)'); }, 'dom.query': () => ({ matches: [] }) },
+    envOverride: { WEBSCOUT_KNOWN_ISSUES: registryPath },
+  });
+});
+
+test('autoRemediate re-dispatches a matched known issue\'s structured retry ONCE and reports it beside the still-failed original', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-remediate-'));
+  const registryPath = path.join(dir, 'known-issues.json');
+  fs.writeFileSync(registryPath, JSON.stringify([{
+    id: 'flaky-primary-btn', signature: 'detached from DOM', description: 'primary button re-renders',
+    remediation: { text: 'click the stable alternate control', retry: { type: 'dom.click', params: { selector: '#alt-btn' } } },
+  }]));
+  const clicked = [];
+  await withRelay(async ({ apiRaw }) => {
+    await apiRaw('POST', '/sessions', { goal: 'auto-remediate test', context: 'friction-awareness.test.mjs', briefing: false });
+    const { json } = await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#primary' }, autoRemediate: true });
+    assert.equal(json.ok, false, 'the original failure is never rewritten as a success');
+    assert.equal(json.extra.knownIssue.id, 'flaky-primary-btn');
+    assert.equal(json.extra.knownIssue.remediation, 'click the stable alternate control', 'text form stays what every surface shows');
+    assert.deepEqual(json.extra.knownIssue.retry, { type: 'dom.click', params: { selector: '#alt-btn' } });
+    assert.equal(json.extra.remediationAttempt.ok, true);
+    assert.equal(json.extra.remediationAttempt.knownIssueId, 'flaky-primary-btn');
+    assert.deepEqual(clicked, ['#primary', '#alt-btn'], 'retried exactly once, against the alternate selector');
+  }, {
+    handlers: { 'dom.click': (params) => { clicked.push(params.selector); if (params.selector === '#primary') throw new Error('Element not found: #primary (detached from DOM)'); return { clicked: true }; } },
+    envOverride: { WEBSCOUT_KNOWN_ISSUES: registryPath },
+  });
+});
+
+test('without autoRemediate a structured-retry entry only surfaces the hint - nothing is re-dispatched', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-noremediate-'));
+  const registryPath = path.join(dir, 'known-issues.json');
+  fs.writeFileSync(registryPath, JSON.stringify([{ id: 'flaky-primary-btn', signature: 'detached from DOM', remediation: { text: 'use alt', retry: { type: 'dom.click', params: { selector: '#alt-btn' } } } }]));
+  const clicked = [];
+  await withRelay(async ({ apiRaw }) => {
+    await apiRaw('POST', '/sessions', { goal: 'no auto-remediate test', context: 'friction-awareness.test.mjs', briefing: false });
+    const { json } = await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#primary' } });
+    assert.equal(json.extra.knownIssue.remediation, 'use alt');
+    assert.equal(json.extra.remediationAttempt, undefined);
+    assert.deepEqual(clicked, ['#primary']);
+  }, {
+    handlers: { 'dom.click': (params) => { clicked.push(params.selector); throw new Error('Element not found: #primary (detached from DOM)'); } },
+    envOverride: { WEBSCOUT_KNOWN_ISSUES: registryPath },
+  });
+});
+
+test('autoRemediate on a text-only known issue falls back to exactly today\'s behavior (hint only, no retry attempted)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-textonly-'));
+  const registryPath = path.join(dir, 'known-issues.json');
+  fs.writeFileSync(registryPath, JSON.stringify([{ id: 'text-only', signature: 'detached from DOM', remediation: 'use dom.click-wait instead' }]));
+  const clicked = [];
+  await withRelay(async ({ apiRaw }) => {
+    await apiRaw('POST', '/sessions', { goal: 'text-only remediation test', context: 'friction-awareness.test.mjs', briefing: false });
+    const { json } = await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#primary' }, autoRemediate: true });
+    assert.equal(json.extra.knownIssue.remediation, 'use dom.click-wait instead');
+    assert.equal(json.extra.knownIssue.retry, undefined);
+    assert.equal(json.extra.remediationAttempt, undefined);
+    assert.deepEqual(clicked, ['#primary']);
+  }, {
+    handlers: { 'dom.click': (params) => { clicked.push(params.selector); throw new Error('Element not found: #primary (detached from DOM)'); } },
+    envOverride: { WEBSCOUT_KNOWN_ISSUES: registryPath },
+  });
+});
+
+test('a failing structured retry is reported as ok:false, and a malformed retry is dropped with a warning while keeping the text hint', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-badretry-'));
+  const registryPath = path.join(dir, 'known-issues.json');
+  fs.writeFileSync(registryPath, JSON.stringify([
+    { id: 'retry-also-fails', signature: 'detached from DOM', remediation: { text: 'try alt', retry: { type: 'dom.click', params: { selector: '#alt-btn' } } } },
+    { id: 'bad-retry', signature: 'other failure', remediation: { text: 'kept hint', retry: { type: 'idb.snapshot' } } },
+  ]));
+  await withRelay(async ({ apiRaw }) => {
+    await apiRaw('POST', '/sessions', { goal: 'failing retry test', context: 'friction-awareness.test.mjs', briefing: false });
+    const first = await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#primary' }, autoRemediate: true });
+    assert.equal(first.json.extra.remediationAttempt.ok, false);
+    assert.match(first.json.extra.remediationAttempt.error, /alt also broken/);
+    const second = await apiRaw('POST', '/command', { type: 'dom.fill', params: { selector: '#x', value: 'v' }, autoRemediate: true });
+    assert.equal(second.json.extra.knownIssue.id, 'bad-retry');
+    assert.equal(second.json.extra.knownIssue.remediation, 'kept hint');
+    assert.equal(second.json.extra.knownIssue.retry, undefined, 'an idb.snapshot retry is refused, not dispatched');
+    assert.equal(second.json.extra.remediationAttempt, undefined);
+  }, {
+    handlers: {
+      'dom.click': (params) => { throw new Error(params.selector === '#alt-btn' ? 'alt also broken' : 'Element not found: #primary (detached from DOM)'); },
+      'dom.fill': () => { throw new Error('other failure'); },
+    },
+    envOverride: { WEBSCOUT_KNOWN_ISSUES: registryPath },
+  });
+});
+
 test('"crv run" gets the same pre-dispatch risky-selector warning and post-dispatch macro-match nudge POST /command already gets', async () => {
   await withRelay(async ({ apiRaw, api }) => {
     // Seed #risky as a risky selector across sessions.

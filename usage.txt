@@ -224,9 +224,14 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    dom.screenshot of the target selector as its own separate
                                    logged action - the broken state is often gone by the time
                                    a human goes looking for it by hand)
-  dom click <selector> [--nth N]  dispatch a real click - errors (with a preview of every
-                                   match) if the selector is ambiguous; pass --nth to pick one
-  dom fill <selector> <value> [--nth N]   set a form field's value + dispatch input/change
+  dom click <selector> [--nth N] [--auto-remediate]  dispatch a real click - errors (with a
+                                   preview of every match) if the selector is ambiguous; pass
+                                   --nth to pick one. --auto-remediate (also dom fill/click-wait):
+                                   if the failure matches a known-issues.json entry whose
+                                   remediation is { text, retry: {type, params} }, re-dispatch
+                                   that retry ONCE and report it as remediationAttempt next to
+                                   the original failure (which still fails/exits 1)
+  dom fill <selector> <value> [--nth N] [--auto-remediate]   set a form field's value + dispatch input/change
   dom rect <selector>             bounding box (getBoundingClientRect)
   dom style <selector> [prop,prop,...]   computed style (curated defaults, or a given list)
   dom wait <selector> [--text <substr>] [--timeout <ms>]
@@ -253,7 +258,7 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    selector with nested quotes/brackets/attribute values through
                                    bash was a real, repeated time-sink. Overrides the positional
                                    selector argument when both are given.
-  dom click-wait <selector> [--wait-selector <sel>] [--text <substr>|--changed|--stable [--stable-count <n>]] [--timeout <ms>]
+  dom click-wait <selector> [--wait-selector <sel>] [--text <substr>|--changed|--stable [--stable-count <n>]] [--timeout <ms>] [--auto-remediate]
                                    click, then wait for a (possibly different) --wait-selector to
                                    reach a state - one round trip instead of separate click+wait
                                    calls, and a real "did the handler finish" answer where
@@ -305,6 +310,15 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    ancestor chain of enclosing component names only (default
                                    maxDepth 20) - orient first, then "react inspect" a more
                                    specific selector.
+
+  idb seed-template <store>
+                                   real store metadata (keyPath, autoIncrement, indexes) + one real row's
+                                   field-name/value-TYPE shape (never its values, depth 2 - catches a
+                                   nested field's own shape too) - check this before hand-writing a seed
+                                   row so you are not guessing a nested field's shape from memory (a real
+                                   CRV pass missed a nested authorized_scope.dimensions field this way).
+                                   rowCount 0 means the store is empty: only keyPath/indexes are real,
+                                   shape is null (no example row exists yet).
 
   idb list [--stores a,b] [--non-empty]  list IndexedDB object store names + a per-store row count
                                    --stores counts only those stores (unknown names come back as "missing"); --non-empty
@@ -412,6 +426,28 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    many", one call per store), then clears the manifest. Narrower
                                    than "session cleanup --since-snapshot" by design - only ever
                                    touches ids this same tool wrote, never a broader diff.
+  crv serve <dir> --port <n>      spawns a throwaway static file server for <dir> on <n>, detached
+                                   (outlives this CLI call) - replaces "python -m http.server" (an
+                                   extra runtime this Node-only tool otherwise never needs) for serving
+                                   a worktree/checkout during CRV. Tracked by port in a local pidfile;
+                                   "crv stop --port <n>" is the only supported way to stop it.
+  crv stop --port <n>             stops the server "crv serve" started on <n> (SIGTERM on POSIX,
+                                   TerminateProcess on Windows - the same cross-platform kill
+                                   "relay stop" already uses, replacing a manual netstat+taskkill
+                                   dance; pkill silently does nothing against a native Windows process).
+  crv launch <url> --agent <name> [--headless|--headed]
+                                   opens a real browser tab at <url> with ?webscout=1&webscout_name=
+                                   <name>&webscout_port=<this CLI's own configured relay port>
+                                   appended (merged onto any existing query string) - the port is
+                                   always stamped, not only when it looks non-default, so the tab
+                                   connects to the SAME relay this CLI is talking to. Then polls the
+                                   relay up to 15s for that agent to actually connect - replaces
+                                   navigating by hand, typing the query params from memory, and
+                                   switching back to check "status". --agent is REQUIRED (not
+                                   optional): two tabs sharing the relay's "default" slot is exactly
+                                   the tab-collision incident this command exists to avoid. Headed by
+                                   default (--headless for no visible window); the tab is NOT closed
+                                   by this command or by "session end" - close it yourself when done.
   idb diff <idA> <idB>            compute + PERSIST the diff between two persisted snapshots -
   idb diff-golden <name> <idB>    NEVER dispatches to a live tab (--agent is not a param here;
                                    a diff only ever compares two ALREADY-SAVED snapshots server-side).
