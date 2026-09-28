@@ -84,6 +84,42 @@ function emitNote(text, key = text) {
 const staleRelayWarned = new Set();
 const staleAgentWarned = new Set();
 
+// Cross-process cooldown for the two warnings above -------------------------
+//
+// staleRelayWarned/staleAgentWarned only dedupe WITHIN one process. That's
+// correct for mcp-server.mjs (one long-lived process, many tool calls) but
+// cli.mjs is a fresh `node cli.mjs ...` process per command - the overwhelmingly
+// common usage pattern for this tool (see README). Confirmed live: a CRV
+// investigation issuing dozens of separate CLI invocations against one known-
+// stale tab got the IDENTICAL "run an older in-page agent" line printed on
+// EVERY single call, because staleAgentWarned was a fresh empty Set each time
+// - the in-memory dedupe never had a chance to do its job. A warning repeated
+// that often trains the caller to stop reading it, which is exactly backwards
+// for one that matters. A small dotfile cache (same "no dependency, no
+// service" choice as manifestPath's .webscout-crv-manifest.json above) gives
+// one-shot CLI invocations the same "seen it, don't repeat" behavior a
+// long-running process already gets from the Sets - but on a cooldown, not
+// forever, since the underlying condition (relay/tab still stale) is ongoing
+// and a long CLI session should still get reminded eventually.
+const WARN_CACHE_COOLDOWN_MS = 5 * 60 * 1000;
+function warnCachePath() {
+  return process.env.WEBSCOUT_WARN_CACHE_PATH || path.join(process.cwd(), '.webscout-warn-cache.json');
+}
+function readWarnCache() {
+  try { return JSON.parse(fs.readFileSync(warnCachePath(), 'utf8')); } catch { return {}; }
+}
+// Returns true when `key` has NOT been warned-about recently (cooldown elapsed
+// or never recorded) - the caller still owns deciding whether to actually warn.
+function warnCacheDue(key) {
+  const last = readWarnCache()[key];
+  return !(typeof last === 'number' && Date.now() - last < WARN_CACHE_COOLDOWN_MS);
+}
+function warnCacheRecord(key) {
+  const cache = readWarnCache();
+  cache[key] = Date.now();
+  try { fs.writeFileSync(warnCachePath(), JSON.stringify(cache, null, 2)); } catch { /* best-effort - a failed write just means the next call warns again, no worse than before this cache existed */ }
+}
+
 // A relay that died (another session's blanket `relay.mjs` kill did this
 // twice) used to be noticed only when a call failed, then restarted by hand.
 // On ECONNREFUSED against a loopback relay the client now starts one and
@@ -200,18 +236,22 @@ export async function request(method, pathName, body, { autostart = true } = {})
   if (macroMatch) emitNote(macroMatch);
   // The relay process is running OLDER code than what is on disk (an edit to
   // relay.mjs/db.mjs/... is invisible to it until restart) - once per process
-  // is enough, and CLI/MCP results are otherwise trustworthy-looking.
+  // is enough for a long-lived caller; the warnCacheDue check below is what
+  // keeps a one-shot-per-command CLI session from repeating this on every
+  // single call (see WARN_CACHE_COOLDOWN_MS above).
   const staleFiles = res.headers.get('x-webscout-relay-stale');
-  if (staleFiles && !staleRelayWarned.has(staleFiles)) {
+  if (staleFiles && !staleRelayWarned.has(staleFiles) && warnCacheDue(`relay-stale:${staleFiles}`)) {
     staleRelayWarned.add(staleFiles);
+    warnCacheRecord(`relay-stale:${staleFiles}`);
     emitNote(`WARNING: the relay is running code older than what is on disk (${staleFiles} changed since it started) - results may not reflect your edits. Restart it: node tools/web-scout/cli.mjs relay restart`, 'relay-stale');
   }
   // Same idea one level down: a TAB still running an older inject.js than the one
   // on disk (a tab keeps its script until it navigates). Tabs the relay names here
   // either predate build stamps or reported a different hash.
   const staleAgents = res.headers.get('x-webscout-agent-stale');
-  if (staleAgents && !staleAgentWarned.has(staleAgents)) {
+  if (staleAgents && !staleAgentWarned.has(staleAgents) && warnCacheDue(`agent-stale:${staleAgents}`)) {
     staleAgentWarned.add(staleAgents);
+    warnCacheRecord(`agent-stale:${staleAgents}`);
     emitNote(`WARNING: tab(s) ${staleAgents} run an older in-page agent than tools/web-scout/inject.js on disk - new commands may be missing or behave differently. Reload the tab ("page reload --hard"); if index.html pins the script with ?v=, bump it first.`, 'agent-stale');
   }
   // What the relay noticed about HOW this session reads (a re-read after scoping,
