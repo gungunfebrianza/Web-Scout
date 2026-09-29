@@ -25,7 +25,15 @@ const server = http.createServer((_req, res) => {
 });
 await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
 process.env.WEBSCOUT_PORT = String(port);
-after(() => server.close());
+// client.mjs's stale-relay/stale-agent warn cache defaults to a dotfile under process.cwd() -
+// real in test runs too, and every in-process test in THIS file shares one process/cwd. Pointed
+// at a throwaway path so this file's own real warning checks (the "nudges..." test below) never
+// depend on, or leave behind, a real file in the source tree - confirmed live: running the whole
+// suite together left a stray tools/web-scout/.webscout-warn-cache.json that then silently
+// suppressed this file's own warning assertion on a second run within the cooldown window.
+const warnCacheFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-client-notes-warn-cache-')), 'cache.json');
+process.env.WEBSCOUT_WARN_CACHE_PATH = warnCacheFile;
+after(() => { server.close(); fs.rmSync(path.dirname(warnCacheFile), { recursive: true, force: true }); });
 
 const { request, collectNotes } = await import('./client.mjs');
 
