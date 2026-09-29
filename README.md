@@ -418,8 +418,10 @@ session cleanup <id> [--confirm] [--summary] [--since-snapshot <snapshotId>]
 ```bash
 dom query "#some-element"
 dom query "#some-element" --meta   # skip outerHTML/text entirely - just tag/id/className/matchCount
+dom extract-all "a.result-link" --fields text,href   # one row per match - replaces a hand-rolled querySelectorAll(...).map(...) eval walk
 dom pick                      # click any element in the browser -> get its selector back
 dom click "#some-button" [--nth N]
+dom drag ".card[data-id=1]" --to ".column-done"   # simulated drag-and-drop via a DataTransfer/DragEvent shim
 dom click-wait "#save" --wait-selector ".toast" --text "Saved"   # click, then wait, ONE round trip
 dom fill "#some-input" "value"
 dom rect "#some-panel"        # bounding box
@@ -447,6 +449,7 @@ idb dump my_store --where '{"status":"OK"}'   # exact-match filter, applied IN T
 idb dump my_store --fields id,status --limit 20   # project + cap rows in the page too
 idb get my_store 1            # single-key lookup (store.get), not a full-store scan
 idb put my_store '{"id":1,"status":"OK"}' [--dry-run]   # --dry-run validates the row's shape, writes nothing
+idb put my_store --file row.json   # reads the row JSON from disk - sidesteps shell-quoting a nested quote/apostrophe
 idb put-many my_store '[{"id":1},{"id":2}]' [--dry-run]  # one transaction; a bad row is reported per-row
 idb patch my_store 1 '{"status":"DONE"}'   # merge onto the EXISTING row (errors if none exists)
 idb delete my_store 1

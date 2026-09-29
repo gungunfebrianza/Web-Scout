@@ -234,6 +234,7 @@ const TOOLS = [
       + 'Actions:\n'
       + '  query {selector, full?, meta?, pick?, +shape} - outerHTML + basic attrs of the first match, truncated (full lifts that); meta: only tag/id/class/matchCount; pick: array of tag|id|class|text|html|value|attr:<name> returns just those; a whole-page selector (body/html/#app/#root/main/*) returns a depth-limited outline unless full\n'
       + '  click {selector, nth?} - dispatch a real click (native .click())\n'
+      + '  drag {selector, to, nth?, toNth?} - simulate drag-and-drop (dragstart/dragenter/dragover/drop/dragend via a synthetic DataTransfer) from selector onto to; reply carries dropAccepted (target\'s dragover called preventDefault()?) - drop only dispatches when true, same gating a real drag applies\n'
       + '  fill {selector, value, nth?} - set a form field + dispatch input/change\n'
       + '  rect {selector, +shape} - getBoundingClientRect\n'
       + '  style {selector, properties?, +shape} - computed style (curated defaults, or a given array of property names)\n'
@@ -244,11 +245,13 @@ const TOOLS = [
       + '  pick {timeoutMs?} - BLOCKS until a HUMAN clicks something in the tab; returns its selector\n'
       + '  settle {selector?, quietMs?, timeoutMs?} - wait until the DOM under selector (default body) has no mutations for quietMs (default 300)\n'
       + '  screenshot {selector?, outPath?} - best-effort DOM rasterization; outPath saves a PNG, else dimensions only\n'
+      + '  extract_all {selector, fields?, +shape} - one row per matched element; each field is "text" (trimmed textContent), "html" (innerHTML), or an attribute name (getAttribute); default [\"text\"]. Replaces a hand-rolled querySelectorAll(...).map(...) eval walk. Capped at 50 rows (truncated:true past that).\n'
       + 'Every action takes optional `agent` (multi-tab target name); click/fill/wait also take tryRecovery:true (retry once on the selector that reliably worked after this failure) and ackRisk:true.\n'
       + '+shape (every read action of dom/react/idb/net/console) = table?, ifChanged?, delta?, peek?, noGuard?: table: rows as {columns, rows:[[...]]}; ifChanged: {unchanged, sameAs} instead of an unchanged body; delta: that, or only what changed; peek: shape, size and a sample (full result stays cached); noGuard: bypass the token-budget guard and a lean session. ifChanged/delta only while the earlier result is still in your context.',
     actions: {
       query: (p) => sendCmd('dom.query', { selector: requireField(p, 'selector'), full: !!p?.full, meta: !!p?.meta, pick: p?.pick }, p?.agent, readOpts(p)),
       click: (p) => sendCmd('dom.click', { selector: requireField(p, 'selector'), nth: numOrUndef(p?.nth) }, p?.agent),
+      drag: (p) => sendCmd('dom.drag', { selector: requireField(p, 'selector'), to: requireField(p, 'to'), nth: numOrUndef(p?.nth), toNth: numOrUndef(p?.toNth) }, p?.agent),
       fill: (p) => sendCmd('dom.fill', { selector: requireField(p, 'selector'), value: requireField(p, 'value'), nth: numOrUndef(p?.nth) }, p?.agent),
       rect: (p) => sendCmd('dom.rect', { selector: requireField(p, 'selector') }, p?.agent, readOpts(p)),
       style: (p) => sendCmd('dom.computedStyle', { selector: requireField(p, 'selector'), properties: p?.properties }, p?.agent, readOpts(p)),
@@ -268,6 +271,7 @@ const TOOLS = [
         }
         return { width: result.width, height: result.height, dataUrlLength: result.dataUrl.length, note: 'pass params.outPath to save as a PNG file' };
       },
+      extract_all: (p) => sendCmd('dom.extractAll', { selector: requireField(p, 'selector'), fields: p?.fields }, p?.agent, readOpts(p)),
     },
   },
   {

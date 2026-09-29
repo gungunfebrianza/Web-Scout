@@ -97,6 +97,14 @@ export const CLI_SPEC = [
     params: { '--full': 'full', '--meta': 'meta', '--pick': 'pick', ...SHAPE_PARAMS }, cliOnly: { '--selector-file': 'shell-quoting workaround - an MCP caller passes the selector as a JSON string' },
   },
   { cmd: 'dom click', pos: [0, 1], bool: ['--auto-remediate'], val: ['--nth', '--selector-file', '--agent'], mcp: 'webscout_dom.click', params: { '--nth': 'nth' }, cliOnly: { '--selector-file': 'shell-quoting workaround', '--auto-remediate': 'CLI convenience - an MCP caller already receives knownIssue.retry in the failure reply and can dispatch it itself' } },
+  {
+    cmd: 'dom drag', pos: [0, 1], val: ['--to', '--nth', '--to-nth', '--selector-file', '--agent'], mcp: 'webscout_dom.drag',
+    params: { '--to': 'to', '--nth': 'nth', '--to-nth': 'toNth' }, cliOnly: { '--selector-file': 'shell-quoting workaround - an MCP caller passes the selector as a JSON string' },
+  },
+  {
+    cmd: 'dom extract-all', pos: [0, 1], bool: SHAPE_BOOL, val: ['--fields', '--selector-file', '--agent'], mcp: 'webscout_dom.extract_all',
+    params: { '--fields': 'fields', ...SHAPE_PARAMS }, cliOnly: { '--selector-file': 'shell-quoting workaround - an MCP caller passes the selector as a JSON string' },
+  },
   { cmd: 'dom fill', pos: [1, 2], bool: ['--auto-remediate'], val: ['--nth', '--selector-file', '--agent'], mcp: 'webscout_dom.fill', params: { '--nth': 'nth' }, cliOnly: { '--selector-file': 'shell-quoting workaround', '--auto-remediate': 'CLI convenience - an MCP caller already receives knownIssue.retry in the failure reply and can dispatch it itself' } },
   { cmd: 'dom rect', pos: [0, 1], bool: SHAPE_BOOL, val: ['--selector-file', '--agent'], mcp: 'webscout_dom.rect', params: SHAPE_PARAMS, cliOnly: { '--selector-file': 'shell-quoting workaround' } },
   { cmd: 'react inspect', pos: [0, 1], bool: SHAPE_BOOL, val: ['--nth', '--pick', '--selector-file', '--agent'], mcp: 'webscout_react.inspect', params: { '--nth': 'nth', '--pick': 'pick', ...SHAPE_PARAMS }, cliOnly: { '--selector-file': 'shell-quoting workaround' } },
@@ -154,8 +162,14 @@ export const CLI_SPEC = [
   { cmd: 'idb diff', pos: [2, 2], mcp: 'webscout_idb.diff' },
   { cmd: 'idb diff-golden', pos: [2, 2], mcp: 'webscout_idb.diff_golden' },
   { cmd: 'idb restore', pos: [0, 1], val: ['--golden', '--agent'], mcp: 'webscout_idb.restore', params: { '--golden': 'golden' } },
-  { cmd: 'idb put', pos: [2, 2], bool: ['--dry-run'], val: ['--agent'], mcp: 'webscout_idb.put', params: { '--dry-run': 'dryRun' } },
-  { cmd: 'idb put-many', pos: [2, 2], bool: ['--dry-run'], val: ['--agent'], mcp: 'webscout_idb.put_many', params: { '--dry-run': 'dryRun' } },
+  {
+    cmd: 'idb put', pos: [1, 2], bool: ['--dry-run'], val: ['--agent', '--file'], mcp: 'webscout_idb.put',
+    params: { '--dry-run': 'dryRun' }, cliOnly: { '--file': 'shell-quoting workaround - an MCP caller passes row as a JSON value directly' },
+  },
+  {
+    cmd: 'idb put-many', pos: [1, 2], bool: ['--dry-run'], val: ['--agent', '--file'], mcp: 'webscout_idb.put_many',
+    params: { '--dry-run': 'dryRun' }, cliOnly: { '--file': 'shell-quoting workaround - an MCP caller passes rows as a JSON value directly' },
+  },
   { cmd: 'idb patch', pos: [3, 3], val: ['--agent'], mcp: 'webscout_idb.patch' },
   { cmd: 'idb delete', pos: [2, 2], val: ['--agent'], mcp: 'webscout_idb.delete' },
   { cmd: 'idb delete-many', pos: [2, 2], val: ['--agent'], mcp: 'webscout_idb.delete_many' },

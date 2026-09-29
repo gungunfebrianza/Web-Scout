@@ -47,6 +47,7 @@ const COVERED = {
   'debug.state': {},
   'page.fileHash': { path: '/inject.js' },
   'css.hasRule': { selector: 'nonexistent-xyz' },
+  'dom.extractAll': { selector: '#list li', fields: ['text'] },
 };
 const EXEMPT = {
   'dom.pick': 'blocks until a human clicks and installs a click-capturing overlay by design - it is an interaction, not a read',

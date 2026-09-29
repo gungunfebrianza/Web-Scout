@@ -22,7 +22,7 @@ const skip = process.env.WEBSCOUT_TEST_LIVE === '1'
 
 const PAGE = `<!doctype html><html><head><title>fixture</title>
 <link rel="stylesheet" href="/style-a.css"><link rel="stylesheet" href="/style-b.css"></head><body>
-<div id="app"><header id="hd"><nav><a>a</a><a>b</a></nav></header>
+<div id="app"><header id="hd"><nav><a href="/a" data-id="x1"><b>a</b></a><a>b</a></nav></header>
 <main id="content"><ul id="list"><li>one</li><li>two</li></ul></main></div>
 <script src="/inject.js"></script></body></html>`;
 // Two external stylesheets sharing one selector name so css.hasRule's --sheet
@@ -197,6 +197,23 @@ test('dom.query pick returns only the named parts, and says what it left out', {
   const bad = await command('dom.query', { selector: '#lnk', pick: ['nope'] });
   assert.equal(bad.json.ok, false);
   assert.match(bad.json.error, /unknown item 'nope'/);
+});
+
+test('dom.extractAll pulls text/html/attribute fields, one row per match, nulls for a missing attribute', { skip }, async () => {
+  // #list already carries a third "<li>three</li>" appended by an earlier test in this same
+  // shared page/session (see "a DOM change the page made on its own invalidates a cached
+  // dom.query" above) - asserting against the live count instead of a hardcoded 2.
+  const text = (await command('dom.extractAll', { selector: '#list li' })).json.result;
+  assert.deepEqual(text.rows.map((r) => r.text), ['one', 'two', 'three']);
+  assert.equal(text.count, 3);
+  assert.deepEqual(text.fields, ['text']);
+
+  const nav = (await command('dom.extractAll', { selector: 'nav a', fields: ['text', 'html', 'href', 'data-id'] })).json.result;
+  assert.equal(nav.count, 2);
+  assert.deepEqual(nav.rows[0], { text: 'a', html: '<b>a</b>', href: '/a', 'data-id': 'x1' });
+  // The second <a> has neither href nor data-id - getAttribute's own null contract, not omitted,
+  // so both rows keep the same keys and the result is safe to treat as a table.
+  assert.deepEqual(nav.rows[1], { text: 'b', html: 'b', href: null, 'data-id': null });
 });
 
 test('idb reads can be narrowed to counts, named stores, non-empty stores and a few fields', { skip }, async () => {

@@ -82,6 +82,28 @@ function extractBooleanFlag(args, name) {
   return { args: [...args.slice(0, idx), ...args.slice(idx + 1)], value: true };
 }
 
+// Reads a JSON payload (a row, an array of rows, a key, a patch) from --file <path> instead of
+// a raw CLI arg - same fix, same reason, as "eval --file": shell-quoting a multi-field JSON
+// object (nested quotes, a value containing a literal `"`) through bash was confirmed real
+// friction seeding fixture rows by hand. Falls back to the raw arg when --file is not given, so
+// every existing "idb put"/"put-many" invocation keeps working unchanged.
+function readJsonArg(raw, fileValue, label) {
+  let text = raw;
+  if (fileValue) {
+    text = fs.readFileSync(fileValue, 'utf8');
+    if (!text.trim()) {
+      throw new Error(`--file ${fileValue} read as empty/whitespace-only - on Windows/Git Bash a POSIX-style path (e.g. /tmp/...) may not resolve the way you expect; write the JSON to a real path under your scratchpad directory and pass that.`);
+    }
+  } else if (raw === undefined) {
+    throw new Error(`${label} requires either a JSON arg or --file <path>`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new Error(`${label}: ${fileValue ? `--file ${fileValue}` : 'JSON arg'} did not parse as JSON - ${err.message}`);
+  }
+}
+
 // Fire-and-forget: does "help all" still get called, against the sliced forms it exists to
 // replace? Never awaited (a "help" command must stay instant) and never lets a down/slow relay
 // affect the exit code - see token-report's helpUsage.
@@ -1130,6 +1152,10 @@ async function main() {
   ({ args, value: changedValue } = extractBooleanFlag(args, '--changed'));
   ({ args, value: waitReconnectValue } = extractBooleanFlag(args, '--wait-reconnect'));
   ({ args, value: nthValue } = extractFlag(args, '--nth'));
+  let toValue;
+  let toNthValue;
+  ({ args, value: toValue } = extractFlag(args, '--to'));
+  ({ args, value: toNthValue } = extractFlag(args, '--to-nth'));
   ({ args, value: textValue } = extractFlag(args, '--text'));
   ({ args, value: timeoutValue } = extractFlag(args, '--timeout'));
   ({ args, value: countGteValue } = extractFlag(args, '--count-gte'));
@@ -1309,7 +1335,20 @@ async function main() {
       // A whole-page selector (body/html/#app/...) is answered with an outline
       // by inject.js itself, so the CLI no longer needs a pre-call warning.
       query: () => send('dom.query', { selector: domSelector, full: fullValue, meta: metaValue, pick: csv(pickValue) }),
+      // "text" -> trimmed textContent, "html" -> innerHTML, anything else -> getAttribute(name) -
+      // replaces a hand-rolled `[...document.querySelectorAll(sel)].map(el => ({...}))` eval walk.
+      'extract-all': () => send('dom.extractAll', { selector: domSelector, fields: csv(fieldsValue) }),
       click: () => send('dom.click', { selector: domSelector, nth: nthValue !== undefined ? Number(nthValue) : undefined }),
+      // DataTransfer/DragEvent shim - see inject.js's dom.drag handler for why this is a
+      // simulated dispatch, not real OS-level drag input.
+      drag: () => {
+        if (!toValue) throw new Error('dom drag requires --to <target-selector>');
+        return send('dom.drag', {
+          selector: domSelector, to: toValue,
+          nth: nthValue !== undefined ? Number(nthValue) : undefined,
+          toNth: toNthValue !== undefined ? Number(toNthValue) : undefined,
+        });
+      },
       fill: () => send('dom.fill', { selector: domSelector, value: subArgs[1], nth: nthValue !== undefined ? Number(nthValue) : undefined }),
       rect: () => send('dom.rect', { selector: domSelector }),
       style: () => send('dom.computedStyle', { selector: domSelector, properties: subArgs[1] ? subArgs[1].split(',').map((s) => s.trim()) : undefined }),
@@ -1417,7 +1456,8 @@ async function main() {
         allowExtra: allowExtraValue || undefined, verbose: verboseValue || undefined, samples: samplesValue !== undefined ? Number(samplesValue) : undefined,
       }),
       restore: () => request('POST', '/state/restore', { agent: agentFlag, snapshotId: subArgs[0] ? Number(subArgs[0]) : undefined, golden: goldenValue }),
-      put: () => send('idb.put', { store: subArgs[0], row: JSON.parse(subArgs[1]), dryRun: dryRunValue || undefined }),
+      // --file <path> reads the row JSON from disk instead of subArgs[1] - see readJsonArg.
+      put: () => send('idb.put', { store: subArgs[0], row: readJsonArg(subArgs[1], fileValue, 'idb put'), dryRun: dryRunValue || undefined }),
       // Batch write, one transaction - a single failed row (e.g. a unique-
       // index conflict) is reported per-row (see idb.putMany's own
       // failed:[{index,row,error}]), not an all-or-nothing abort. Replaces
@@ -1425,7 +1465,8 @@ async function main() {
       // JSON arg - confirmed real friction seeding a handful of fixture rows
       // by hand, including a `for` loop whose overall exit code came back 1
       // from an unrelated `grep` pipeline despite every write succeeding.
-      'put-many': () => send('idb.putMany', { store: subArgs[0], rows: JSON.parse(subArgs[1]), dryRun: dryRunValue || undefined }),
+      // --file <path> reads the rows-array JSON from disk instead of subArgs[1] - see readJsonArg.
+      'put-many': () => send('idb.putMany', { store: subArgs[0], rows: readJsonArg(subArgs[1], fileValue, 'idb put-many'), dryRun: dryRunValue || undefined }),
       // Merge-then-write: reads the existing row, shallow-merges the given
       // JSON patch onto it, writes the merged row back - replaces re-typing
       // a whole row (idb.put's real REPLACE semantics) for a 2-3 field

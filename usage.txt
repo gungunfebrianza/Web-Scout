@@ -241,6 +241,16 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    dom.screenshot of the target selector as its own separate
                                    logged action - the broken state is often gone by the time
                                    a human goes looking for it by hand)
+  dom extract-all <selector> [--fields text,href,data-id] [--peek] [--table] [--if-changed] [--delta] [--no-guard]
+                                   one row per matched element - each field is "text" (trimmed
+                                   textContent), "html" (innerHTML), or an attribute name
+                                   (getAttribute) - default field list is just "text". Replaces a
+                                   hand-rolled `[...document.querySelectorAll(sel)].map(el =>
+                                   ({...}))` eval walk - the second-largest repeated shape found
+                                   in a real eval-body audit (~24 occurrences, see "css has-rule"
+                                   above for the largest). A field the element has no attribute
+                                   for comes back null, not omitted, so every row shares the same
+                                   keys. Capped at 50 rows (truncated:true past that).
   dom click <selector> [--nth N] [--auto-remediate]  dispatch a real click - errors (with a
                                    preview of every match) if the selector is ambiguous; pass
                                    --nth to pick one. --auto-remediate (also dom fill/click-wait):
@@ -248,6 +258,17 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    remediation is { text, retry: {type, params} }, re-dispatch
                                    that retry ONCE and report it as remediationAttempt next to
                                    the original failure (which still fails/exits 1)
+  dom drag <selector> --to <target-selector> [--nth N] [--to-nth N]
+                                   simulates a drag-and-drop (dragstart -> dragenter -> dragover ->
+                                   drop -> dragend) from selector onto --to, via a hand-built
+                                   DataTransfer object + dispatched DragEvent instances - there is
+                                   no way to generate real OS-level drag input from a page-side
+                                   script, only DOM-level event dispatch. The target's own dragover
+                                   listener must call preventDefault() for the drop to be accepted -
+                                   that's the app's real logic being exercised, not faked here.
+                                   Reply carries `dropAccepted` (whether the target's dragover
+                                   handler actually called preventDefault()) - "drop" is only
+                                   dispatched when true, same gating a real native drag applies.
   dom fill <selector> <value> [--nth N] [--auto-remediate]   set a form field's value + dispatch input/change
   dom rect <selector>             bounding box (getBoundingClientRect)
   dom style <selector> [prop,prop,...]   computed style (curated defaults, or a given list)
@@ -500,7 +521,7 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    need an exact replace, not a merge. Every put is individually
                                    logged (via: "restore"), so a partial failure still shows
                                    exactly which rows did/didn't make it back.
-  idb put <store> <json-row> [--dry-run]
+  idb put <store> <json-row> [--dry-run] [--file <path>]
                                    write one row (validated against the store's real keyPath) -
                                    response includes the full stored row (key merged in), not
                                    just the key, so a caller never has to assume/re-dump to
@@ -509,7 +530,13 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    keyPath/autoIncrement WITHOUT writing (readonly, no mutation at
                                    all) - {valid, problems:[...]} - catches a wrong-shaped seed row
                                    before it lands instead of only after, via a separate verify query.
-  idb put-many <store> <json-array-of-rows> [--dry-run]
+                                   --file <path> reads the row JSON from disk instead of the CLI
+                                   arg (same fix, same reason, as "eval --file") - a row with a
+                                   nested quote/apostrophe in a string field was real, confirmed
+                                   shell-quoting friction bulk-seeding fixture rows by hand; write
+                                   the JSON to a file under your scratchpad directory and pass
+                                   --file instead of shell-escaping it.
+  idb put-many <store> <json-array-of-rows> [--dry-run] [--file <path>]
                                    batch write, ONE transaction - real value over a loop of separate
                                    "idb put" calls (each its own shell-quoted JSON arg, confirmed real
                                    friction seeding a handful of fixture rows by hand). A single bad
@@ -520,6 +547,8 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    autoIncrement validation, zero mutation - {results:[{index, valid,
                                    problems}], validCount, invalidCount}. Bulk-seeding used to be the
                                    one write path with no way to catch a bad row before it landed.
+                                   --file <path> reads the rows-array JSON from disk instead of the
+                                   CLI arg - see "idb put --file" above, same fix.
   idb patch <store> <json-key> <json-patch>
                                    read the existing row, shallow-merge <json-patch> onto it,
                                    write the merged row back - replaces re-typing a whole row
