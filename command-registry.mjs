@@ -76,6 +76,8 @@ export const COMMAND_TYPES = {
   'console.wait': { macroDefault: true, longPoll: true },
   'console.clear': { mutating: true, strictCrvExempt: 'clears the in-page log buffer only - no DOM/IndexedDB/navigation change' },
 
+  'css.hasRule': { ...READ },
+
   'debug.state': {},
   'page.reload': { mutating: true, macroDefault: true, strictCrvExempt: 'navigation, not a data write - the tab reloads and re-reads IndexedDB itself' },
   'page.hardReload': { mutating: true, strictCrvExempt: 'navigation, not a data write - the tab reloads and re-reads IndexedDB itself' },

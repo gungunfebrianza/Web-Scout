@@ -455,6 +455,15 @@ react tree "#some-component" --nth 0 200  # ancestor chain of enclosing componen
                                # more specific selector.
 ```
 
+**CSS**
+```bash
+css has-rule "reality-move-queue-console"   # does any loaded stylesheet have a rule whose
+                               # selectorText contains this substring? recurses into @media/
+                               # @supports nesting. Answers "did this CSS edit actually land
+                               # in the live page after a cache-bust reload" in one call.
+css has-rule ".foo" --sheet "components.min.css"   # scope the search to one stylesheet
+```
+
 **Network & console**
 ```bash
 net log --limit 5 --url "/api/save"   # filtered IN THE PAGE - an unfiltered log is ~55KB in a busy session

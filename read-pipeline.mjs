@@ -37,6 +37,7 @@ export const SCOPING_PARAM_KEYS = {
   'idb.get': ['fields'],
   'net.log': ['urlContains', 'limit', 'fields', 'failed'],
   'console.log': ['limit', 'level', 'contains', 'fields'],
+  'css.hasRule': ['sheet'],
 };
 export const FOLLOW_UP_WINDOW_MS = 90000;
 export const HINT_MIN_TOKENS = 1500;

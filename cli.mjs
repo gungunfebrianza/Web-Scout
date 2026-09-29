@@ -1049,12 +1049,14 @@ async function main() {
   let failedValue;
   let levelValue;
   let containsValue;
+  let sheetValue;
   ({ args, value: pickValue } = extractFlag(args, '--pick'));
   ({ args, value: countOnlyValue } = extractBooleanFlag(args, '--count'));
   ({ args, value: nonEmptyValue } = extractBooleanFlag(args, '--non-empty'));
   ({ args, value: failedValue } = extractBooleanFlag(args, '--failed'));
   ({ args, value: levelValue } = extractFlag(args, '--level'));
   ({ args, value: containsValue } = extractFlag(args, '--contains'));
+  ({ args, value: sheetValue } = extractFlag(args, '--sheet'));
   const csv = (v) => (v ? String(v).split(',').map((s) => s.trim()).filter(Boolean) : undefined);
   let expectValue;
   let expectFileValue;
@@ -1485,6 +1487,14 @@ async function main() {
       // by real page noise within minutes) - the same gap "net history" already closed for
       // network entries, mirrored here. Defaults to the current active session.
       history: () => consoleHistory({ sessionId: sessionValue, contains: containsValue, level: levelValue, limit: limitValue }),
+    },
+    css: {
+      // Replaces a hand-rolled `[...document.styleSheets].find(...).cssRules`
+      // walk (confirmed real, repeated near-verbatim across a debugging
+      // session) - "did my CSS edit actually land in the live page" after a
+      // cache-bust reload. `selector` is a plain substring match against
+      // each rule's selectorText, same convention as `console log --contains`.
+      'has-rule': () => send('css.hasRule', { selector: domSelector, sheet: sheetValue }),
     },
     debug: {
       // Introspection shortcut for THIS tool's own runtime state (WebSocket

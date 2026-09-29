@@ -39,7 +39,11 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 // row's shape from memory - see [[project_agent-os-capital-flow-authority-pilot-p48-p410]])
 // added seed_template to webscout_idb (already the biggest single tool) - raised to 19750,
 // same commit, same convention.
-const MCP_TOTAL_MAX_BYTES = 19750;
+// Measured 20,528 when V42 added the new webscout_css tool (has_rule) - an eval-body audit of
+// real sessions found `[...document.styleSheets].find(...).cssRules` hand-rolled 17 times, the
+// single largest repeated shape found (ahead of every other candidate, including drag-and-drop
+// simulation at 2). Raised to 20600, same commit, same convention.
+const MCP_TOTAL_MAX_BYTES = 20600;
 // Raised to 3550 when V38 added crv_preflight/crv_seed/crv_cleanup to webscout_idb (already the
 // biggest single tool, from crv_run) - same commit-with-the-text convention as above.
 // Raised to 3650 when V39 extended crv_preflight's one-line description (webscout_idb measured 3,606).

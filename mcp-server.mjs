@@ -378,6 +378,16 @@ const TOOLS = [
     },
   },
   {
+    name: 'webscout_css',
+    description: 'Loaded stylesheets (document.styleSheets), read-only.\n'
+      + 'Actions:\n'
+      + '  has_rule {selector, sheet?, +shape} - does any loaded stylesheet have a rule whose selectorText contains selector (plain substring)? sheet optionally scopes to stylesheets whose href contains it. Recurses into @media/@supports nesting. Replaces hand-walking document.styleSheets via eval to check whether a CSS edit landed after a cache-bust reload.\n'
+      + 'Takes optional `agent` (multi-tab target name).',
+    actions: {
+      has_rule: (p) => sendCmd('css.hasRule', { selector: requireField(p, 'selector'), sheet: p?.sheet }, p?.agent, readOpts(p)),
+    },
+  },
+  {
     name: 'webscout_page',
     description: 'Whole-page operations. Both take optional agent.\n'
       + 'Actions:\n'

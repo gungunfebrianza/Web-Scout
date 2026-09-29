@@ -396,6 +396,45 @@ survives the ring buffer's eviction, filterable/sortable/limited without a
 separate `jq` pass. Defaults to the active session; pass `--session` to
 inspect a past one.
 
+### CSS rule lookup (`css has-rule`, V42)
+
+`css has-rule <selector-substr> [--sheet <href-substr>]` answers "did this
+CSS edit actually land in the live page" - it walks `document.styleSheets`
+(recursing into `@media`/`@supports` nesting via each rule's own
+`.cssRules`) looking for a rule whose `selectorText` contains the given
+substring, optionally scoped to stylesheets whose `href` contains
+`--sheet`. Added from a real eval-body audit (see the roadmap's V42 entry)
+rather than a guess: querying `webscout.db`'s `actions` table directly
+found this exact `[...document.styleSheets].find(...).cssRules` walk
+hand-rolled via `eval` 17 times across real sessions - the single largest
+repeated shape found, ahead of every other candidate. A cross-origin
+stylesheet throws a `SecurityError` reading `.cssRules`; that sheet is
+skipped (counted in `sheetsSkipped`), not fatal to the rest of the search.
+Read-only/cacheable, so it gets the standard reply-shaping flags
+(`--table`/`--if-changed`/`--delta`/`--peek`/`--no-guard`) for free.
+
+### Repeated eval-shape mining (`analytics.repeatedEvalShapes`, V43)
+
+`css has-rule` (V42, above) came from a manual, one-off SQL query against
+`webscout.db`'s `actions` table - real, but nothing kept re-running it, so
+the next repeated shape would have to be rediscovered by hand again. V43
+makes that query a standing part of `computeAnalytics()`: every `eval`
+action's `expr` is normalized (string/template/number literals replaced with
+`STR`/`NUM` placeholders, whitespace collapsed) so calls that only differ by
+selector or literal text collapse into one shape key, then grouped and
+ranked by repeat count (`GET /analytics`'s `repeatedEvalShapes`, top 20,
+`count`/`sessionCount`/`firstSeenAt`/`lastSeenAt`/`example`). A shape run
+only once is normal variation, not a pattern (`EVAL_SHAPE_MIN_COUNT = 2`
+excludes it). The #1 shape is also folded into `topFrictionItems`, so it
+surfaces through every existing front end (dashboard digest, `crv preflight`,
+`session end`) without new UI - the dashboard's friction panel already
+renders `topFrictionItems` generically. This is a *candidate-command finder*,
+not a command itself: a shape ranking here is a lead worth reading before
+designing the next promotion (the way this exact idea, done by hand once,
+found `css.hasRule`), not something to build from the normalized text alone -
+the normalization deliberately throws away the very literals (selectors,
+field names) a real command's API would need to get right.
+
 ### Live watch
 
 `idb watch <store>` re-checks a store's row count every time the relay's

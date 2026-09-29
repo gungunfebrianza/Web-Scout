@@ -162,6 +162,11 @@ export const CLI_SPEC = [
   },
   { cmd: 'console clear', pos: [0, 0], val: ['--agent'], mcp: 'webscout_console.clear' },
 
+  {
+    cmd: 'css has-rule', pos: [0, 1], bool: SHAPE_BOOL, val: ['--sheet', '--selector-file', '--agent'], mcp: 'webscout_css.has_rule',
+    params: { '--sheet': 'sheet', ...SHAPE_PARAMS }, cliOnly: { '--selector-file': 'shell-quoting workaround - an MCP caller passes the selector substring as a JSON string' },
+  },
+
   { cmd: 'debug state', pos: [0, 0], val: ['--agent'], mcp: 'webscout_meta.debug_state' },
   { cmd: 'debug sweep', pos: [1, 1], mcp: null, mcpExempt: 'greps the CLI process\'s own working directory for a leftover debug tag - the MCP server has no stable cwd contract' },
   { cmd: 'dev bump-reload', pos: [1, 1], bool: ['--no-reload'], val: ['--agent'], mcp: null, mcpExempt: 'walks and rewrites files under the CLI\'s working directory - the MCP server has no stable cwd contract' },
