@@ -2268,6 +2268,7 @@ function frictionActionRow(r) {
 }
 
 const stmtKeyRows = db.prepare('SELECT * FROM actions WHERE selector_key = ? AND session_id != ? ORDER BY id ASC');
+const stmtDragRows = db.prepare("SELECT * FROM actions WHERE type = 'dom.drag' AND session_id != ? ORDER BY id ASC");
 const stmtTypeEverFailed = db.prepare('SELECT 1 AS hit FROM actions WHERE type = ? AND ok = 0 AND session_id != ? LIMIT 1');
 
 // Every earlier-session action aimed at `key` (so the caller overlays THIS session's own live
@@ -2275,7 +2276,18 @@ const stmtTypeEverFailed = db.prepare('SELECT 1 AS hit FROM actions WHERE type =
 // `recoverySessions` sessions that failed on it - the recovery scan needs the actions AROUND a
 // failure, not only the failure itself. Result bodies are not loaded. Chronological.
 export function listFrictionKeyHistory(key, { excludeSessionId = -1, recoverySessions = 5 } = {}) {
-  const keyRows = stmtKeyRows.all(key, Number(excludeSessionId)).map(frictionActionRow).filter(Boolean);
+  let keyRows = stmtKeyRows.all(key, Number(excludeSessionId)).map(frictionActionRow).filter(Boolean);
+  // A dom.drag's drop target is indexed under the drag's SOURCE selector only; its history is the drags
+  // whose `to` normalizes to this key (few rows, so a type scan is fine).
+  if (key.startsWith('dom.drag::')) {
+    const seen = new Set(keyRows.map((r) => r.id));
+    for (const r of stmtDragRows.all(Number(excludeSessionId))) {
+      if (seen.has(r.id)) continue;
+      const row = frictionActionRow(r);
+      if (row && typeof row.params?.to === 'string' && frictionKeyFor('dom.drag', { selector: row.params.to }, row.origin) === key) keyRows.push(row);
+    }
+    keyRows.sort((a, b) => a.id - b.id);
+  }
   if (!keyRows.length) return [];
   const failedSessions = [];
   for (let i = keyRows.length - 1; i >= 0 && failedSessions.length < recoverySessions; i -= 1) {

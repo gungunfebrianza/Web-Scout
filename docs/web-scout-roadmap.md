@@ -3285,6 +3285,28 @@ timeoutVerifiable/autoScreenshot); reuses the same ambiguous-selector resolution
 field-validated of the V42/V44/V45 trio - worth more real-use scrutiny before leaning on it the
 way `css.hasRule` is now trusted.
 
+## V46 - selector-risk warning cross-process dedupe, and dom.drag's "to" joining the friction-tracking system (implemented)
+
+Two gaps from actually using V45's `dom.drag`, same "the mechanism already exists, it just
+missed this one input" shape as most rounds in this file:
+
+1. `x-webscout-selector-risk` (the pre-dispatch warning for a selector that has failed 3+ times
+   before) fired on EVERY dispatch against a risky selector, with no cross-process memory - the
+   exact bug `agent-stale`/`relay-stale` already had and already fixed (see client.mjs's
+   `warnCacheDue`/`warnCacheRecord`, a cooldown-gated dotfile cache, because `cli.mjs` is a fresh
+   process per command and an in-memory `Set` never survives past one call). Reused the same cache
+   here: the relay now also sends a stable `x-webscout-selector-risk-key` (`type::selector`, no
+   counts baked in - the human text keeps changing as failCount climbs, so it can't be its own
+   cache key), and the client gates its stderr print on that key the same way it already gates the
+   other two.
+2. Every failed-selector tracking path (`topFailedSelectors`, `emergentFriction`, the pre-dispatch
+   warning, and a macro's `riskPreview`) only ever read `params.selector` - correct for
+   `dom.click`/`dom.fill`, but `dom.drag` has TWO selector-bearing params (`selector` = drag
+   source, `to` = drop target), and a real failure is just as likely to be "the drop target
+   doesn't exist/reject the drop" as "the source doesn't exist." A bad `to` was invisible to this
+   entire system. All four now check both fields; a `riskPreview` entry from `to` carries
+   `role: 'to'` so a caller can tell which end of the drag is the risky one.
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

@@ -108,6 +108,16 @@ export function normalizePageScope(value) {
   return `${url.origin}/${segments.join('/')}`;
 }
 
+// dom.drag has TWO selector-bearing params: selector (the thing dragged) and to (the drop target). A
+// failure can be either one's fault, so a drag counts against both - expandDragTargets turns one logged
+// drag into the action itself plus a pseudo-action aimed at the drop target (same type, same outcome),
+// which every consumer below then treats like any other selector. Anything else comes back unchanged.
+export function expandDragTargets(a) {
+  const to = a?.params?.to;
+  if (a?.type !== 'dom.drag' || typeof to !== 'string' || !to) return [a];
+  return [a, { ...a, params: { selector: to } }];
+}
+
 export function frictionTarget(type, params, origin = null) {
   const selector = params?.selector;
   if (typeof selector === 'string' && selector) return { kind: 'selector', value: selector };
@@ -189,6 +199,7 @@ export function buildSelectorFriction(actions, { matchKnownIssues = () => [], re
     return Boolean(cutoff && at && at <= cutoff);
   };
 
+  actions = actions.flatMap(expandDragTargets);
   for (const a of actions) {
     const target = frictionTarget(a.type, a.params, a.origin);
     if (!target) continue;
@@ -363,6 +374,8 @@ export function createFrictionTracker({ persist = null } = {}) {
     // Called from the one place every action is logged. Returns the updated live entry when the
     // action carried a target (null otherwise) so callers can react to a failure immediately.
     note(sessionId, { type, params, origin, ok, error, durationMs, at }) {
+      // A drag also counts against its drop target (see expandDragTargets).
+      if (type === 'dom.drag' && typeof params?.to === 'string' && params.to) tracker.note(sessionId, { type, params: { selector: params.to }, origin, ok, error, durationMs, at });
       const target = frictionTarget(type, params, origin);
       if (!target) return null;
       const key = targetKey(type, target);

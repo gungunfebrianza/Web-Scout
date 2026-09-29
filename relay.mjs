@@ -1036,11 +1036,21 @@ function buildMacroCandidates(analytics) {
 // decorates the reply without changing the result shape for a caller that isn't reading headers.
 // It never blocks the dispatch, with one opt-in exception: WEBSCOUT_RISKY_BLOCK=1 refuses an
 // ESCALATED selector (409) unless the call passes ackRisk:true.
+// The things one command is aimed at: itself, plus a dom.drag's drop target (checked as its own selector).
+function riskTargetsOf(type, params) {
+  const out = [{ type, params: params ?? {}, role: null }];
+  if (type === 'dom.drag' && typeof params?.to === 'string' && params.to) out.push({ type, params: { selector: params.to }, role: 'to' });
+  return out;
+}
+
 function maybeRiskySelectorWarn(sessionId, type, params, res, agentName, ackRisk) {
   let blockMessage = null;
+  const keys = [];
+  const messages = [];
   try {
-    const facts = frictionFactsFor(sessionId, type, params, agentName);
-    if (!facts) return;
+   for (const t of riskTargetsOf(type, params)) {
+    const facts = frictionFactsFor(sessionId, t.type, t.params, agentName);
+    if (!facts) continue;
     const { key, target, live } = facts;
     const assessment = facts.evaluation.assessment;
     // A block must outlive the warning's own dedupe: the header is said once, but a refused call
@@ -1050,11 +1060,18 @@ function maybeRiskySelectorWarn(sessionId, type, params, res, agentName, ackRisk
       if (stillEscalated) blockMessage = `${target.kind} "${target.value}" (${type}) has failed ${live.unresolved}x in a row this session without a success - refusing (WEBSCOUT_RISKY_BLOCK=1); pass ackRisk:true to run it anyway.`;
     } else {
       frictionTracker.recordWarn(sessionId, key, assessment.liveUnresolved);
-      // Header values must be printable ASCII - an error text with a newline or non-latin1
-      // character would make setHeader throw and silently swallow the whole warning.
-      res.setHeader('x-webscout-selector-risk', assessment.message.replace(/[^\x20-\x7e]/g, '?'));
+      keys.push(key);
+      messages.push(t.role === 'to' ? `drop target: ${assessment.message}` : assessment.message);
       if (assessment.level === 'escalated' && stillEscalated) blockMessage = `${assessment.message} - refusing (WEBSCOUT_RISKY_BLOCK=1); pass ackRisk:true to run it anyway.`;
     }
+   }
+   if (messages.length) {
+     // Header values must be printable ASCII - an error text with a newline or non-latin1
+     // character would make setHeader throw and silently swallow the whole warning.
+     res.setHeader('x-webscout-selector-risk', messages.join(' ').replace(/[^\x20-\x7e]/g, '?'));
+     // Stable key for the client's cross-process warn-cache: the text changes as counts climb, the key does not.
+     res.setHeader('x-webscout-selector-risk-key', keys.join(',').replace(/[^\x20-\x7e]/g, '?'));
+   }
   } catch { /* best-effort - never block a command dispatch on a bookkeeping failure */ }
   if (blockMessage) throw new HttpError(409, blockMessage);
 }
@@ -1103,16 +1120,18 @@ function liveEmergentFriction(sessionId, type, facts) {
 function buildMacroRiskPreview(sessionId, steps, stepOffset, agentName) {
   const preview = [];
   steps.forEach((step, i) => {
-    let facts = null;
-    try { facts = frictionFactsFor(sessionId, step.type, step.params ?? {}, agentName); } catch { /* one unreadable step must not hide the rest */ }
-    const e = facts?.entry;
-    if (!facts || !e) return;
-    const { assessment } = friction.evaluateSelectorRisk({ type: step.type, selector: facts.target.value, targetKind: facts.target.kind, entry: e, live: facts.live, state: null, origin: facts.origin });
-    if (!assessment) return;
-    preview.push({
-      stepIndex: i + stepOffset, type: step.type, selector: facts.target.value, failCount: e.failCount, sessionCount: e.sessionCount,
-      lastFailedAt: e.lastFailedAt, knownIssue: e.knownIssues?.[0] ?? null,
-    });
+    for (const t of riskTargetsOf(step.type, step.params)) {
+      let facts = null;
+      try { facts = frictionFactsFor(sessionId, t.type, t.params, agentName); } catch { /* one unreadable step must not hide the rest */ }
+      const e = facts?.entry;
+      if (!facts || !e) continue;
+      const { assessment } = friction.evaluateSelectorRisk({ type: t.type, selector: facts.target.value, targetKind: facts.target.kind, entry: e, live: facts.live, state: null, origin: facts.origin });
+      if (!assessment) continue;
+      preview.push({
+        stepIndex: i + stepOffset, type: step.type, selector: facts.target.value, ...(t.role ? { role: t.role } : {}), failCount: e.failCount, sessionCount: e.sessionCount,
+        lastFailedAt: e.lastFailedAt, knownIssue: e.knownIssues?.[0] ?? null,
+      });
+    }
   });
   preview.sort((x, y) => y.failCount - x.failCount);
   return preview;
@@ -2203,7 +2222,7 @@ function emergentFrictionForSession(sessionId) {
   }
 
   const failCountByTarget = new Map();
-  for (const a of sessionFails) {
+  for (const a of sessionFails.flatMap(friction.expandDragTargets)) {
     const target = friction.frictionTarget(a.type, a.params, a.origin);
     if (!target) continue;
     const key = friction.frictionKeyFor(a.type, a.params, a.origin);
