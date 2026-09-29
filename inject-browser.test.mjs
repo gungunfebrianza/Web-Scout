@@ -20,10 +20,16 @@ const skip = process.env.WEBSCOUT_TEST_LIVE === '1'
   ? 'skipped under WEBSCOUT_TEST_LIVE=1 (this test drives its own tab)'
   : browserSkip();
 
-const PAGE = `<!doctype html><html><head><title>fixture</title></head><body>
+const PAGE = `<!doctype html><html><head><title>fixture</title>
+<link rel="stylesheet" href="/style-a.css"><link rel="stylesheet" href="/style-b.css"></head><body>
 <div id="app"><header id="hd"><nav><a>a</a><a>b</a></nav></header>
 <main id="content"><ul id="list"><li>one</li><li>two</li></ul></main></div>
 <script src="/inject.js"></script></body></html>`;
+// Two external stylesheets sharing one selector name so css.hasRule's --sheet
+// scoping has something real to narrow: unscoped finds it in both, --sheet
+// "style-b" finds it in only one.
+const STYLE_A = '.shared-marker { color: red; }';
+const STYLE_B = '.shared-marker { color: blue; } .style-b-only { color: green; }';
 
 let relay;
 let pageServer;
@@ -44,6 +50,8 @@ before(async () => {
   const injectSource = fs.readFileSync(path.join(__dirname, 'inject.js'));
   pageServer = http.createServer((req, res) => {
     if (req.url.startsWith('/inject.js')) { res.writeHead(200, { 'Content-Type': 'text/javascript' }); res.end(injectSource); return; }
+    if (req.url.startsWith('/style-a.css')) { res.writeHead(200, { 'Content-Type': 'text/css' }); res.end(STYLE_A); return; }
+    if (req.url.startsWith('/style-b.css')) { res.writeHead(200, { 'Content-Type': 'text/css' }); res.end(STYLE_B); return; }
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(PAGE);
   });
@@ -166,8 +174,14 @@ test('scoped reads report what they left out, and the ledger counts it', { skip 
   const afterWhere = (await ledger('scopedReads')).bytesSaved;
   assert.ok(afterWhere > afterLimit, 'a filtered idb.dump avoids the rows it cut');
 
+  const unscoped = (await command('css.hasRule', { selector: 'shared-marker' })).json.result;
+  assert.equal(unscoped.count, 2, 'both stylesheets carry the shared selector');
+  await command('css.hasRule', { selector: 'shared-marker', sheet: 'style-b' });
+  const afterSheet = (await ledger('scopedReads')).bytesSaved;
+  assert.ok(afterSheet > afterWhere, 'a --sheet-scoped css.hasRule avoids the match it filtered out');
+
   const trend = (await api('GET', '/token-report')).json.result.savings.trend;
-  assert.ok(trend.at(-1).avoidedBytes >= afterWhere - before);
+  assert.ok(trend.at(-1).avoidedBytes >= afterSheet - before);
 });
 
 test('dom.query pick returns only the named parts, and says what it left out', { skip }, async () => {

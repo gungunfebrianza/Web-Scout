@@ -37,7 +37,7 @@
   const loadId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   // Hash of this file, sent on connect so the relay can tell a tab still running
   // an older inject.js from the one on disk. Restamp with `node build-id.mjs --stamp`.
-  const AGENT_BUILD = '5199ec145b0f';
+  const AGENT_BUILD = '046a060fa511';
   // Sent once per connect (same lifecycle as loadId - a real navigation only, never
   // an in-page reconnect) so the relay can pin a session to the origin it was started
   // against and warn/refuse when a later command targets a DIFFERENT origin under the
@@ -1630,6 +1630,50 @@
       };
       check();
     }),
+    // Walks every loaded stylesheet looking for a rule whose selectorText
+    // contains `selector` (plain substring, same .includes() convention as
+    // console.log's own `contains`) - replaces a hand-rolled
+    // `[...document.styleSheets].find(...).cssRules` walk found repeated
+    // near-verbatim across a real debugging session (checking whether a CSS
+    // edit actually landed in the live page after a cache-bust reload).
+    // Recurses into @media/@supports nesting (CSSMediaRule/CSSSupportsRule
+    // both expose their own .cssRules). A cross-origin stylesheet throws a
+    // SecurityError reading .cssRules - counted in sheetsSkipped, not fatal.
+    'css.hasRule': ({ selector, sheet }, ctx) => {
+      if (!selector) throw new Error('css.hasRule requires a selector substring to search for');
+      // Always walks every sheet (never skips one just because --sheet
+      // wouldn't match it) so `allMatches` is a real unscoped baseline to
+      // report avoided bytes against, same shape as idb.dump's allRows -
+      // scoping this filter to sheets pre-walk would make noteAvoided's
+      // "what --sheet saved" number a guess instead of a measurement.
+      const allMatches = [];
+      let sheetsSearched = 0;
+      let sheetsSkipped = 0;
+      const walk = (ruleList, sheetHref) => {
+        for (const rule of ruleList) {
+          if (rule.selectorText && rule.selectorText.includes(selector)) {
+            allMatches.push({ selectorText: rule.selectorText, cssText: rule.cssText.slice(0, 300), sheetHref });
+          }
+          if (rule.cssRules) walk(rule.cssRules, sheetHref);
+        }
+      };
+      for (const styleSheet of document.styleSheets) {
+        sheetsSearched += 1;
+        let rules;
+        try { rules = styleSheet.cssRules; } catch { sheetsSkipped += 1; continue; }
+        if (!rules) continue;
+        walk(rules, styleSheet.href || null);
+      }
+      const scoped = typeof sheet === 'string' && sheet !== '';
+      const matches = scoped ? allMatches.filter((m) => (m.sheetHref || '').includes(sheet)) : allMatches;
+      const capped = matches.length > 20;
+      const delivered = capped ? matches.slice(0, 20) : matches;
+      const result = { found: matches.length > 0, count: matches.length, matches: delivered, sheetsSearched };
+      if (sheetsSkipped) result.sheetsSkipped = sheetsSkipped;
+      if (capped) result.truncated = true;
+      if (scoped || capped) noteAvoided(ctx, JSON.stringify(allMatches).length, JSON.stringify(delivered).length);
+      return result;
+    },
     // Introspection shortcut for THIS tool's own runtime state - exists to
     // shrink the manual "add a console.error, bump the importer's ?v=,
     // reload, read the log, remove the console.error, bump again" debugging

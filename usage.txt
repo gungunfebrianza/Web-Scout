@@ -328,6 +328,18 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    maxDepth 20) - orient first, then "react inspect" a more
                                    specific selector.
 
+  css has-rule <selector-substr> [--sheet <href-substr>]
+                                   does any loaded stylesheet have a rule whose selectorText
+                                   contains <selector-substr> (plain substring, same .includes()
+                                   convention as "console log --contains")? --sheet scopes the
+                                   search to stylesheets whose href contains it. Recurses into
+                                   @media/@supports nesting. Replaces a hand-rolled
+                                   `[...document.styleSheets].find(...).cssRules` eval walk -
+                                   answers "did this CSS edit actually land in the live page
+                                   after a cache-bust reload" in one call. A cross-origin
+                                   stylesheet (throws reading .cssRules) is skipped, not fatal -
+                                   see sheetsSkipped in the reply.
+
   idb seed-template <store>
                                    real store metadata (keyPath, autoIncrement, indexes) + one real row's
                                    field-name/value-TYPE shape (never its values, depth 2 - catches a
@@ -852,6 +864,15 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    on every failing type/selector. topFrictionItems severity is
                                    failures + 1 point per second spent failing + half a point per retry,
                                    so a 15s-timeout selector outranks ten instant misses.
+                                   `repeatedEvalShapes` mines every "eval" call's expr across
+                                   every session (string/number literals normalized to a
+                                   placeholder, so calls that only differ by selector/literal
+                                   text collapse into one shape), ranked by repeat count - the
+                                   same manual query that found css.hasRule's shape (V42), now a
+                                   standing signal instead of a one-off. A shape only ever run
+                                   once does not appear (not a pattern). The #1 shape is folded
+                                   into topFrictionItems too - a lead to design a real command
+                                   around, not something to build from the normalized text alone.
 
   friction resolve <type> <selector|store|origin> [--note "..."]
                                    "mark fixed": analytics and the pre-action warn then count only

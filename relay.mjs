@@ -2016,7 +2016,43 @@ function computeAnalytics() {
     .map((s) => ({ message: s.message, failCount: s.failCount, sessionCount: s.sessionIds.size, lastFailedAt: s.lastFailedAt, ...(s.knownIssues.length ? { knownIssues: s.knownIssues } : {}) }))
     .sort((a, b) => b.failCount - a.failCount);
 
-  // 13. Top friction items - everything above is now ~13 separate arrays; this is a single
+  // 13. Repeated eval-body shapes - a session asked "what's still being hand-rolled via eval"
+  // by hand-querying webscout.db's actions table directly (see [[web-scout-v43-round]]) and
+  // found the answer was there all along, just never surfaced: css.hasRule (V42) came from
+  // that one manual query, but the query itself was a one-off - nothing kept re-running it.
+  // Normalizes each eval's expr (string/number literals -> placeholders, whitespace collapsed)
+  // so structurally-identical calls that only differ by selector/literal text collapse into one
+  // shape, then ranks by repeat count. A shape repeated only once is normal variation, not a
+  // pattern - EVAL_SHAPE_MIN_COUNT excludes it. This is a candidate-command finder, not a
+  // command itself: a shape ranking here is a lead to design a real typed command around
+  // (the way css.hasRule replaced the #1 shape a manual pass of this exact idea once found),
+  // not something to build sight-unseen from the normalized text alone.
+  const EVAL_SHAPE_MIN_COUNT = 2;
+  const normalizeEvalShape = (expr) => expr
+    .replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g, 'STR')
+    .replace(/\b\d+(\.\d+)?\b/g, 'NUM')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const evalShapes = new Map();
+  for (const a of actions) {
+    if (a.type !== 'eval') continue;
+    const expr = a.params?.expr;
+    if (!expr || typeof expr !== 'string') continue;
+    const shape = normalizeEvalShape(expr);
+    const s = evalShapes.get(shape) ?? { shape, count: 0, sessionIds: new Set(), firstSeenAt: a.started_at, lastSeenAt: a.started_at, example: expr };
+    s.count += 1;
+    s.sessionIds.add(a.session_id);
+    if (a.started_at < s.firstSeenAt) s.firstSeenAt = a.started_at;
+    if (a.started_at >= s.lastSeenAt) { s.lastSeenAt = a.started_at; s.example = expr; }
+    evalShapes.set(shape, s);
+  }
+  const repeatedEvalShapes = [...evalShapes.values()]
+    .filter((s) => s.count >= EVAL_SHAPE_MIN_COUNT)
+    .map((s) => ({ shape: s.shape, count: s.count, sessionCount: s.sessionIds.size, firstSeenAt: s.firstSeenAt, lastSeenAt: s.lastSeenAt, example: s.example.length > 300 ? `${s.example.slice(0, 300)}...` : s.example }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 20);
+
+  // 14. Top friction items - everything above is now ~14 separate arrays; this is a single
   // ranked digest of the highest-signal entry from each, so a human/agent can read one
   // short list instead of scanning the whole analytics blob to find what to fix first.
   // Severity is a deliberately crude score (not a real cost model) - good enough to rank a
@@ -2067,6 +2103,11 @@ function computeAnalytics() {
   // awaited, so analytics stays synchronous and fast; null until the first background scan lands (or scan disabled).
   const host = hostHealth.peekHostHealth();
   topFrictionItems.push(...hostHealth.hostFrictionItems(host));
+  if (repeatedEvalShapes[0]) {
+    const e = repeatedEvalShapes[0];
+    const preview = e.example.length > 80 ? `${e.example.slice(0, 80)}...` : e.example;
+    topFrictionItems.push({ kind: 'repeatedEvalShape', severity: e.count, summary: `eval shape repeated ${e.count}x across ${e.sessionCount} session(s) - "${preview}" - candidate for a real command` });
+  }
   topFrictionItems.sort((a, b) => b.severity - a.severity);
   topFrictionItems.splice(5);
 
@@ -2090,6 +2131,7 @@ function computeAnalytics() {
     heatmap,
     macroHealth,
     macroAdoption,
+    repeatedEvalShapes,
     topFrictionItems,
     host: host ? { scratchBytes: host.scratchBytes, scratchDirs: host.metrics.dirs, staleDirs: host.staleDirs, orphanBrowsers: host.orphanBrowsers.length, freeDiskGb: host.metrics.freeGb, at: host.at } : null,
     activityPunchcard,

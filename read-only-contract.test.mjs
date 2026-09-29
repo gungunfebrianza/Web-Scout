@@ -46,6 +46,7 @@ const COVERED = {
   'console.wait': { substr: 'never-logged', timeoutMs: 300, expectOk: null },
   'debug.state': {},
   'page.fileHash': { path: '/inject.js' },
+  'css.hasRule': { selector: 'nonexistent-xyz' },
 };
 const EXEMPT = {
   'dom.pick': 'blocks until a human clicks and installs a click-capturing overlay by design - it is an interaction, not a read',

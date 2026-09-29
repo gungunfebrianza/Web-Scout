@@ -3224,6 +3224,37 @@ gaps, each closing a place where the learned history existed but arrived too lat
   step targets. Suggestion only; no id evidence means no suggestion, by design (a guess would be worse
   than silence).
 
+## V42 - css has-rule, from an eval-body audit rather than a guess (implemented)
+
+A session asked "what repeatable shapes are hiding inside `eval` calls" and answered it by querying
+`webscout.db`'s own `actions` table directly (206 real eval bodies across 13 sessions) instead of
+guessing. The largest single hand-rolled shape (17 occurrences, more than any other pattern found,
+including a candidate the same session had floated first - drag-and-drop simulation, at 2) was
+`[...document.styleSheets].find(...).cssRules` walked by hand to answer "did this CSS edit actually
+land in the live page after a cache-bust reload" - a real, repeated debugging grind (one session
+re-typed the same query 5+ times against the same rule). `css has-rule <selector-substr> [--sheet
+<href-substr>]` (`webscout_css.has_rule` over MCP) answers it in one call: walks every loaded
+stylesheet (skips a cross-origin one that throws reading `.cssRules`, counted in `sheetsSkipped`),
+recurses into `@media`/`@supports` nesting, and matches `selectorText` by plain substring - same
+`.includes()` convention `console log --contains` already uses. Read-only/cacheable; gets the same
+reply-shaping flags (`--table`/`--if-changed`/`--delta`/`--peek`/`--no-guard`) every `readCacheable`
+command gets for free.
+
+## V43 - repeatedEvalShapes, turning the V42 audit query into a standing signal (implemented)
+
+The V42 audit (above) answered "what's hiding in eval calls" by hand-querying `webscout.db`
+directly - real, but a one-off; nothing would re-run it next time. V43 folds the same
+normalize-and-count logic into `computeAnalytics()` itself: every `eval` action's `expr` gets
+string/number literals replaced with placeholders (so `find(s => s.href.includes('a.css'))` and
+`find(s => s.href.includes('b.css'))` collapse into the same shape key), grouped, and ranked by
+repeat count as `GET /analytics`'s `repeatedEvalShapes` (min count 2 - a one-off isn't a pattern).
+The #1 shape is folded into `topFrictionItems`, so it reaches the dashboard's existing digest
+panel, `crv preflight`'s `knownFriction`, and `session end` for free - no new UI needed, since
+`topFrictionItems` was already rendered generically. Deliberately a *finder*, not a *builder*: it
+tells you which shape to go design a real command around (the way this exact process, done by
+hand once, found `css.hasRule`), not something a command gets auto-generated from - the
+normalization throws away the literal selectors/fields a real API needs to get right.
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a
