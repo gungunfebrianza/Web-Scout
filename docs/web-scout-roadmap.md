@@ -3035,6 +3035,36 @@ tells you which shape to go design a real command around (the way this exact pro
 hand once, found `css.hasRule`), not something a command gets auto-generated from - the
 normalization throws away the literal selectors/fields a real API needs to get right.
 
+## V44 - dom extract-all, the audit's second-clearest win (implemented)
+
+The V42 eval-body audit's #2 shape by raw count: a
+`[...document.querySelectorAll(sel)].map(el => ({...}))`-style extraction,
+~24 occurrences - more than css.hasRule's 17, but a less uniform shape (the
+extracted fields vary call to call: `textContent` here, an attribute there),
+which is why it was built second rather than first - one command shape had
+to cover more real variety than css.hasRule did. `dom extract-all <selector>
+[--fields text,href,data-id]` (`webscout_dom.extract_all` over MCP) covers
+the two extraction shapes the audit actually showed - `"text"`/`"html"`, or
+any other string treated as an attribute name via `getAttribute` - rather
+than inventing a general query language for variety the audit didn't
+actually demonstrate a need for. Read-only/cacheable, capped at 50 rows.
+
+## V45 - dom drag, a named gap rather than an audit-ranked one (implemented)
+
+The eval-body audit that found css.hasRule (17) and dom.extractAll (~24) also found a
+hand-rolled drag-and-drop simulation, but only 2 occurrences - the smallest of the three
+candidates it surfaced. Built anyway because "no `dom drag <selector> --to <selector>`
+primitive" was a repeatedly named gap independent of the audit's own ranking. `dom drag
+<selector> --to <target-selector> [--nth] [--to-nth]` dispatches a real
+dragstart/dragenter/dragover/drop/dragend sequence via a hand-built `DataTransfer` + `DragEvent`
+shim (see web-scout-architecture.md's "Drag-and-drop simulation" section for why a shim is
+the only reachable surface at all - no way to generate real OS-level drag input from a
+page-side script). Classified identically to `dom.click` (mutating/strictCrv/macroDefault/
+timeoutVerifiable/autoScreenshot); reuses the same ambiguous-selector resolution `dom.click`/
+`dom.fill` already use for both ends of the drag. Given the low audit count, this is the least
+field-validated of the V42/V44/V45 trio - worth more real-use scrutiny before leaning on it the
+way `css.hasRule` is now trusted.
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

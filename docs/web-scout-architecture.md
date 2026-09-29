@@ -12,6 +12,30 @@ See also [`web-scout.md`](./web-scout.md) (the evidence-hierarchy/trust
 model this tool is built on) and [`web-scout-roadmap.md`](./web-scout-roadmap.md)
 (version-by-version history of every round of changes).
 
+## Glossary: action type vs. friction awareness
+
+Two terms that recur throughout this file and get confused with each other:
+
+- **Action type** is the classification every command carries in
+  `command-registry.mjs`'s `COMMAND_TYPES` map - e.g. `dom.click`, `idb.put`,
+  `css.hasRule`. Each type declares flags (`mutating`, `strictCrv`,
+  `macroDefault`, `timeoutVerifiable`, `readCacheable`, `longPoll`,
+  `autoScreenshot`, `cleanup`) that drive mechanical relay behavior: does this
+  need a screenshot on failure, does it get served from cache, does a
+  strict-CRV session snapshot around it. It answers "what kind of operation
+  is this."
+- **Friction awareness** is the analytics layer (`computeAnalytics()` in
+  `relay.mjs`, surfaced via `GET /analytics`, `knownIssues`,
+  `emergentFriction`, `topFrictionItems`, `repeatedEvalShapes`) that watches
+  real failures and repeated shapes over time, grouped by *action type* and
+  selector/URL/message, and warns about it live (inline on a failing command,
+  `crv preflight`, `session end`, the dashboard's digest panel). It answers
+  "has this kind of operation, on this target, been failing or repeating."
+
+Action type is the axis friction is measured against - friction analytics
+couldn't rank "this selector fails a lot" or "this eval shape keeps
+repeating" without the type classification underneath it.
+
 ## Mechanism
 
 ```text
@@ -413,6 +437,53 @@ skipped (counted in `sheetsSkipped`), not fatal to the rest of the search.
 Read-only/cacheable, so it gets the standard reply-shaping flags
 (`--table`/`--if-changed`/`--delta`/`--peek`/`--no-guard`) for free.
 
+### Drag-and-drop simulation (`dom drag`, V45)
+
+`dom drag <selector> --to <target-selector> [--nth] [--to-nth]` simulates an
+HTML5 drag-and-drop sequence - `dragstart`/`dragenter`/`dragover`/`drop`/
+`dragend`, in order - via a hand-built `DataTransfer` object plus dispatched
+`DragEvent` instances against real bounding-rect coordinates. This is the
+**shim** referenced elsewhere: there is no way to generate real OS-level
+drag input from a page-side script (CDP/`eval` cannot fake mouse-down-move-
+up at the compositor level either), so the only reachable surface is
+DOM-level event dispatch with a synthetic `DataTransfer`. `dispatchEvent`
+does not enforce the real "drop only fires if dragover's default was
+prevented" gating on its own - confirmed live, an early version always
+dispatched `drop` unconditionally and a target with no `dragover` listener
+at all still received it. Fixed by checking `defaultPrevented` on the
+dispatched `dragover` event and only dispatching `drop` when true, surfaced
+to the caller as `dropAccepted` - the target's own `dragover` listener must
+call `preventDefault()` for the drop to be accepted, same as a real drag,
+and the reply says whether that happened. Reuses the same
+`resolveTarget(selector, nth)` ambiguous-
+selector resolution (with preview + auto-pick-if-exactly-one-visible) that
+`dom.click`/`dom.fill` already use, for both the source and `--to` target.
+Classified identically to `dom.click` (`mutating`, `strictCrv`,
+`macroDefault`, `timeoutVerifiable`, `autoScreenshot`).
+
+Unlike `css.hasRule` (V42, 17 audit occurrences) and `dom.extractAll` (V44,
+~24), this shipped from only 2 occurrences in the same eval-body audit - the
+smallest, least-validated of the three. Built anyway because it was a
+**named** gap ("no `dom drag` primitive") repeatedly raised in conversation,
+not because the audit ranked it highly - worth treating with more scrutiny
+in real use than the other two before trusting it the same way.
+
+### Multi-element extract (`dom extract-all`, V44)
+
+`dom extract-all <selector> [--fields text,href,data-id]` answers the
+second-largest shape from the same eval-body audit that found `css has-rule`
+(V42) - a `[...document.querySelectorAll(sel)].map(el => ({...}))`-style
+extraction, ~24 occurrences, higher raw count than css-rule's 17 but a less
+uniform shape (the field list genuinely varies call to call), which is why
+it shipped second rather than first. Each requested field is `"text"`
+(trimmed `textContent`), `"html"` (`innerHTML`), or any other string, treated
+as an attribute name (`getAttribute`) - deliberately not a query language,
+just the two extraction shapes the audit actually showed. A field the
+element lacks comes back `null` (`getAttribute`'s own contract) rather than
+being omitted, so every row shares the same keys and the result is safe to
+treat as a table. Read-only/cacheable, capped at 50 rows (`truncated: true`
+past that, with the usual `noteAvoided` accounting).
+
 ### Repeated eval-shape mining (`analytics.repeatedEvalShapes`, V43)
 
 `css has-rule` (V42, above) came from a manual, one-off SQL query against
@@ -434,6 +505,18 @@ designing the next promotion (the way this exact idea, done by hand once,
 found `css.hasRule`), not something to build from the normalized text alone -
 the normalization deliberately throws away the very literals (selectors,
 field names) a real command's API would need to get right.
+
+**Documented, tested limits of the normalization** (see
+`analytics-eval-shapes.test.mjs`'s "normalization limits" tests): it replaces
+string/number literals only, never identifiers, so two structurally-different
+operations never falsely merge just because both contain a normalized `STR` -
+but the same logic under a renamed variable (`const rows = ...` vs
+`const items = ...`) is NOT recognized as a repeat either. This is a real
+trade-off (false-positive vs. false-negative), not a bug - tightening the
+normalization to also fold identifiers would catch the renamed-variable case
+at the cost of risking two genuinely different shapes collapsing into one.
+Left as-is, pinned by tests, until real accumulated history across more
+sessions shows which failure mode actually costs more in practice.
 
 ### Live watch
 

@@ -37,7 +37,7 @@
   const loadId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   // Hash of this file, sent on connect so the relay can tell a tab still running
   // an older inject.js from the one on disk. Restamp with `node build-id.mjs --stamp`.
-  const AGENT_BUILD = '32b59c5f4dc9';
+  const AGENT_BUILD = '21d76ca15b71';
   // Sent once per connect (same lifecycle as loadId - a real navigation only, never
   // an in-page reconnect) so the relay can pin a session to the origin it was started
   // against and warn/refuse when a later command targets a DIFFERENT origin under the
@@ -877,6 +877,52 @@
         });
       }, 200);
     }),
+    // Simulates an HTML5 drag-and-drop sequence (dragstart -> dragenter -> dragover -> drop ->
+    // dragend) via a hand-built DataTransfer + dispatched DragEvent instances - the "shim" this
+    // needs because there is no way to generate real OS-level drag input from a page-side script,
+    // only DOM-level event dispatch. The target's own dragover listener must call
+    // preventDefault() for the drop to be accepted - that's the app's real logic being exercised,
+    // not something this fakes. Only 2 occurrences of a hand-rolled version of this in the
+    // eval-body audit that found css.hasRule (17) and dom.extractAll (~24) - a smaller, less-
+    // validated win than those two; built anyway because it was a NAMED gap (see
+    // web-scout-roadmap.md's V45 entry), not because the audit ranked it highly.
+    'dom.drag': ({ selector, to, nth, toNth }) => new Promise((resolve, reject) => {
+      let source;
+      let target;
+      try {
+        source = resolveTarget(selector, nth);
+        target = resolveTarget(to, toNth);
+      } catch (err) { reject(err); return; }
+      const dt = new DataTransfer();
+      const dispatch = (type, el) => {
+        const r = el.getBoundingClientRect();
+        const ev = new DragEvent(type, {
+          bubbles: true, cancelable: true, dataTransfer: dt,
+          clientX: r.x + r.width / 2, clientY: r.y + r.height / 2,
+        });
+        el.dispatchEvent(ev);
+        return ev;
+      };
+      const hrefBefore = location.href;
+      let mutated = false;
+      const observer = new MutationObserver(() => { mutated = true; });
+      observer.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
+      dispatch('dragstart', source.el);
+      dispatch('dragenter', target.el);
+      // A REAL native drag only fires 'drop' when the browser's own default dragover handling
+      // was prevented (the target opted in) - dispatchEvent does not enforce that gating on its
+      // own (a manually-dispatched 'drop' would fire regardless, confirmed live: an early version
+      // of this always dispatched 'drop' unconditionally and a target with no dragover listener
+      // at all still received it). Checking defaultPrevented here reproduces the real contract
+      // instead of a looser approximation of it.
+      const dropAccepted = dispatch('dragover', target.el).defaultPrevented;
+      if (dropAccepted) dispatch('drop', target.el);
+      dispatch('dragend', source.el);
+      setTimeout(() => {
+        observer.disconnect();
+        resolve({ dragged: true, dropAccepted, mutated, hrefChanged: location.href !== hrefBefore, hrefBefore, href: location.href });
+      }, 200);
+    }),
     // Composite: click, THEN wait for a (possibly different) selector to
     // reach a state - one round trip instead of two, and closes a real gap
     // in dom.click's own `mutated:true` signal. `mutated` only proves SOME
@@ -1672,6 +1718,34 @@
       if (sheetsSkipped) result.sheetsSkipped = sheetsSkipped;
       if (capped) result.truncated = true;
       if (scoped || capped) noteAvoided(ctx, JSON.stringify(allMatches).length, JSON.stringify(delivered).length);
+      return result;
+    },
+    // Second-largest shape from the same eval-body audit that found css.hasRule (V42): a
+    // `[...document.querySelectorAll(sel)].map(el => ({...}))`-style extraction pulling one or
+    // more fields off every matched element - ~24 occurrences, higher count than css.hasRule's
+    // 17 but a less uniform shape (the field list varies call to call), which is why it was built
+    // second (see web-scout-roadmap.md's V44 entry). `fields` is a plain-string list: "text" ->
+    // trimmed textContent, "html" -> innerHTML, anything else -> getAttribute(that name) - covers
+    // the two most common extractions seen in the audit without inventing a query language. A
+    // field this element doesn't have the attribute for comes back null (getAttribute's own
+    // contract), not omitted - so every row has the same keys, safe to treat as a table.
+    'dom.extractAll': ({ selector, fields }, ctx) => {
+      if (!selector) throw new Error('dom.extractAll requires a selector');
+      const fieldList = Array.isArray(fields) && fields.length ? fields : ['text'];
+      const extractOne = (el) => Object.fromEntries(fieldList.map((f) => {
+        if (f === 'text') return [f, (el.textContent || '').trim()];
+        if (f === 'html') return [f, el.innerHTML];
+        return [f, el.getAttribute(f)];
+      }));
+      const allRows = [...document.querySelectorAll(selector)].map(extractOne);
+      const MAX_ROWS = 50;
+      const capped = allRows.length > MAX_ROWS;
+      const rows = capped ? allRows.slice(0, MAX_ROWS) : allRows;
+      const result = { count: allRows.length, fields: fieldList, rows };
+      if (capped) {
+        result.truncated = true;
+        noteAvoided(ctx, JSON.stringify(allRows).length, JSON.stringify(rows).length);
+      }
       return result;
     },
     // Introspection shortcut for THIS tool's own runtime state - exists to

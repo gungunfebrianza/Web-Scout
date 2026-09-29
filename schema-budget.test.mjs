@@ -43,7 +43,13 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 // real sessions found `[...document.styleSheets].find(...).cssRules` hand-rolled 17 times, the
 // single largest repeated shape found (ahead of every other candidate, including drag-and-drop
 // simulation at 2). Raised to 20600, same commit, same convention.
-const MCP_TOTAL_MAX_BYTES = 20600;
+// Measured 20,852 when V44 added extract_all to webscout_dom (already the tightest tool) - the
+// same audit's #2 shape by raw count (~24, a querySelectorAll(...).map(...) walk). Raised to
+// 20950, same commit, same convention.
+// Measured 21,155 when V45 added drag to webscout_dom - a NAMED gap ("no dom drag primitive"),
+// not an audit-ranked one (only 2 occurrences, the smallest of the V42/V44/V45 trio). Raised to
+// 21250, same commit, same convention.
+const MCP_TOTAL_MAX_BYTES = 21250;
 // Raised to 3550 when V38 added crv_preflight/crv_seed/crv_cleanup to webscout_idb (already the
 // biggest single tool, from crv_run) - same commit-with-the-text convention as above.
 // Raised to 3650 when V39 extended crv_preflight's one-line description (webscout_idb measured 3,606).
