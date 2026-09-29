@@ -230,8 +230,19 @@ export async function request(method, pathName, body, { autostart = true } = {})
   // Pre-action risky-selector warn and proactive macro-match nudge (see relay.mjs's
   // maybeRiskySelectorWarn/maybeMacroMatchNudge) - same header-not-body convention as the
   // nudge above, for the same reason (never change the shape of a command's own real result).
+  // Gated through the same cross-process warn-cache as relay-stale/agent-stale below - confirmed
+  // live for those two that a fresh CLI process per command means an in-memory dedupe Set never
+  // gets the chance to do its job, and this header fires on EVERY dispatch against a known-risky
+  // selector (success or not), so a CRV session issuing repeated calls against one bad selector
+  // got the identical warning every single time. The cache key is the relay's own stable
+  // x-webscout-selector-risk-key (type::selector, no counts baked in) - the text header itself
+  // keeps changing (failCount climbs), so it can't be used as its own cache key.
   const selectorRisk = res.headers.get('x-webscout-selector-risk');
-  if (selectorRisk) emitNote(selectorRisk);
+  const selectorRiskKey = res.headers.get('x-webscout-selector-risk-key') || selectorRisk;
+  if (selectorRisk && warnCacheDue(`selector-risk:${selectorRiskKey}`)) {
+    warnCacheRecord(`selector-risk:${selectorRiskKey}`);
+    emitNote(selectorRisk);
+  }
   const macroMatch = res.headers.get('x-webscout-macro-match');
   if (macroMatch) emitNote(macroMatch);
   // Another connected agent just hit a known issue / repeated failure (relay.mjs's

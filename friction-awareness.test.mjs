@@ -95,6 +95,72 @@ test('a selector NOT yet at the risk threshold gets no warning header', async ()
   }, { handlers: { 'dom.click': () => { throw new Error('still broken'); } } });
 });
 
+test('the risky-selector warning also carries a stable x-webscout-selector-risk-key (type::selector, no counts) for the client\'s cross-process warn-cache', async () => {
+  await withRelay(async ({ apiRaw, api }) => {
+    const a = await api('POST', '/sessions', { goal: 'seed history', context: 'friction-awareness.test.mjs', briefing: false });
+    for (let i = 0; i < 3; i += 1) {
+      try { await api('POST', '/command', { type: 'dom.click', params: { selector: '#risky' } }); } catch { /* expected */ }
+    }
+    await api('POST', `/sessions/${a.id}/end`);
+    await api('POST', '/sessions', { goal: 'consult history', context: 'friction-awareness.test.mjs', briefing: false });
+    const { res } = await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#risky' } });
+    assert.equal(res.headers.get('x-webscout-selector-risk-key'), 'dom.click::#risky');
+  }, { handlers: { 'dom.click': () => { throw new Error('still broken'); } } });
+});
+
+test('dom.drag\'s DROP TARGET ("to") gets the same risky-selector warning a "selector" param already gets, before it fails again', async () => {
+  await withRelay(async ({ apiRaw, api }) => {
+    // Seed history: dom.drag failing 3x with #bad-target as the drop target (source varies -
+    // the fault is the target, not the source).
+    const a = await api('POST', '/sessions', { goal: 'seed drag-target history', context: 'friction-awareness.test.mjs', briefing: false });
+    for (let i = 0; i < 3; i += 1) {
+      try { await api('POST', '/command', { type: 'dom.drag', params: { selector: `#src${i}`, to: '#bad-target' } }); } catch { /* expected */ }
+    }
+    await api('POST', `/sessions/${a.id}/end`);
+
+    await api('POST', '/sessions', { goal: 'consult drag-target history', context: 'friction-awareness.test.mjs', briefing: false });
+    const { res } = await apiRaw('POST', '/command', { type: 'dom.drag', params: { selector: '#fresh-src', to: '#bad-target' } });
+    const warn = res.headers.get('x-webscout-selector-risk');
+    assert.ok(warn, 'expected x-webscout-selector-risk header for a risky drop target');
+    assert.match(warn, /drop target "#bad-target"/);
+    assert.match(warn, /failed 3x before/);
+    assert.equal(res.headers.get('x-webscout-selector-risk-key'), 'dom.drag::#bad-target');
+  }, { handlers: { 'dom.drag': () => { throw new Error('drop rejected'); } } });
+});
+
+test('session end reports emergentFriction for dom.drag\'s "to" repeating, same as a "selector" repeating', async () => {
+  await withRelay(async ({ api }) => {
+    const s = await api('POST', '/sessions', { goal: 'drag-target emergent friction', context: 'friction-awareness.test.mjs', briefing: false });
+    try { await api('POST', '/command', { type: 'dom.drag', params: { selector: '#a', to: '#locked' } }); } catch { /* expected */ }
+    try { await api('POST', '/command', { type: 'dom.drag', params: { selector: '#b', to: '#locked' } }); } catch { /* expected */ }
+    const ended = await api('POST', `/sessions/${s.id}/end`);
+    assert.ok(ended.emergentFriction?.some((l) => l.includes('#locked') && l.includes('first session ever')), `expected #locked to trip emergentFriction, got: ${JSON.stringify(ended.emergentFriction)}`);
+  }, { handlers: { 'dom.drag': () => { throw new Error('drop rejected'); } } });
+});
+
+test('macro run\'s riskPreview flags a risky "to" drop target too, tagged with role "to"', async () => {
+  await withRelay(async ({ api }) => {
+    const a = await api('POST', '/sessions', { goal: 'seed drag-target history', context: 'friction-awareness.test.mjs', briefing: false });
+    for (let i = 0; i < 3; i += 1) {
+      try { await api('POST', '/command', { type: 'dom.drag', params: { selector: `#src${i}`, to: '#bad-target' } }); } catch { /* expected */ }
+    }
+    await api('POST', `/sessions/${a.id}/end`);
+
+    const b = await api('POST', '/sessions', { goal: 'record macro', context: 'friction-awareness.test.mjs', briefing: false });
+    await api('POST', '/command', { type: 'dom.drag', params: { selector: '#src', to: '#bad-target' } });
+    const macro = await api('POST', '/macros', { name: 'drag-risk-preview-macro', sessionId: b.id });
+    assert.equal(macro.steps.length, 1);
+
+    const run = await api('POST', `/macros/${macro.id}/run`, {});
+    assert.equal(run.riskPreview.length, 1);
+    assert.equal(run.riskPreview[0].selector, '#bad-target');
+    assert.equal(run.riskPreview[0].role, 'to');
+  }, { handlers: { 'dom.drag': (() => {
+    let calls = 0;
+    return () => { calls += 1; if (calls <= 3) throw new Error('drop rejected'); return { dragged: true, dropAccepted: true, mutated: true, hrefChanged: false }; };
+  })() } });
+});
+
 test('a session whose own action types match a recorded-but-never-run macro gets an x-webscout-macro-match nudge', async () => {
   await withRelay(async ({ apiRaw, api }) => {
     // Session A: two dom.click actions, recorded as a macro, never replayed.

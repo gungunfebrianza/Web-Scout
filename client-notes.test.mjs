@@ -154,6 +154,47 @@ test('agent-stale warning resurfaces once the persisted cooldown has elapsed (ne
   }
 });
 
+// Same cross-process noise class as the agent-stale/relay-stale tests above, confirmed live in
+// relay.mjs's friction-awareness system: maybeRiskySelectorWarn fires x-webscout-selector-risk on
+// EVERY dispatch against a known-risky selector (success or not), so a CRV session issuing
+// repeated calls against one bad selector got the identical warning every single call - a fresh
+// CLI process per command means the in-memory dedupe never gets a chance to run. Gated through
+// the SAME warn-cache as agent-stale/relay-stale, keyed by the relay's stable
+// x-webscout-selector-risk-key (type::selector) rather than the text (which keeps changing -
+// failCount climbs on every failure).
+test('selector-risk warning is remembered across separate PROCESSES within the cooldown window (same class as agent-stale)', async () => {
+  const cacheFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-warn-cache-')), 'cache.json');
+  headers = { 'x-webscout-selector-risk': 'selector "#risky" (dom.click) has failed 3x before', 'x-webscout-selector-risk-key': 'dom.click::#risky' };
+  const env = { WEBSCOUT_PORT: String(port), WEBSCOUT_WARN_CACHE_PATH: cacheFile };
+  try {
+    const first = await spawnAsync(['--input-type=module', '-e', warnScript()], { env });
+    assert.equal(first.status, 0, first.stderr);
+    assert.ok(JSON.parse(first.stdout).some((n) => /#risky/.test(n)), 'first process (no cache yet) should warn');
+
+    const second = await spawnAsync(['--input-type=module', '-e', warnScript()], { env });
+    assert.equal(second.status, 0, second.stderr);
+    assert.ok(!JSON.parse(second.stdout).some((n) => /#risky/.test(n)), 'a second, separate process within the cooldown must NOT repeat the identical selector-risk warning');
+  } finally {
+    fs.rmSync(path.dirname(cacheFile), { recursive: true, force: true });
+  }
+});
+
+test('a DIFFERENT risky selector is never suppressed by another selector\'s cooldown', async () => {
+  const cacheFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-warn-cache-')), 'cache.json');
+  const env = { WEBSCOUT_PORT: String(port), WEBSCOUT_WARN_CACHE_PATH: cacheFile };
+  try {
+    headers = { 'x-webscout-selector-risk': 'selector "#one" (dom.click) has failed 3x before', 'x-webscout-selector-risk-key': 'dom.click::#one' };
+    const first = await spawnAsync(['--input-type=module', '-e', warnScript()], { env });
+    assert.ok(JSON.parse(first.stdout).some((n) => /#one/.test(n)));
+
+    headers = { 'x-webscout-selector-risk': 'selector "#two" (dom.click) has failed 3x before', 'x-webscout-selector-risk-key': 'dom.click::#two' };
+    const second = await spawnAsync(['--input-type=module', '-e', warnScript()], { env });
+    assert.ok(JSON.parse(second.stdout).some((n) => /#two/.test(n)), 'a different selector-risk key must warn on its own, independent of #one\'s cooldown');
+  } finally {
+    fs.rmSync(path.dirname(cacheFile), { recursive: true, force: true });
+  }
+});
+
 test('a total the relay marked quiet is not printed; a marked-notable one still is', async () => {
   headers = { 'x-webscout-session-tokens': '9000', 'x-webscout-call-tokens': '40', 'x-webscout-tokens-quiet': '1' };
   assert.deepEqual((await collectNotes(() => request('GET', '/x'))).notes, []);

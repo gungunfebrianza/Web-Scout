@@ -886,19 +886,42 @@ function buildSessionFrictionSnapshot(sessionId, analytics) {
 // Shared with the macro-run step loop below (no response-header slot there - a macro reply
 // has no single "this command" to decorate, it has N steps - so that caller attaches the same
 // text to the one step it's about, instead of a header).
+// Returns { text, keys } (keys = stable "type::selector" strings, no counts baked in) or null.
+// Split from the plain-text version below because the header emitter needs a STABLE cache key
+// (see client.mjs's warnCacheDue) but the text itself embeds failCount/lastFailedAt, which
+// change between calls - using the text as its own cache key would never actually dedupe.
+// Checks both "selector" and "to" (dom.drag's drop target) - same both-fields convention as the
+// analytics aggregation above, so a risky drop target warns before dispatch same as any selector.
+function riskySelectorWarningInfo(sessionId, type, params) {
+  const snapshot = sessionFrictionSnapshot.get(sessionId);
+  if (!snapshot) return null;
+  const parts = [];
+  const keys = [];
+  for (const [role, sel] of [['selector', params?.selector], ['to', params?.to]]) {
+    if (!sel || typeof sel !== 'string') continue;
+    const hit = snapshot.riskySelectors.get(`${type}::${sel}`);
+    if (!hit) continue;
+    const known = hit.knownIssues?.[0];
+    const label = role === 'to' ? `drop target "${sel}"` : `selector "${sel}"`;
+    parts.push(`${label} (${type}) has failed ${hit.failCount}x before across ${hit.sessionCount} session(s), last at ${hit.lastFailedAt} - consider dom.click-wait or a settle/wait first.${known ? ` known issue: ${known.id}${known.remediation ? ` (${known.remediation})` : ''}` : ''}`);
+    keys.push(`${type}::${sel}`);
+  }
+  return parts.length ? { text: parts.join(' '), keys } : null;
+}
+
 function riskySelectorWarningText(sessionId, type, params) {
-  const selector = params?.selector;
-  if (!selector || typeof selector !== 'string') return null;
-  const hit = sessionFrictionSnapshot.get(sessionId)?.riskySelectors.get(`${type}::${selector}`);
-  if (!hit) return null;
-  const known = hit.knownIssues?.[0];
-  return `selector "${selector}" (${type}) has failed ${hit.failCount}x before across ${hit.sessionCount} session(s), last at ${hit.lastFailedAt} - consider dom.click-wait or a settle/wait first.${known ? ` known issue: ${known.id}${known.remediation ? ` (${known.remediation})` : ''}` : ''}`;
+  return riskySelectorWarningInfo(sessionId, type, params)?.text ?? null;
 }
 
 function maybeRiskySelectorWarn(sessionId, type, params, res) {
   try {
-    const text = riskySelectorWarningText(sessionId, type, params);
-    if (text) res.setHeader('x-webscout-selector-risk', text);
+    const info = riskySelectorWarningInfo(sessionId, type, params);
+    if (info) {
+      res.setHeader('x-webscout-selector-risk', info.text);
+      // Stable key for the client's cross-process warn-cache (see client.mjs) - the text above
+      // changes on every hit (failCount keeps climbing), so it can't be the cache key itself.
+      res.setHeader('x-webscout-selector-risk-key', info.keys.join(','));
+    }
   } catch { /* best-effort - never block a command dispatch on this */ }
 }
 
@@ -917,19 +940,23 @@ function buildMacroRiskPreview(sessionId, steps, stepOffset) {
   if (!snapshot) return [];
   const preview = [];
   steps.forEach((step, i) => {
-    const selector = step.params?.selector;
-    if (!selector || typeof selector !== 'string') return;
-    const hit = snapshot.riskySelectors.get(`${step.type}::${selector}`);
-    if (!hit) return;
-    preview.push({
-      stepIndex: i + stepOffset,
-      type: step.type,
-      selector,
-      failCount: hit.failCount,
-      sessionCount: hit.sessionCount,
-      lastFailedAt: hit.lastFailedAt,
-      knownIssue: hit.knownIssues?.[0] ?? null,
-    });
+    // Same both-fields check as riskySelectorWarningInfo - a macro step dragging TO a known-bad
+    // target must show up in the pre-run preview too, not only a bad "selector".
+    for (const [role, sel] of [['selector', step.params?.selector], ['to', step.params?.to]]) {
+      if (!sel || typeof sel !== 'string') continue;
+      const hit = snapshot.riskySelectors.get(`${step.type}::${sel}`);
+      if (!hit) continue;
+      preview.push({
+        stepIndex: i + stepOffset,
+        type: step.type,
+        selector: sel,
+        ...(role === 'to' ? { role: 'to' } : {}),
+        failCount: hit.failCount,
+        sessionCount: hit.sessionCount,
+        lastFailedAt: hit.lastFailedAt,
+        knownIssue: hit.knownIssues?.[0] ?? null,
+      });
+    }
   });
   preview.sort((a, b) => b.failCount - a.failCount);
   return preview;
@@ -1537,15 +1564,20 @@ function computeAnalytics() {
   const bySelector = new Map();
   for (const a of actions) {
     if (a.ok) continue;
-    const sel = a.params?.selector;
-    if (!sel || typeof sel !== 'string') continue;
-    const key = `${a.type}::${sel}`;
-    const s = bySelector.get(key) ?? { type: a.type, selector: sel, failCount: 0, sessionIds: new Set(), lastFailedAt: null, knownIssues: [] };
-    s.failCount += 1;
-    s.sessionIds.add(a.session_id);
-    if (!s.lastFailedAt || a.started_at > s.lastFailedAt) s.lastFailedAt = a.started_at;
-    for (const hit of matchKnownIssuesFor(a.error)) if (!s.knownIssues.some((x) => x.id === hit.id)) s.knownIssues.push(hit);
-    bySelector.set(key, s);
+    // dom.drag has TWO selector-bearing params (selector = drag source, to = drop target) - a
+    // failure can be either one's fault. Checking both here (instead of just "selector") is what
+    // makes a bad "to" target accumulate its own failCount/riskySelectors entry, same as any
+    // other selector - previously it was invisible to this whole tracking system.
+    for (const sel of [a.params?.selector, a.params?.to]) {
+      if (!sel || typeof sel !== 'string') continue;
+      const key = `${a.type}::${sel}`;
+      const s = bySelector.get(key) ?? { type: a.type, selector: sel, failCount: 0, sessionIds: new Set(), lastFailedAt: null, knownIssues: [] };
+      s.failCount += 1;
+      s.sessionIds.add(a.session_id);
+      if (!s.lastFailedAt || a.started_at > s.lastFailedAt) s.lastFailedAt = a.started_at;
+      for (const hit of matchKnownIssuesFor(a.error)) if (!s.knownIssues.some((x) => x.id === hit.id)) s.knownIssues.push(hit);
+      bySelector.set(key, s);
+    }
   }
   const topFailedSelectors = [...bySelector.values()]
     .filter((s) => s.failCount > 1)
@@ -1958,10 +1990,13 @@ function emergentFrictionForSession(sessionId) {
 
   const failCountBySelector = new Map();
   for (const a of sessionFails) {
-    const sel = a.params?.selector;
-    if (typeof sel !== 'string') continue;
-    const key = `${a.type}::${sel}`;
-    failCountBySelector.set(key, (failCountBySelector.get(key) ?? 0) + 1);
+    // Same both-fields check as topFailedSelectors above - a dom.drag failure on "to" must be
+    // able to trip emergentFriction too, not just a failure on "selector".
+    for (const sel of [a.params?.selector, a.params?.to]) {
+      if (typeof sel !== 'string') continue;
+      const key = `${a.type}::${sel}`;
+      failCountBySelector.set(key, (failCountBySelector.get(key) ?? 0) + 1);
+    }
   }
   for (const [key, countThisSession] of failCountBySelector) {
     // topFailedSelectors only lists failCount > 1 - below that threshold there is nothing
