@@ -20,6 +20,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { startTestRelay, connectFakeAgent } from './test-relay.mjs';
@@ -46,7 +47,7 @@ async function withRelay(fn, { handlers = {}, envOverride = {} } = {}) {
 }
 
 test('a failed /command carries a matched known-issues.json remediation inline (no separate analytics call needed)', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-'));
+  const dir = tmpDir('webscout-friction-awareness-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify([{ id: 'flaky-broken-el', signature: 'detached from DOM', description: 'stale DOM reference after a rerender', remediation: 'use dom.click-wait instead of a bare click' }]));
   await withRelay(async ({ apiRaw }) => {
@@ -144,7 +145,7 @@ test('session end reports no emergentFriction for a clean session', async () => 
 });
 
 test('a session report carries the same known-issues.json match a live failure already showed, not just a bare error string', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-report-'));
+  const dir = tmpDir('webscout-friction-awareness-report-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify([{ id: 'report-flaky-el', signature: 'detached from DOM', description: 'stale DOM reference', remediation: 'use dom.click-wait instead' }]));
   await withRelay(async ({ apiRaw, api }) => {
@@ -188,7 +189,7 @@ test('a macro recorded mid-session is immediately nudge-eligible for that same s
 });
 
 test('a malformed known-issues.json is reported as a check error, not silently treated as "no match"', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-badregistry-'));
+  const dir = tmpDir('webscout-friction-awareness-badregistry-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, '{ not valid json');
   await withRelay(async ({ apiRaw }) => {

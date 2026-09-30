@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,7 +18,7 @@ const KINDS = { json: { ratio: 3, low: 2.5, high: 3.4 }, html: { ratio: 2.9, low
 const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString();
 
 function withCalibration(json, fn) {
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-cal-status-')), 'cal.json');
+  const file = path.join(tmpDir('webscout-cal-status-'), 'cal.json');
   if (json !== null) fs.writeFileSync(file, JSON.stringify(json));
   try { return fn(file); } finally { fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
 }

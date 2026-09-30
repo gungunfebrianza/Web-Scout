@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +13,7 @@ import { calibrateKinds, makeApiCounter, gatherSamples } from './calibrate-token
 const dir = path.dirname(fileURLToPath(import.meta.url));
 
 function withCalibration(json, fn) {
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-cal-')), 'cal.json');
+  const file = path.join(tmpDir('webscout-cal-'), 'cal.json');
   if (json !== null) fs.writeFileSync(file, JSON.stringify(json));
   const script = `const m = await import(${JSON.stringify(new URL('./token-estimate.mjs', import.meta.url).href)}); console.log(JSON.stringify({ info: m.estimatorInfo(), est: m.estimateTokens(12000, 'json'), band: m.baselineBand(12000, 'json'), html: m.estimateTokens(12000, 'html') }));`;
   const r = spawnClean(['--input-type=module', '-e', script], { env: { WEBSCOUT_TOKEN_CALIBRATION: file } });
@@ -85,7 +86,7 @@ test('the API counter posts the text to count_tokens and returns input_tokens; i
 });
 
 test('estimatorInfo names WHY auto-calibrate has not filled the gap yet, when told', () => {
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-cal-')), 'cal.json');
+  const file = path.join(tmpDir('webscout-cal-'), 'cal.json');
   const script = `const m = await import(${JSON.stringify(new URL('./token-estimate.mjs', import.meta.url).href)});
     console.log(JSON.stringify({
       off: m.estimatorInfo({ autoCalibrate: { enabled: false, scheduled: false, outcome: null } }).note,

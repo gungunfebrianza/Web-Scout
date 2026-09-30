@@ -18,6 +18,11 @@ import {
 import { validateArgs, findMsysMangledArgs, findSpec } from './cli-spec.mjs';
 import { parseUsage, helpTopic, helpMissing } from './help.mjs';
 import { resolveRelayPid, stopRelay, startRelay, restartRelay, RELAY_SOURCE_FILES } from './relay-control.mjs';
+import { sweepStale, formatSweep, scratchStats } from './scratch.mjs';
+
+// Above this many dirs a real (non-dry-run) cleanup needs --confirm: it shows the dry-run first.
+const SCRATCH_CONFIRM_ABOVE = 200;
+const SCRATCH_WARN_AT = 20;
 import { rankAutoTraces } from './trace.mjs';
 
 // Set once near the top of main() from a `--agent <name>` flag found
@@ -806,6 +811,13 @@ async function main() {
     console.error(`WARNING: ${mangled.map((m) => JSON.stringify(m)).join(', ')} looks like Git Bash rewrote a leading-slash argument into a Windows path, so it will not match what you meant. Re-run with MSYS_NO_PATHCONV=1 in front of the command, or drop the leading slash.`);
   }
 
+  if (command !== 'scratch' && process.env.WEBSCOUT_NO_SCRATCH_WARN !== '1') {
+    // Leaked profiles/fixtures (each browser profile is hundreds of MB) are invisible until the disk is full.
+    const st = scratchStats();
+    const atEnd = command === 'session' && rest[0] === 'end';
+    if (st.stale >= SCRATCH_WARN_AT || (atEnd && st.stale > 0)) console.error(`WARNING: ${st.stale} stale web-scout scratch dir(s) in the temp dir. Run "scratch cleanup --dry-run" (then "scratch cleanup --confirm").`);
+  }
+
   if (command === 'status') {
     printResult(await request('GET', '/health', undefined, { autostart: false }));
     return;
@@ -813,6 +825,29 @@ async function main() {
 
   if (command === 'relay') {
     await handleRelay(rest[0]);
+    return;
+  }
+
+  if (command === 'scratch') {
+    if (rest[0] === 'status') {
+      const st = scratchStats({ includeForeign: true, sizes: true });
+      printResult({ summary: `${st.dirs} scratch dir(s), ${st.stale} reclaimable (${(st.staleBytes / 1048576).toFixed(1)} MB)`, ...st });
+      return;
+    }
+    if (rest[0] !== 'cleanup') throw new Error('scratch supports: cleanup [--dry-run] [--include-wl] [--min-age-min <n>] [--confirm], status');
+    const minAge = extractFlag(rest, '--min-age-min').value;
+    const opts = { includeForeign: rest.includes('--include-wl'), ...(minAge ? { staleUnownedMs: Number(minAge) * 60000 } : {}) };
+    let dryRun = rest.includes('--dry-run');
+    let note;
+    if (!dryRun && !rest.includes('--confirm')) {
+      const preview = sweepStale({ ...opts, dryRun: true });
+      if (preview.removed.length > SCRATCH_CONFIRM_ABOVE) {
+        dryRun = true; process.exitCode = 1;
+        note = `${preview.removed.length} dirs exceeds ${SCRATCH_CONFIRM_ABOVE}: nothing deleted. Review this dry-run, then re-run with --confirm.`;
+      }
+    }
+    const result = sweepStale({ ...opts, dryRun });
+    printResult({ summary: formatSweep(result), ...(note ? { note } : {}), ...result, removed: result.removed.length > 20 ? `${result.removed.length} dirs (first 20: ${result.removed.slice(0, 20).map((r) => path.basename(r.dir)).join(', ')})` : result.removed.map((r) => r.dir) });
     return;
   }
 

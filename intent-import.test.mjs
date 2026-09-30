@@ -5,6 +5,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { condenseWhy, parseTranscript, matchCallsToActions, discoverTranscripts, importIntents, readTranscriptFile } from './intent-import.mjs';
@@ -243,7 +244,7 @@ describe('importIntents / discoverTranscripts', () => {
   });
 
   test('finds Claude and Codex transcripts newer than the session, newest first, and skips old ones', () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-intent-'));
+    const home = tmpDir('ws-intent-');
     try {
       const claudeDir = path.join(home, '.claude', 'projects', 'proj-a');
       const codexDir = path.join(home, '.codex', 'sessions', '2026', '09', '19');

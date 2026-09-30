@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +12,7 @@ import { spawnClean } from './test-relay.mjs';
 const dir = path.dirname(fileURLToPath(import.meta.url));
 
 function copyTool() {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-scaffold-'));
+  const tmp = tmpDir('webscout-scaffold-');
   for (const f of fs.readdirSync(dir)) {
     if (/\.(mjs|js|txt|md|html)$/.test(f) && !/^webscout\.db/.test(f)) fs.copyFileSync(path.join(dir, f), path.join(tmp, f));
   }

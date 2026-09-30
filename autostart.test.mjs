@@ -4,6 +4,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +12,7 @@ import { freePort, isUp, spawnClean } from './test-relay.mjs';
 import { stopRelay } from './relay-control.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-autostart-'));
+const tmp = tmpDir('webscout-autostart-');
 const port = await freePort();
 // This test exercises the REAL client.mjs autostartRelay() path, the other call site that
 // unconditionally sets WEBSCOUT_AUTO_CALIBRATE=1 on the relay it spawns - isolated the same way

@@ -13,13 +13,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { reapLeakedRelays } from './test-relay.mjs';
 
 function isolatedRegistry() {
-  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-reaper-test-')), 'registry.jsonl');
+  return path.join(tmpDir('webscout-reaper-test-'), 'registry.jsonl');
 }
 function readRegistry(registryPath) {
   try { return fs.readFileSync(registryPath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; }
@@ -37,7 +38,7 @@ test('an old, alive entry is reaped: process killed, temp dir removed, registry 
   const registryPath = isolatedRegistry();
   const dummy = spawnDummy();
   await new Promise((r) => setTimeout(r, 100)); // let it actually start
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-test-reaper-'));
+  const dir = tmpDir('webscout-test-reaper-');
   fs.writeFileSync(path.join(dir, 'marker.txt'), 'x');
   appendEntry(registryPath, { pid: dummy.pid, port: 54321, dir, startedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() }); // 1h old
 
@@ -55,7 +56,7 @@ test('a fresh entry (a run genuinely still in progress) is left alone', async ()
   const dummy = spawnDummy();
   try {
     await new Promise((r) => setTimeout(r, 100));
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-test-reaper-'));
+    const dir = tmpDir('webscout-test-reaper-');
     appendEntry(registryPath, { pid: dummy.pid, port: 54322, dir, startedAt: new Date().toISOString() }); // just started
 
     const r = reapLeakedRelays({ ageMs: 30 * 60 * 1000, registryPath });
@@ -71,7 +72,7 @@ test('a fresh entry (a run genuinely still in progress) is left alone', async ()
 
 test('port 8973 is never reaped, no matter how old or dead the entry looks', () => {
   const registryPath = isolatedRegistry();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-test-reaper-'));
+  const dir = tmpDir('webscout-test-reaper-');
   appendEntry(registryPath, { pid: 999999999, port: 8973, dir, startedAt: new Date(0).toISOString() }); // ancient, a pid that (almost certainly) does not exist
 
   const r = reapLeakedRelays({ ageMs: 1, registryPath });
@@ -84,7 +85,7 @@ test('port 8973 is never reaped, no matter how old or dead the entry looks', () 
 test('an already-dead pid, once past the age window, is cleaned up (Ctrl-C mid-test scenario)', async () => {
   const registryPath = isolatedRegistry();
   const dummy = spawnDummy();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-test-reaper-'));
+  const dir = tmpDir('webscout-test-reaper-');
   const pid = dummy.pid;
   await new Promise((resolve) => { dummy.once('exit', resolve); dummy.kill(); }); // dies BEFORE the reap runs
   appendEntry(registryPath, { pid, port: 54323, dir, startedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() });

@@ -6,13 +6,14 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startTestRelay, connectFakeAgent } from './test-relay.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-repair-test-'));
+const tempDir = tmpDir('webscout-repair-test-');
 const scopeDir = path.join(tempDir, 'scope');
 fs.mkdirSync(scopeDir);
 const fixturePath = path.join(scopeDir, 'fixture.js');

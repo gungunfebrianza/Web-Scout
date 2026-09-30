@@ -9,6 +9,18 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    is OLDER than relay.mjs/db.mjs/ai.mjs/report.mjs/command-
                                    registry.mjs on disk (an edit is invisible until it restarts).
                                    Every command reply also warns once on stderr when that is so.
+  scratch status                  count of web-scout scratch dirs in the temp dir and how many MB are
+                                   reclaimable. Every command also warns on stderr at >=20 stale dirs,
+                                   and "session end" at >=1 (--confirm is needed above 200 dirs).
+  scratch cleanup [--dry-run] [--include-wl] [--min-age-min <n>] [--confirm]
+                                   sweep %TEMP% for webscout-browser-profile-*, webscout-crv-tab-profile-*
+                                   and webscout-net-console-known-issues-* dirs whose owner (pid in the
+                                   .webscout-owner.json marker) is dead - or, with no marker, older than
+                                   24h - after killing any browser whose --user-data-dir is that dir.
+                                   Never follows symlinks/junctions. --dry-run only lists (dirs, MB);
+                                   --include-wl also sweeps wl-browser-/wl-story-/wl-anchor- dirs
+                                   (not created by web-scout). --min-age-min lowers the 24h age at which a
+                                   marker-less (pre-marker) dir counts as stale, e.g. 60. Runs automatically before each launch.
   relay start                     launch the relay detached (log: <tmpdir>/webscout-relay-<port>.log)
   relay stop                      signal the relay's pid (from its pidfile; for a relay started
                                    before pidfiles existed, asks the OS which process LISTENS on the

@@ -5,6 +5,21 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { freePort } from './test-relay.mjs';
+import { createScratchDir, ownScratchDir, sweepStale } from './scratch.mjs';
+
+// Cuts the profile's disk footprint (~460 MB of caches/component data per run before).
+export const SLIM_FLAGS = [
+  '--no-first-run', '--disk-cache-size=1', '--media-cache-size=1', '--disable-background-networking',
+  '--disable-component-update', '--disable-extensions', '--disable-sync', '--disable-default-apps',
+  '--no-default-browser-check', '--disable-breakpad',
+];
+
+// Reclaim profiles/browsers orphaned by earlier crashed runs. Never lets a sweep failure block a launch.
+function sweepQuietly() {
+  if (process.env.WEBSCOUT_NO_SWEEP === '1' || process.env.NODE_ENV === 'test') return; // opt-outs; tests get a private root instead
+  try { sweepStale({ markerOnly: true }); } catch { /* best effort */ }
+}
+
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -43,17 +58,20 @@ export function browserSkip() {
 // exceptions and console.error calls seen since launch.
 export async function launchBrowser(browserPath = findBrowser()) {
   if (!browserPath) throw new Error('no Chromium/Edge binary found (set WEBSCOUT_BROWSER)');
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-browser-profile-'));
+  sweepQuietly();
   const cdpPort = await freePort();
-  const args = ['--headless=new', '--disable-gpu', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${profile}`, '--no-first-run', '--window-size=1500,1400'];
+  const scratch = ownScratchDir(createScratchDir('webscout-browser-profile-'));
+  const profile = scratch.dir;
+  const args = ['--headless=new', '--disable-gpu', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${profile}`, ...SLIM_FLAGS, '--window-size=1500,1400'];
   if (process.platform === 'linux') args.push('--no-sandbox');
-  const child = spawn(browserPath, [...args, 'about:blank'], { stdio: 'ignore', windowsHide: true });
+  const child = spawn(browserPath, [...args, 'about:blank'], { stdio: 'ignore', windowsHide: true, detached: process.platform !== 'win32' });
+  scratch.track(child.pid);
+  scratch.guard(child.pid); // browser dies with us even on SIGKILL
   let ws;
+  // Idempotent. Tree-kill first (the browser holds locks on the profile), then delete with retries.
   const close = async () => {
     try { ws?.close(); } catch { /* already closed */ }
-    try { child.kill(); } catch { /* already gone */ }
-    await sleep(300); // the browser holds the profile dir open for a moment after kill
-    try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* temp dir */ }
+    scratch.dispose();
   };
   try {
     let targets = [];

@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import path from 'node:path';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { startTestRelay, connectFakeAgent } from './test-relay.mjs';
@@ -156,7 +157,7 @@ test('session start -> dom/idb/eval against the active session -> session end (r
 // MCP agent got strictly less diagnostic information than a CLI agent for the identical
 // failure. Own relay + own fake tab (this file's shared module-level relay has none connected).
 test('an MCP tool failure carries the same knownIssue info the CLI already prints', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-mcp-known-issue-'));
+  const dir = tmpDir('webscout-mcp-known-issue-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify([{ id: 'mcp-flaky-el', signature: 'detached from DOM', description: 'stale DOM reference after a rerender', remediation: 'use dom.click-wait instead of a bare click' }]));
   const localRelay = await startTestRelay({ env: { WEBSCOUT_KNOWN_ISSUES: registryPath } });

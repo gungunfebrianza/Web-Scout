@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import { freePort, isUp } from './test-relay.mjs';
 
@@ -36,7 +37,7 @@ test('a plain import of relay.mjs never binds the port, and the process exits on
 
 test('spawning relay.mjs directly (the real entry point) DOES bind the port', async () => {
   const port = await freePort();
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-import-safety-'));
+  const tmp = tmpDir('webscout-import-safety-');
   const child = spawn(process.execPath, [relayFile], {
     cwd: dir,
     env: { ...process.env, WEBSCOUT_PORT: String(port), WEBSCOUT_NO_AUTOOPEN: '1', WEBSCOUT_DB_PATH: path.join(tmp, 'test.db'), WEBSCOUT_PID_PATH: path.join(tmp, 'relay.pid'), WEBSCOUT_TOKEN_CALIBRATION: path.join(tmp, 'token-calibration.json') },

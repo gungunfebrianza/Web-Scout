@@ -11,6 +11,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -61,7 +62,7 @@ export async function startTestRelay({ script = path.join(__dirname, 'relay.mjs'
     return { port, env: { WEBSCOUT_PORT: String(port) }, stop: async () => {}, live: true };
   }
   if (!reaped) { reaped = true; reapLeakedRelays(); }
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-test-'));
+  const dir = tmpDir('webscout-test-');
   const port = await freePort();
   const env = {
     WEBSCOUT_PORT: String(port),

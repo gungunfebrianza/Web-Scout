@@ -10,12 +10,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { startTestRelay, connectFakeAgent } from './test-relay.mjs';
 
 async function withRelay(issues, fn) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-known-issues-analytics-'));
+  const dir = tmpDir('webscout-known-issues-analytics-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify(issues));
   const relay = await startTestRelay({ env: { WEBSCOUT_KNOWN_ISSUES: registryPath } });

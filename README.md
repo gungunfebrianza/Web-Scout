@@ -311,6 +311,11 @@ relay status                  # works even when the relay is down; reports pid, 
 relay restart                 # stop + start (also: relay start, relay stop). Replaces `pkill` -
                                # which silently does nothing against a Windows-native node process
 ```
+**Scratch dirs / browsers**: headless profiles live in `%TEMP%` with an owner marker and are
+removed (browser process tree killed first) on exit, error, Ctrl+C and SIGTERM. `scratch cleanup
+[--dry-run] [--include-wl] [--confirm]` (and `scratch status`) reclaims what a hard kill (or a closed `crv launch` browser) left behind
+and prints dirs and MB freed; it also runs before every browser launch.
+
 Every reply also warns once on stderr when the relay is running code older
 than what is on disk, so a green run can't quietly be validating stale code.
 

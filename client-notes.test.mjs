@@ -9,6 +9,7 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -116,7 +117,7 @@ function warnScript() {
 }
 
 test('agent-stale warning is remembered across separate PROCESSES within the cooldown window', async () => {
-  const cacheFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-warn-cache-')), 'cache.json');
+  const cacheFile = path.join(tmpDir('webscout-warn-cache-'), 'cache.json');
   headers = { 'x-webscout-agent-stale': 'tabA,tabB' };
   const env = { WEBSCOUT_PORT: String(port), WEBSCOUT_WARN_CACHE_PATH: cacheFile };
   try {
@@ -133,7 +134,7 @@ test('agent-stale warning is remembered across separate PROCESSES within the coo
 });
 
 test('agent-stale warning resurfaces once the persisted cooldown has elapsed (never silenced forever)', async () => {
-  const cacheFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-warn-cache-')), 'cache.json');
+  const cacheFile = path.join(tmpDir('webscout-warn-cache-'), 'cache.json');
   fs.writeFileSync(cacheFile, JSON.stringify({ 'agent-stale:tabA,tabB': Date.now() - 6 * 60 * 1000 }));
   headers = { 'x-webscout-agent-stale': 'tabA,tabB' };
   const env = { WEBSCOUT_PORT: String(port), WEBSCOUT_WARN_CACHE_PATH: cacheFile };

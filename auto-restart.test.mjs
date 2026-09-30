@@ -5,13 +5,14 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { freePort, spawnClean } from './test-relay.mjs';
 
 const realDir = path.dirname(fileURLToPath(import.meta.url));
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-auto-restart-'));
+const tmp = tmpDir('webscout-auto-restart-');
 const pidPath = path.join(tmp, 'relay.pid');
 process.env.WEBSCOUT_PID_PATH = pidPath;
 const { startRelay, stopRelay, readRelayEvents, RELAY_SOURCE_FILES } = await import('./relay-control.mjs');

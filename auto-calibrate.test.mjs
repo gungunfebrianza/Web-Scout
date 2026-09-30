@@ -14,6 +14,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
@@ -73,7 +74,7 @@ function httpJson(method, url, body) {
 }
 
 function fixtureHome(transcriptText) {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-autocal-home-'));
+  const home = tmpDir('webscout-autocal-home-');
   if (transcriptText !== null) {
     const projDir = path.join(home, '.claude', 'projects', 'fixture-project');
     fs.mkdirSync(projDir, { recursive: true });
@@ -95,14 +96,14 @@ function run({ homeDir, calFile, existingCalibration, minSamples = 8 }) {
 // The live-relay case's relay starts here, before every test() call (see CONTRIBUTING.md: a top-level await
 // after a test() silently drops tests under --test-force-exit) and stops in after(), like every other
 // relay-touching file - starting it inside the test with t.after() tripped a libuv assertion at exit.
-const liveCalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-autocal-live-'));
+const liveCalDir = tmpDir('webscout-autocal-live-');
 const liveCalFile = path.join(liveCalDir, 'token-calibration.json');
 const liveHome = fixtureHome(buildTranscript({ ratio: 3 }));
 const relay = await startTestRelay({ env: { WEBSCOUT_AUTO_CALIBRATE: '1', WEBSCOUT_TRANSCRIPT_HOME: liveHome, WEBSCOUT_TOKEN_CALIBRATION: liveCalFile } });
 after(async () => { await relay.stop(); fs.rmSync(liveCalDir, { recursive: true, force: true }); fs.rmSync(liveHome, { recursive: true, force: true }); });
 
 test('writes a calibration file when uncalibrated and enough clean samples exist', () => {
-  const calDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-autocal-cal-'));
+  const calDir = tmpDir('webscout-autocal-cal-');
   const calFile = path.join(calDir, 'token-calibration.json');
   const home = fixtureHome(buildTranscript({ ratio: 3 }));
   try {
@@ -120,7 +121,7 @@ test('writes a calibration file when uncalibrated and enough clean samples exist
 });
 
 test('never overwrites an existing calibration, even a stale/partial one', () => {
-  const calDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-autocal-cal-'));
+  const calDir = tmpDir('webscout-autocal-cal-');
   const calFile = path.join(calDir, 'token-calibration.json');
   const home = fixtureHome(buildTranscript({ ratio: 3 }));
   const existing = { method: 'count_tokens', model: 'claude-x', sampledAt: '2020-01-01T00:00:00.000Z', kinds: { json: { ratio: 5, low: 4, high: 6 } } };
@@ -135,7 +136,7 @@ test('never overwrites an existing calibration, even a stale/partial one', () =>
 });
 
 test('no transcripts found: attempted, not written, a clear reason', () => {
-  const calDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-autocal-cal-'));
+  const calDir = tmpDir('webscout-autocal-cal-');
   const calFile = path.join(calDir, 'token-calibration.json');
   const home = fixtureHome(null);
   try {
@@ -151,7 +152,7 @@ test('no transcripts found: attempted, not written, a clear reason', () => {
 });
 
 test('not enough clean samples: attempted, not written, never throws', () => {
-  const calDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-autocal-cal-'));
+  const calDir = tmpDir('webscout-autocal-cal-');
   const calFile = path.join(calDir, 'token-calibration.json');
   const home = fixtureHome(buildTranscript({ ratio: 3, n: 2 })); // well under minSamples
   try {

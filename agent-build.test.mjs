@@ -4,6 +4,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { injectBuildId, stampedBuildId, stampInject, currentInjectBuild, INJECT_PATH } from './build-id.mjs';
@@ -11,7 +12,7 @@ import { startTestRelay, connectFakeAgent } from './test-relay.mjs';
 
 const relay = await startTestRelay();
 const skipLive = relay.live ? 'skipped under WEBSCOUT_TEST_LIVE=1' : false;
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-build-'));
+const tmp = tmpDir('webscout-build-');
 after(async () => {
   await relay.stop();
   fs.rmSync(tmp, { recursive: true, force: true });

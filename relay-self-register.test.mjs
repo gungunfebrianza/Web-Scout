@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +23,7 @@ function readRegistry(registryPath) {
 }
 
 test('a real relay registers itself on startup, into the same registry a test relay uses', async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-self-register-'));
+  const tmp = tmpDir('webscout-self-register-');
   const registryPath = path.join(tmp, 'registry.jsonl');
   const port = await freePort();
   const child = spawn(process.execPath, [path.join(dir, 'relay.mjs')], {
@@ -67,7 +68,7 @@ test('a real relay registers itself on startup, into the same registry a test re
 });
 
 test('registerRelay never lets a real relay register against port 8973 get reaped, even forced stale', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-self-register-8973-'));
+  const tmp = tmpDir('webscout-self-register-8973-');
   const registryPath = path.join(tmp, 'registry.jsonl');
   fs.writeFileSync(registryPath, `${JSON.stringify({ pid: 999999999, port: REAL_RELAY_PORT, dir: null, startedAt: new Date(0).toISOString() })}\n`);
   try {

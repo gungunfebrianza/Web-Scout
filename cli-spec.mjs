@@ -36,6 +36,11 @@ export const CLI_SPEC = [
   { cmd: 'ask', pos: [1, Infinity], val: ['--session', '--agent'], mcp: 'webscout_session.ask', params: { '--session': 'sessionId' } },
   { cmd: 'db version-check', pos: [0, 0], val: ['--agent'], mcp: 'webscout_meta.db_version_check' },
 
+  {
+    cmd: 'scratch cleanup', pos: [0, 0], bool: ['--dry-run', '--include-wl', '--confirm'], val: ['--min-age-min'], mcp: null,
+    mcpExempt: 'deletes temp dirs and kills browser processes on the local machine - host housekeeping, not something an MCP tool call should trigger',
+  },
+  { cmd: 'scratch status', pos: [0, 0], mcp: null, mcpExempt: 'host disk housekeeping report - not an MCP capability' },
   { cmd: 'relay start', pos: [0, 0], mcp: null, mcpExempt: NOMCP_PROCESS },
   { cmd: 'relay stop', pos: [0, 0], mcp: null, mcpExempt: NOMCP_PROCESS },
   { cmd: 'relay restart', pos: [0, 0], mcp: null, mcpExempt: NOMCP_PROCESS },

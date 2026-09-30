@@ -8,6 +8,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,7 +107,7 @@ test('the "session already active" conflict names the blocking session\'s agent 
 
 test('CLI: "crv seed" then "crv cleanup" round-trips a manifest and removes exactly what it wrote', { skip: skipLive }, async () => {
   const session = await api('POST', '/sessions', { goal: 'seed-cleanup test', context: 'automated', agent: 'crv-safety-tab', briefing: false });
-  const manifest = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-crv-manifest-')), 'manifest.json');
+  const manifest = path.join(tmpDir('webscout-crv-manifest-'), 'manifest.json');
   const before = db.widgets.length;
 
   const seed = await spawnAsync([
