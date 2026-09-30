@@ -79,6 +79,8 @@ export async function startTestRelay({ script = path.join(__dirname, 'relay.mjs'
     // anyway, defense in depth against whatever this test process's OWN env happens to carry.
     WEBSCOUT_TOKEN_CALIBRATION: path.join(dir, 'token-calibration.json'),
     WEBSCOUT_AUTO_CALIBRATE: '',
+    // A test relay must not spawn process scans or write host-trend samples about the machine it runs on.
+    WEBSCOUT_NO_HOST_SCAN: '1',
     ...envOverride,
   };
   const child = spawn(process.execPath, [script], { cwd: path.dirname(script), env: { ...process.env, ...env }, stdio: 'ignore', windowsHide: true });

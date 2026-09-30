@@ -19,6 +19,7 @@ const tmp = tmpDir('webscout-relay-control-');
 const pidPath = path.join(tmp, 'relay.pid');
 // pidfilePath() reads this from process.env, and the relay child inherits it
 process.env.WEBSCOUT_PID_PATH = pidPath;
+process.env.WEBSCOUT_RELAY_LOG = path.join(tmp, 'relay-default.log'); // a CLI call that autostarts/restarts must not log into the shared temp dir
 const { startRelay, stopRelay, restartRelay, resolveRelayPid, readPidfile, RELAY_SOURCE_FILES } = await import('./relay-control.mjs');
 
 const COPIED = [...RELAY_SOURCE_FILES, 'relay-control.mjs', 'dashboard.html'];

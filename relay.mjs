@@ -51,6 +51,7 @@ import { discoverTranscripts, readTranscriptFile, importIntents } from './intent
 import { exportTrace, writeTrace } from './trace.mjs';
 import { autoCalibrateIfMissing } from './transcript-tokens.mjs';
 import * as repairApi from './self-repair.mjs';
+import * as hostHealth from './host-health.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
@@ -1513,6 +1514,10 @@ function computeAnalytics() {
     const w = wasteBySession[0];
     topFrictionItems.push({ kind: 'wasteBySession', severity: Math.round((w.wastePct / 100) * w.calls), summary: `session ${w.sessionId}${w.goal ? ` ("${w.goal}")` : ''} wasted ${Math.round(w.wastePct)}% of ${w.calls} calls` });
   }
+  // Host resources (scratch dirs/MB, orphan browsers, free disk) from the cached host-health snapshot - peeked, never
+  // awaited, so analytics stays synchronous and fast; null until the first background scan lands (or scan disabled).
+  const host = hostHealth.peekHostHealth();
+  topFrictionItems.push(...hostHealth.hostFrictionItems(host));
   topFrictionItems.sort((a, b) => b.severity - a.severity);
   topFrictionItems.splice(5);
 
@@ -1528,6 +1533,7 @@ function computeAnalytics() {
     macroHealth,
     macroAdoption,
     topFrictionItems,
+    host: host ? { scratchBytes: host.scratchBytes, scratchDirs: host.metrics.dirs, staleDirs: host.staleDirs, orphanBrowsers: host.orphanBrowsers.length, freeDiskGb: host.metrics.freeGb, at: host.at } : null,
     activityPunchcard,
     durationByType,
     wasteBySession,
@@ -2843,6 +2849,8 @@ const routes = [
       // riskiest known-bad selectors/types/macros into the pass it's about to run instead
       // of discovering them one at a time as each one fails live.
       try { report.knownFriction = getAnalytics().topFrictionItems; } catch { /* best-effort - never blocks preflight */ }
+      // Host resources: warns (never fails the preflight) when the disk is low or browsers/profiles have leaked.
+      try { report.host = hostHealth.preflightHostReport(); } catch { /* best-effort */ }
 
       report.ok = !(report.missingStores?.length) && (selector ? report.selectorPresent !== false : true) && !(report.bootErrors?.length);
       return report;
@@ -3203,6 +3211,36 @@ const routes = [
   // why it's cached.
   { method: 'GET', pattern: /^\/analytics$/, handler: async () => getAnalytics() },
 
+  // ---- Host health (dashboard panels): scratch dirs/MB, owners, orphan browsers, free disk, trend, per-session
+  // cost, footprint log, last test run. Cleanup/kill actions re-derive what is safe to touch server-side
+  // (scratch.mjs rules: our prefixes only, stale owner only, browsers naming one of our profile dirs).
+  { method: 'GET', pattern: /^\/host\/health$/, handler: async (req) => hostHealth.getHostHealth({ force: new URL(req.url, `http://${HOST}`).searchParams.get('fresh') === '1' }) },
+  { method: 'GET', pattern: /^\/host\/trend$/, handler: async (req) => hostHealth.readTrend({ days: Math.min(90, Math.max(1, Number(new URL(req.url, `http://${HOST}`).searchParams.get('days')) || 14)) }) },
+  { method: 'GET', pattern: /^\/host\/sessions$/, handler: async () => hostHealth.sessionScratchCost(dbApi.listSessions()) },
+  { method: 'GET', pattern: /^\/host\/footprint$/, handler: async () => hostHealth.readFootprint() },
+  { method: 'GET', pattern: /^\/host\/test-run$/, handler: async () => hostHealth.readLastTestRun() },
+  {
+    method: 'POST',
+    pattern: /^\/host\/cleanup$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      // Dry-run unless the caller explicitly sends dryRun:false; a big real delete also needs confirm:true.
+      const r = hostHealth.cleanupScratch({ dryRun: body.dryRun !== false, confirm: body.confirm === true, dirs: body.dirs });
+      broadcastUpdate('host', null);
+      return r;
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/host\/kill-orphans$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      const r = await hostHealth.killOrphans({ pids: body.pids });
+      broadcastUpdate('host', null);
+      return r;
+    },
+  },
+
   {
     method: 'POST',
     pattern: /^\/ask$/,
@@ -3381,6 +3419,8 @@ if (isMainModule) {
     for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { removePidfile(PORT); unregisterRelay(process.pid, null); process.exit(0); });
     process.on('exit', () => { removePidfile(PORT); unregisterRelay(process.pid, null); });
     // sample the storage-dedup total once a day-ish even if nobody asks for a report
+    // host-resource trend sample (dirs / MB / orphans), at most one per 10 min across processes
+    if (process.env.WEBSCOUT_NO_HOST_SCAN !== '1') { hostHealth.getHostHealth().catch(() => {}); setInterval(() => hostHealth.getHostHealth({ force: true }).catch(() => {}), 10 * 60 * 1000).unref(); }
     setInterval(() => { try { dbApi.snapshotSavings('storage', dbApi.getTokenSavingsReport().byKind.storage.bytesSaved); } catch { /* best effort */ } }, 6 * 3600 * 1000).unref();
     log(`listening on http://${HOST}:${PORT} (bound to localhost only)`);
     log('waiting for the in-page agent to connect at /agent ...');

@@ -12,11 +12,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { reapLeakedRelays } from './relay-control.mjs';
 import { removeDirSync, scratchStats, killTree, listBrowserProcesses } from './scratch.mjs';
+import { testRunFile } from './host-health.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const realTmp = os.tmpdir();
 const root = fs.mkdtempSync(path.join(realTmp, 'webscout-testroot-'));
-const IGNORED = ['node-compile-cache', 'webscout-relays.jsonl', 'webscout-scratch-log.jsonl', 'cv_debug.log']; // shared-by-design files
+const IGNORED = ['node-compile-cache', 'webscout-relays.jsonl', 'webscout-scratch-log.jsonl', 'webscout-scratch-ledger.jsonl', 'webscout-host-samples.jsonl', 'cv_debug.log']; // shared-by-design files
 const ours = (dir) => scratchStats({ baseDir: dir }).dirs; // our prefixes only: unrelated tools may create wl-* meanwhile
 const before = ours(realTmp);
 
@@ -36,7 +37,8 @@ for (const n of fs.readdirSync(root).filter((f) => /^webscout-serve-\d+\.json$/.
 }
 if (reaped) { console.error(`run-tests: stopped ${reaped} detached helper process(es) the tests left running (leak - fix them).`); await new Promise((r) => setTimeout(r, 500)); }
 
-const left = fs.readdirSync(root).filter((n) => !IGNORED.some((p) => n.startsWith(p))).length;
+const leakedNames = fs.readdirSync(root).filter((n) => !IGNORED.some((p) => n.startsWith(p)));
+const left = leakedNames.length;
 // Browsers still pointing into the private root are leaks too: kill, then wipe.
 const orphans = listBrowserProcesses().filter((p) => p.commandLine.toLowerCase().includes(root.toLowerCase()));
 for (const p of orphans) killTree(p.pid);
@@ -44,5 +46,12 @@ if (left) console.error(`run-tests: leaked: ${fs.readdirSync(root).filter((n) =>
 const ok = removeDirSync(root);
 const grew = ours(realTmp) - before;
 console.error(`\nrun-tests: ${left} scratch entr${left === 1 ? 'y' : 'ies'} left in the private root${left ? ' (tests that leaked - fix them)' : ''}; ${orphans.length} orphan browser(s) killed; root ${ok ? 'wiped' : 'could NOT be fully wiped'}; real temp gained ${grew} web-scout dir(s).`);
+// Last-run record for the dashboard's "Test runs" panel. Written to the REAL temp dir (the private root is wiped).
+try {
+  fs.writeFileSync(testRunFile(), JSON.stringify({
+    at: new Date().toISOString(), exitStatus: r.status ?? null, leakedEntries: leakedNames, leakedCount: left, helpersStopped: reaped,
+    orphansKilled: orphans.length, rootWiped: ok, realTempGained: grew, failed: grew > 0 || orphans.length > 0 || (r.status ?? 1) !== 0,
+  }));
+} catch { /* dashboard convenience only */ }
 if (grew > 0 || orphans.length) { console.error('run-tests: FAIL - the run leaked outside its private root or left a browser running.'); process.exit(1); }
 process.exit(r.status ?? 1);

@@ -7,10 +7,10 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { tmpDir } from './scratch.mjs';
 
-const dbPath = path.join(os.tmpdir(), `webscout-test-${process.pid}-${Date.now()}.db`);
+const dbPath = path.join(tmpDir('webscout-dbtest-'), 'test.db');
 process.env.WEBSCOUT_DB_PATH = dbPath;
 
 // Dynamic import AFTER the env var is set - db.mjs opens its DB at
@@ -19,6 +19,7 @@ process.env.WEBSCOUT_DB_PATH = dbPath;
 const db = await import('./db.mjs');
 
 after(() => {
+  db.closeDb(); // release the handle first so the tmpDir can be removed on Windows
   // Best-effort - node:sqlite has no exported close() here (db.mjs holds
   // it open for its whole module lifetime, matching the real relay's
   // process-lifetime usage), so on Windows the main .db file's handle may

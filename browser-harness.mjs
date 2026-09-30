@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { freePort } from './test-relay.mjs';
 import { createScratchDir, ownScratchDir, sweepStale } from './scratch.mjs';
+import { lowDiskWarning } from './host-health.mjs';
 
 // Cuts the profile's disk footprint (~460 MB of caches/component data per run before).
 export const SLIM_FLAGS = [
@@ -59,6 +60,8 @@ export function browserSkip() {
 export async function launchBrowser(browserPath = findBrowser()) {
   if (!browserPath) throw new Error('no Chromium/Edge binary found (set WEBSCOUT_BROWSER)');
   sweepQuietly();
+  const lowDisk = lowDiskWarning();
+  if (lowDisk) process.stderr.write(`webscout: WARNING: ${lowDisk}\n`);
   const cdpPort = await freePort();
   const scratch = ownScratchDir(createScratchDir('webscout-browser-profile-'));
   const profile = scratch.dir;

@@ -64,7 +64,7 @@ export function killTree(pid) {
   } catch { /* already gone */ }
 }
 
-function isRealDir(p) {
+export function isRealDir(p) {
   try { const s = fs.lstatSync(p); return s.isDirectory() && !s.isSymbolicLink(); } catch { return false; }
 }
 
@@ -87,7 +87,7 @@ function isSymlink(p) { try { return fs.lstatSync(p).isSymbolicLink(); } catch {
 function writeMarker(dir, pid) {
   fs.writeFileSync(path.join(dir, MARKER), JSON.stringify({ pid, createdAt: Date.now(), creator: process.pid }));
 }
-function readMarker(dir) {
+export function readMarker(dir) {
   try {
     const m = JSON.parse(fs.readFileSync(path.join(dir, MARKER), 'utf8'));
     return Number.isInteger(m.pid) && Number.isFinite(m.createdAt) ? m : null;
@@ -103,13 +103,29 @@ function logFootprint(dir) {
   try { fs.appendFileSync(path.join(scratchRoot(), 'webscout-scratch-log.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), dir: path.basename(dir), bytes: dirSize(dir) })}
 `); } catch { /* logging only */ }
 }
+// Always-on, tiny append-only ledger of marked-dir lifecycle events (create / track / dispose), read by
+// the relay's host-health panels: per-session scratch cost, and "14 new profiles a day" creation trends.
+// Never throws, and rotates itself so it cannot become the next leak.
+export const LEDGER_NAME = 'webscout-scratch-ledger.jsonl';
+const LEDGER_MAX_BYTES = 512 * 1024;
+export const ledgerPath = () => path.join(scratchRoot(), LEDGER_NAME);
+function ledger(event) {
+  try {
+    const file = ledgerPath();
+    try { if (fs.statSync(file).size > LEDGER_MAX_BYTES) fs.renameSync(file, `${file}.old`); } catch { /* no ledger yet */ }
+    fs.appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), ...event })}
+`);
+  } catch { /* observability only */ }
+}
+const ledgered = new Set(); // marked dirs this process created: the only ones whose dispose is ledgered
 const live = new Map(); // dir -> { pids:Set<number> }
 let hooked = false;
 
 export function cleanupAllSync() {
   for (const [dir, entry] of [...live]) {
     for (const pid of entry.pids) killTree(pid); // children first: the browser locks the profile
-    removeDirSync(dir);
+    const released = removeDirSync(dir);
+    if (ledgered.delete(dir)) ledger({ ev: 'dispose', dir: path.basename(dir), released, processes: entry.pids.size, via: 'exit' });
     live.delete(dir);
   }
 }
@@ -131,7 +147,11 @@ export function createScratchDir(prefix, { dir, ownerPid = process.pid, baseDir 
   let target = dir;
   if (target) fs.mkdirSync(target, { recursive: true });
   else target = fs.mkdtempSync(path.join(baseDir, prefix));
-  if (marker) writeMarker(target, ownerPid);
+  if (marker) {
+    writeMarker(target, ownerPid);
+    ledgered.add(target);
+    ledger({ ev: 'create', dir: path.basename(target), source: PREFIXES.find((p) => path.basename(target).startsWith(p)) ?? prefix, owner: ownerPid });
+  }
   return target;
 }
 
@@ -146,14 +166,15 @@ export function ownScratchDir(dir) {
   live.set(dir, entry);
   return {
     dir,
-    track(pid) { if (pid) entry.pids.add(pid); },
+    track(pid) { if (!pid) return; entry.pids.add(pid); if (ledgered.has(dir)) ledger({ ev: 'track', dir: path.basename(dir), pid }); },
     // Detached watchdog: kills `pid`'s tree and removes the dir if this process dies uncleanly.
     guard(pid) { try { spawn(process.execPath, [GUARD, String(process.pid), String(pid), dir], { detached: true, stdio: 'ignore', windowsHide: true }).unref(); } catch { /* sweep is the backstop */ } }, // marker owner stays this process: if we die, the sweep kills the browser
     dispose() {
       for (const pid of entry.pids) killTree(pid);
       if (entry.pids.size) sleepSync(150);
       logFootprint(dir);
-      removeDirSync(dir);
+      const released = removeDirSync(dir);
+      if (ledgered.delete(dir)) ledger({ ev: 'dispose', dir: path.basename(dir), released, processes: entry.pids.size });
       live.delete(dir);
     },
   };
@@ -166,7 +187,7 @@ export async function withScratchDir(prefix, fn, opts = {}) {
 }
 
 // --- sweep ----------------------------------------------------------------------------
-function dirSize(dir) {
+export function dirSize(dir) {
   let bytes = 0;
   const stack = [dir];
   while (stack.length) {
@@ -185,7 +206,7 @@ function dirSize(dir) {
   return bytes;
 }
 
-const norm = (p) => path.resolve(p).replace(/[\\/]+$/, '').toLowerCase();
+export const norm = (p) => path.resolve(p).replace(/[\\/]+$/, '').toLowerCase();
 
 // Root browser processes (and their command lines) as [{pid, commandLine}].
 export function listBrowserProcesses(names = BROWSER_NAMES) {
@@ -220,7 +241,7 @@ export function isStale(dir, { now = Date.now(), staleUnownedMs = STALE_UNOWNED_
 
 // Reclaims stale scratch dirs under `baseDir`. dryRun lists without touching anything.
 // Options: prefixes, includeForeign (wl-*), browserNames (tests inject 'node.exe').
-export function sweepStale({ dryRun = false, markerOnly = false, baseDir = scratchRoot(), prefixes = PREFIXES, includeForeign = false, browserNames = BROWSER_NAMES, now = Date.now(), staleUnownedMs = STALE_UNOWNED_MS } = {}) {
+export function sweepStale({ dryRun = false, markerOnly = false, baseDir = scratchRoot(), prefixes = PREFIXES, includeForeign = false, browserNames = BROWSER_NAMES, now = Date.now(), staleUnownedMs = STALE_UNOWNED_MS, only = null } = {}) {
   const active = includeForeign ? [...prefixes, ...FOREIGN_PREFIXES] : prefixes;
   const result = { dryRun, scanned: 0, removed: [], skippedLive: 0, failed: [], killedProcesses: [], freedBytes: 0 };
   let names = [];
@@ -229,6 +250,7 @@ export function sweepStale({ dryRun = false, markerOnly = false, baseDir = scrat
   const unmarked = []; // legacy dirs (pre-marker) not yet old enough to age out
   for (const name of names) {
     if (!active.some((p) => name.startsWith(p))) continue;
+    if (only && !only.has(name)) continue; // dashboard cleanup of hand-picked rows
     const full = path.join(baseDir, name);
     if (!isRealDir(full)) continue; // files, symlinks, junctions: never touched
     if (markerOnly && !readMarker(full)) continue; // implicit sweeps only reclaim dirs that prove they are ours

@@ -315,6 +315,16 @@ relay restart                 # stop + start (also: relay start, relay stop). Re
 removed (browser process tree killed first) on exit, error, Ctrl+C and SIGTERM. `scratch cleanup
 [--dry-run] [--include-wl] [--confirm]` (and `scratch status`) reclaims what a hard kill (or a closed `crv launch` browser) left behind
 and prints dirs and MB freed; it also runs before every browser launch.
+The dashboard makes the same leak visible early: **Host health** (dirs, MB, reclaimable, live/orphan
+browsers, free disk, colour-coded), **Host trend**, **Scratch dirs** (owner pid alive/dead, per-row Clean),
+**Orphan browsers** (kill; only browsers naming a web-scout profile dir), **Session scratch cost**,
+**Test runs** (last `node run-tests.mjs`) and **Profile footprint** (`WEBSCOUT_SCRATCH_LOG=1`). Cleanup is
+always a dry-run preview first; deleting more than 200 dirs needs an explicit confirm. Backed by
+`GET /host/{health,trend,sessions,footprint,test-run}` and `POST /host/{cleanup,kill-orphans}`.
+`/analytics` carries a `host` block and `topFrictionItems` (hence `crv preflight`'s `knownFriction`) gains
+orphan-browser / scratch-leak / low-disk items; `crv preflight` also returns `host` (free disk, scratch
+dirs, orphans, `warnings[]`), and a browser launch warns on stderr when the disk is low
+(`WEBSCOUT_MIN_FREE_GB`, default 10). `WEBSCOUT_NO_HOST_SCAN=1` turns the background scan off.
 
 Every reply also warns once on stderr when the relay is running code older
 than what is on disk, so a green run can't quietly be validating stale code.

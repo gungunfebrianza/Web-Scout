@@ -159,7 +159,7 @@ export async function stopRelay({ port, host = '127.0.0.1' }) {
 export async function startRelay({ port, host = '127.0.0.1', env = {}, logPath, script = path.join(__dirname, 'relay.mjs') }) {
   const base = `http://${host}:${port}`;
   if (await healthOk(base)) return { started: false, reason: `a relay is already answering on ${base}`, pid: resolveRelayPid(port)?.pid };
-  const log = logPath || path.join(os.tmpdir(), `webscout-relay-${port}.log`);
+  const log = logPath || process.env.WEBSCOUT_RELAY_LOG || path.join(os.tmpdir(), `webscout-relay-${port}.log`);
   const fd = fs.openSync(log, 'a');
   const child = spawn(process.execPath, [script], {
     cwd: path.dirname(script),

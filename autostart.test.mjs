@@ -22,9 +22,12 @@ const env = {
   WEBSCOUT_DB_PATH: path.join(tmp, 'test.db'),
   WEBSCOUT_PID_PATH: path.join(tmp, 'relay.pid'),
   WEBSCOUT_NO_AUTOOPEN: '1',
+  WEBSCOUT_RELAY_LOG: path.join(tmp, 'relay.log'), // else the autostarted relay logs into the shared temp dir and leaks
   WEBSCOUT_TOKEN_CALIBRATION: path.join(tmp, 'token-calibration.json'),
   WEBSCOUT_TRANSCRIPT_HOME: tmp,
 };
+// stopRelay() resolves the pidfile from THIS process's env; without it the autostarted relay is never found and outlives the test.
+process.env.WEBSCOUT_PID_PATH = env.WEBSCOUT_PID_PATH;
 const cli = (extraEnv, ...args) => spawnClean([path.join(__dirname, 'cli.mjs'), ...args], { env: { ...env, ...extraEnv } });
 const alive = () => isUp(port);
 

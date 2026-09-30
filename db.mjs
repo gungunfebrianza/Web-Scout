@@ -879,6 +879,9 @@ function hydrateSession(row) {
   };
 }
 
+// Closes the SQLite handle. Only tests need it: on Windows an open handle blocks deleting the file's dir.
+export function closeDb() { db.close(); }
+
 export function getCurrentSession() {
   return hydrateSession(stmtGetCurrentSession.get() ?? null);
 }
