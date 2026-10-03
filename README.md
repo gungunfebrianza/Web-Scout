@@ -187,7 +187,7 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   saved/exported session report (`GET /sessions/:id/report`) carries the same known-issues matches for that
   session's own failed actions, and the MCP server's tool-failure replies carry the same
   `knownIssue`/post-timeout-verification info the CLI prints; the dashboard's "End session" button shows the same `emergentFriction`/savings receipt, and `macro run` / `crv run` steps carry the same risk warning and known-issue match as `/command`. History is read on demand (indexed by
-  target), never frozen at session start, and the per-command check never touches the shared 5s analytics cache. can never go stale mid-session or poison the shared 5s analytics cache. `macro update`
+  target), never frozen at session start, and the per-command check never touches the shared 5s analytics cache. `macro update`
   (also `webscout_macro.update`) fixes a step in place through the same `PUT /macros/:id/steps`
   the dashboard step inspector already used - previously CLI-only callers had to delete and
   re-record a macro to fix one wrong step. The dashboard also surfaces `verityLabelsStillFailing`
