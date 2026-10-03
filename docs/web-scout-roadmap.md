@@ -3077,6 +3077,67 @@ still runs per analytics request.
 Tests: `friction-round4.test.mjs`, `friction-dashboard.test.mjs`, `selector-key-migration.test.mjs`,
 `relay-source-files.test.mjs`, and additions to `friction.test.mjs` / `friction-contract.test.mjs`.
 
+## V43 - friction awareness, round 5: trust the gate, one source per number (implemented)
+
+Round 4 left four kinds of debt: a test run that could not be trusted, numbers still counted in two places,
+information reachable only by hand, and a full table scan behind every analytics call. This round paid them.
+
+**Trust the gate.**
+- A scratch dir whose files stay locked past the inline retries (antivirus scan) is handed to a detached
+  `scratch-guard.mjs --reap` that keeps trying for two minutes (`reapLater`), and `run-tests.mjs` gives a
+  leftover profile 25 more attempts before it counts as a leak. A leak now **fails the run** (it used to be a
+  line in the report).
+- `flaky-sweep.mjs [runs] [files]` runs the suite N times and lists every test that failed in any run, with how
+  often - "passed on rerun" is a flaky test, not a green one. `.githooks/post-merge` (opt in once with
+  `git config core.hooksPath .githooks`) runs the whole suite after every merge and says plainly if main is red.
+
+**One source per number.**
+- `friction.tallyTypeFailures` is the only place a command type's calls / failures / time are counted:
+  `failureRateByType` (analytics), the live "failed for the first time ever" line (`typeFactsFor`, an indexed
+  lookup by type) and the session-end spike check read it.
+- A latent disagreement found while testing this: the per-command lookup scanned the recovery surroundings of a
+  target's 5 most recent failing sessions, analytics scanned all of them, so "worked 4 of 5" in the warning and
+  "worked 5 of 8" on the dashboard described one target. Both now judge the same `RECOVERY_SESSIONS` window.
+
+**Page targets are origin + route.** Every reply from the in-page agent carries `location.pathname` (and the
+handshake does); the relay logs a page-level command against the route it actually ran on. The key normalises
+the route (numeric / uuid / long-hex segments become `:id`, query and hash dropped, idempotent), so a reload
+that times out on /checkout no longer counts against /settings; `friction resolve|explain` take the origin or
+origin + path. A tab that reports no route keeps origin granularity. (inject.js restamped.)
+
+**Said earlier, done for you.**
+- `session start` returns `frictionBriefing`: the still-failing targets on the session's origin or named by its
+  goal, ranked by relevance then cost, each with what worked last time (`friction.buildSessionBriefing`).
+- `session start --auto-recover` (MCP `autoRecover`) makes `--try-recovery` the session default; a call can still
+  pass `tryRecovery:false`.
+- `friction resolve cluster <id>` declares every target of a one-cause cluster fixed in one call and returns the
+  undo list (`friction unresolve` with that list). Clusters carry a stable `id`.
+
+**One surface.** `friction session`, `friction prune` and `friction resolve cluster` exist in the CLI and in the
+one MCP `friction` action (new subs only - no new tool). The MCP byte cap was raised 18900 -> 19250 for this, in
+the same commit, per the budget test's own convention. The README now names what exists and points at
+`node cli.mjs help friction` (usage.txt) as the canonical description instead of re-explaining each round.
+
+**Cheaper.**
+- Analytics keeps the parsed action rows between calls and re-reads only the newest 200 ids (a row is touched
+  briefly after it is logged); result bodies are dropped from the memo, since analytics never reads them. A cold
+  relay and a warm one are asserted to produce the same numbers.
+- `friction prune [--days N] [--confirm]`: orphaned "already said" state is swept at `session start` and on
+  demand; with `--days` (>= 7) the stored result **bodies** of old actions in ended sessions are dropped and their
+  blob refcounts released. Rows, selector keys, failure history and every "mark fixed" declaration stay. Dry run
+  unless `--confirm`. Side effect: the waste panel's duplicate-read detection for those old sessions loses its
+  evidence (it compares result hashes).
+
+**Dashboard.** The friction table has a filter (target, type, origin, error class, last error) and a sort
+(cost / fails / time wasted / most recent / oldest), a count, "mark fixed" offers a 10 s undo, and each
+one-cause cluster has "mark all fixed" with the same undo. Driven in a real headless browser.
+
+Not done: profile-dir leaks are retried and reaped but not eliminated at the source (an antivirus lock is
+outside this process); the hot-tail re-read is bounded by 200 ids, not by a change feed; the pre-action header
+still judges a page command against the route known before the call (the reply corrects the log).
+
+Tests: `friction-round5.test.mjs`, two more in `friction-dashboard.test.mjs`.
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

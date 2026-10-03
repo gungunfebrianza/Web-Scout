@@ -499,7 +499,10 @@ function handleAgentMessage(text, agentName) {
     // actually processing messages right now, which raw socket presence
     // does not (see agentsDetail() above).
     const agentEntry = agents.get(agentName);
-    if (agentEntry) agentEntry.lastAckAt = Date.now();
+    if (agentEntry) {
+      agentEntry.lastAckAt = Date.now();
+      if (typeof msg.path === 'string' && msg.path) agentEntry.path = msg.path.slice(0, 300); // the route the tab is on NOW (SPA navigations)
+    }
     if (msg.ok) {
       if (msg.result && typeof msg.result === 'object') {
         if (typeof msg.epoch === 'number') replyEpochs.set(msg.result, msg.epoch);
@@ -693,15 +696,19 @@ async function withLoggedAction(sessionId, type, params, fn, agentName = DEFAULT
   // was confirmed friction in a real verification pass. The dashboard clears
   // this the moment the matching 'action' event (full refresh) arrives.
   broadcastUpdate('action_start', sessionId, { type, agentName, startedAt });
-  const origin = agents.get(agentName)?.origin ?? null;
+  // Read AFTER the reply: the reply is what tells the relay which route the tab is on right now, so a
+  // page command that ran just after an in-app navigation is logged against the route it ran on.
+  const originNow = () => frictionOriginFor(agentName, type);
   ensureFrictionSession(sessionId); // before the first note() below, so a restarted relay's counters are rebuilt, not seeded from one row
   try {
     const result = await fn();
+    const origin = originNow();
     const endedAt = new Date().toISOString();
     const actionId = dbApi.logAction({ sessionId, type, params, result, ok: true, error: null, startedAt, endedAt, agentName, origin });
     frictionTracker.note(sessionId, { type, params, origin, ok: true, durationMs: Date.parse(endedAt) - Date.parse(startedAt), at: startedAt });
     return { result, actionId };
   } catch (err) {
+    const origin = originNow();
     const endedAt = new Date().toISOString();
     dbApi.logAction({ sessionId, type, params, result: null, ok: false, error: err.message, startedAt, endedAt, agentName, origin, errorClass: friction.classifyError(err.message) });
     frictionTracker.note(sessionId, { type, params, origin, ok: false, error: err.message, durationMs: Date.parse(endedAt) - Date.parse(startedAt), at: startedAt });
@@ -895,6 +902,15 @@ function lazyKnownIssueMatcher() {
   };
 }
 
+// What a command's friction target is scoped to: the agent's origin, plus the route it is on for the
+// page-level commands (a reload that times out on /checkout says nothing about /settings). Selector and
+// store targets stay origin-scoped.
+function frictionOriginFor(agentName, type) {
+  const agent = agents.get(agentName);
+  const origin = agent?.origin ?? null;
+  return origin && agent.path && friction.PAGE_TYPES.has(type) ? `${origin}${agent.path}` : origin;
+}
+
 // Everything the system knows about ONE action target, from ONE place: the earlier-session
 // history (an indexed lookup on actions.selector_key - nothing is frozen at session start, so a
 // selector that failed once before is seen as exactly that), this session's live counters, the
@@ -902,7 +918,7 @@ function lazyKnownIssueMatcher() {
 // failure's own error body, the macro runner and `friction explain` all read this object, so they
 // cannot disagree about a selector.
 function frictionFactsFor(sessionId, type, params, agentName, originOverride) {
-  const origin = originOverride ?? agents.get(agentName)?.origin ?? null;
+  const origin = originOverride ?? frictionOriginFor(agentName, type);
   const target = friction.frictionTarget(type, params, origin);
   if (!target) return null;
   ensureFrictionSession(sessionId);
@@ -1024,12 +1040,27 @@ function maybeRiskySelectorWarn(sessionId, type, params, res, agentName, ackRisk
   if (blockMessage) throw new HttpError(409, blockMessage);
 }
 
+// Everything known about ONE command type, from the same tally the analytics panel uses: earlier
+// sessions (indexed by type, the resolution cut-off applied) plus this session's own calls. The live
+// "first failure ever" line reads this instead of a separate query, so it cannot disagree with
+// failureRateByType.
+function typeFactsFor(sessionId, type) {
+  const cutoff = (() => { try { return dbApi.getFrictionResolution(friction.scopeKey('type', type))?.resolved_at ?? null; } catch { return null; } })();
+  const counts = (a) => !(cutoff && a.started_at && a.started_at <= cutoff);
+  const history = dbApi.listTypeHistory(type, sessionId);
+  const prior = friction.tallyTypeFailures(history, { counts }).get(type) ?? { type, total: 0, failed: 0, wastedMs: 0 };
+  const own = friction.tallyTypeFailures(dbApi.listActions(sessionId).filter((a) => a.type === type), { counts }).get(type) ?? { type, total: 0, failed: 0, wastedMs: 0 };
+  const total = prior.total + own.total;
+  const failed = prior.failed + own.failed;
+  return { type, prior, session: own, total, failed, failureRate: total ? failed / total : 0, everFailedBefore: history.some((a) => !a.ok) }; // declared-fixed failures still happened
+}
+
 // Live version of the session-end emergent diff: said once, on the failure itself, instead of
 // only after the session is over. Judged against the frozen snapshot (no analytics recompute on
 // the hot path), so "no history" means "not in the session-start snapshot".
 function liveEmergentFriction(sessionId, type, facts) {
   const lines = [];
-  if (!dbApi.typeEverFailed(type, sessionId) && frictionTracker.announceOnce(sessionId, 'type', type)) {
+  if (!typeFactsFor(sessionId, type).everFailedBefore && frictionTracker.announceOnce(sessionId, 'type', type)) {
     lines.push(`"${type}" just failed for the first time ever (no earlier session recorded a failure of this type).`);
   }
   // Judged against the indexed history of OTHER sessions, so "no history" is exact: a target that
@@ -1380,9 +1411,29 @@ async function gatherReportBundle(sessionId) {
 // session, so friction is visible the moment someone opens the dashboard,
 // not only after it gets hit again and complained about. See
 // docs/web-scout-roadmap.md's V7 entry.
+// Every action ever recorded, without re-reading and re-parsing the whole table on each analytics call:
+// rows below the "hot tail" are kept from the last call and only the newest ACTION_TAIL_REFRESH ids are
+// re-read (a row is touched again for a moment after it is logged: delivered bytes, intent). Rows are
+// append-only, so nothing older can change except through pruneOldResults, which drops this cache.
+const ACTION_TAIL_REFRESH = 200;
+let actionsMemo = null; // action rows, id ascending, result bodies dropped (analytics never reads them; keeping them would pin the whole history in memory)
+const slimAction = (a) => ({ ...a, result: null, result_json: null });
+function allActionsIncremental() {
+  const lastId = actionsMemo?.length ? actionsMemo[actionsMemo.length - 1].id : 0;
+  if (!actionsMemo) {
+    actionsMemo = dbApi.listAllActions().actions.map(slimAction);
+  } else {
+    const keepBelow = Math.max(0, lastId - ACTION_TAIL_REFRESH);
+    let kept = actionsMemo.length;
+    while (kept > 0 && actionsMemo[kept - 1].id > keepBelow) kept -= 1;
+    actionsMemo = actionsMemo.slice(0, kept).concat(dbApi.listAllActionsFrom(keepBelow + 1).actions.map(slimAction));
+  }
+  return { actions: actionsMemo, skipped: Math.max(0, dbApi.countActions() - actionsMemo.length) };
+}
+
 function computeAnalytics() {
   const sessions = dbApi.listSessions();
-  const { actions, skipped: malformedActionsSkipped } = dbApi.listAllActions();
+  const { actions, skipped: malformedActionsSkipped } = allActionsIncremental();
   const macros = dbApi.listMacros();
   const verityRuns = dbApi.listAllVerityRuns();
 
@@ -1419,20 +1470,15 @@ function computeAnalytics() {
   const knownIssuesByType = new Map();
   // after(kind, id, at): false when that scope was declared fixed at or after `at` (friction resolve type|macro|verity).
   const afterFix = (kind, id, at) => { const cutoff = resolutions.get(friction.scopeKey(kind, id)); return !(cutoff && at && at <= cutoff); };
+  const countsForType = (a) => afterFix('type', a.type, a.started_at);
+  for (const [type, t] of friction.tallyTypeFailures(actions, { counts: countsForType })) byType.set(type, t);
   for (const a of actions) {
-    if (!afterFix('type', a.type, a.started_at)) continue;
-    const t = byType.get(a.type) ?? { type: a.type, total: 0, failed: 0, wastedMs: 0 };
-    t.total += 1;
-    if (!a.ok) {
-      t.failed += 1;
-      t.wastedMs += Number(a.duration_ms) || 0;
-      for (const hit of matchKnownIssuesFor(a.error)) {
-        const list = knownIssuesByType.get(a.type) ?? [];
-        if (!list.some((x) => x.id === hit.id)) list.push(hit);
-        knownIssuesByType.set(a.type, list);
-      }
+    if (a.ok || !countsForType(a)) continue;
+    for (const hit of matchKnownIssuesFor(a.error)) {
+      const list = knownIssuesByType.get(a.type) ?? [];
+      if (!list.some((x) => x.id === hit.id)) list.push(hit);
+      knownIssuesByType.set(a.type, list);
     }
-    byType.set(a.type, t);
   }
   // Trend: current cumulative-forever counts can't say "did the fix work" - a bad early
   // round permanently drags the number even after a selector stops failing. Split
@@ -1840,6 +1886,37 @@ function declareFrictionResolved(type, value, kind, note) {
   return dbApi.markFrictionResolved({ key: friction.frictionKeyFor(type, params, origin), type: friction.typeFamily(type), selector: target.value, note: typeof note === 'string' ? note : null });
 }
 
+// `friction resolve cluster <id>`: one declaration for every target of a one-cause cluster (ids come from
+// analytics.frictionClusters / the digest). The cluster is recomputed uncached at call time, with ALL its
+// targets, so the ones the digest truncated are included. Returns what was resolved - the undo list.
+function resolveFrictionCluster(body, resolve) {
+  let targets;
+  const id = typeof body.selector === 'string' && body.selector ? body.selector : typeof body.id === 'string' ? body.id : '';
+  if (!resolve && Array.isArray(body.targets)) {
+    targets = body.targets; // undo: a resolved cluster no longer exists to look up, so the caller hands back what it got
+  } else {
+    if (!id) throw new HttpError(400, 'a cluster id is required: friction resolve cluster <id> (ids are listed under frictionClusters in "analytics")');
+    const cluster = friction.buildFrictionClusters(computeAnalytics().selectorFriction, { limit: Infinity, targetLimit: Infinity }).find((c) => c.id === id);
+    if (!cluster) throw new HttpError(404, `no cluster "${id}" (it may already be resolved; clusters are listed under frictionClusters in "analytics")`);
+    targets = cluster.targets.map((t) => ({ type: t.type, selector: t.selector, kind: t.targetKind || 'selector' }));
+  }
+  const done = [];
+  for (const t of targets.slice(0, 200)) {
+    if (!t || typeof t.type !== 'string' || typeof t.selector !== 'string') continue;
+    const kind = t.kind || 'selector';
+    if (resolve) declareFrictionResolved(t.type, t.selector, kind, body.note ?? `cluster ${id}`);
+    else {
+      const params = kind === 'page' ? {} : kind === 'store' ? { store: t.selector } : { selector: t.selector };
+      const key = friction.frictionKeyFor(t.type, params, kind === 'page' ? t.selector : null);
+      if (key) dbApi.clearFrictionResolved(key);
+    }
+    done.push({ type: t.type, selector: t.selector, kind });
+  }
+  analyticsCache = null;
+  broadcastUpdate('analytics', null);
+  return { cluster: id || null, [resolve ? 'resolved' : 'unresolved']: done, count: done.length };
+}
+
 // A page-level type (page.reload, dom.settle, ...) is keyed by origin, which callers pass in the
 // same `selector` slot: `friction explain page.reload http://localhost:3000`.
 function frictionTargetFromBody(body, { allowScopes = true } = {}) {
@@ -2124,6 +2201,7 @@ const routes = [
         pinnedOrigin: agents.get(startingAgentName)?.origin ?? null,
         agentName: startingAgentName,
         allowRemote: !!body.allow_remote,
+        autoRecover: !!body.auto_recover,
         ifStaleMin: body.if_stale_min ?? undefined,
       });
       if (session.autoEndedSession) {
@@ -2134,6 +2212,7 @@ const routes = [
         log(`session #${session.autoEndedSession.id} ("${session.autoEndedSession.goal}", agent '${session.autoEndedSession.agent ?? '?'}') ${session.autoEndedSession.reason}; started session #${session.id}`);
       }
       broadcastUpdate('session', null);
+      try { dbApi.pruneOrphanFrictionState(); } catch { /* best-effort bookkeeping */ }
       openDashboardInBrowser();
       maybeAutoCalibrate();
       const briefing = body.briefing === false ? undefined : await buildBriefing(body.agent || DEFAULT_AGENT);
@@ -2154,6 +2233,9 @@ const routes = [
       // when it IS the macroAdoption item, to avoid printing the same note twice.
       const topFriction = sessionStartAnalytics.topFrictionItems[0];
       const frictionNote = topFriction && topFriction.kind !== 'macroAdoption' ? topFriction.summary : undefined;
+      // The top item says what hurts the project most; this says what is likely to hurt THIS session -
+      // still-failing targets on its origin or mentioned by its goal, with what worked last time.
+      const frictionBriefing = friction.buildSessionBriefing(sessionStartAnalytics.selectorFriction, { goal: body.goal, origin: session.pinned_origin ?? agents.get(startingAgentName)?.origin ?? null });
       macroCandidateCache = { at: Date.now(), list: buildMacroCandidates(sessionStartAnalytics) }; // seed from the scan just paid for
       const budget = session.token_budget
         ? { tokens: session.token_budget, tightenAtTokens: Math.round(session.token_budget * BUDGET_TIGHTEN_PCT / 100), strictAtTokens: Math.round(session.token_budget * BUDGET_STRICT_PCT / 100), note: 'past the first mark, reads over ~3000 tokens return their shape (--no-guard forces the body) and rows come back as {columns, rows}; past the second the guard drops to ~1000 tokens' }
@@ -2161,7 +2243,7 @@ const routes = [
       const leanNote = session.lean
         ? { note: `lean session: reads come back as tables, a repeat of a result you already hold as a one-line pointer (or only what changed), and a body over ~${LEAN_GUARD_TOKENS} tokens as its shape (repeat the call to get it, from cache). --no-guard on a call gives the body as it is. Only rely on "unchanged"/deltas while the earlier result is still in your context.` }
         : undefined;
-      return { ...session, ...(briefing ? { briefing } : {}), ...(budget ? { budget } : {}), ...(leanNote ? { leanProfile: leanNote } : {}), ...(macroAdoptionNote ? { macroAdoptionNote } : {}), ...(frictionNote ? { frictionNote } : {}) };
+      return { ...session, ...(briefing ? { briefing } : {}), ...(budget ? { budget } : {}), ...(leanNote ? { leanProfile: leanNote } : {}), ...(macroAdoptionNote ? { macroAdoptionNote } : {}), ...(frictionNote ? { frictionNote } : {}), ...(frictionBriefing.length ? { frictionBriefing } : {}) };
     },
   },
   {
@@ -2973,7 +3055,7 @@ const routes = [
         try {
           outcome = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
         } catch (err) {
-          const retry = body.tryRecovery === true ? recoveryRetryFor(session.id, type, params, agentName, err) : null;
+          const retry = body.tryRecovery === true || (body.tryRecovery !== false && session.auto_recover) ? recoveryRetryFor(session.id, type, params, agentName, err) : null;
           if (!retry) throw err;
           // If the alternative fails too, its own error (with its own friction context) is what the caller gets.
           outcome = await dispatchTracked(session, type, retry.params, agentName, dispatchTimeoutMs);
@@ -3516,6 +3598,7 @@ const routes = [
     pattern: /^\/friction\/resolve$/,
     handler: async (req) => {
       const body = await readJsonBody(req);
+      if (body.type === 'cluster') return resolveFrictionCluster(body, true);
       const { type, target } = frictionTargetFromBody(body);
       const resolution = declareFrictionResolved(type, target.value, target.kind, body.note);
       analyticsCache = null;
@@ -3529,6 +3612,7 @@ const routes = [
     pattern: /^\/friction\/unresolve$/,
     handler: async (req) => {
       const body = await readJsonBody(req);
+      if (body.type === 'cluster') return resolveFrictionCluster(body, false);
       const { key } = frictionTargetFromBody(body);
       const result = dbApi.clearFrictionResolved(key);
       analyticsCache = null;
@@ -3571,6 +3655,28 @@ const routes = [
         failureContext: facts.context,
         cluster: (() => { try { return getAnalytics().frictionClusters.find((c) => c.targets.some((t) => t.key === facts.key)) ?? null; } catch { return null; } })(),
         config: friction.frictionConfig(),
+      };
+    },
+  },
+  // ---- Retention: sweep orphaned "already said" state and (with days) drop the stored result BODIES of
+  // old actions. History, rankings and "mark fixed" declarations are kept. Dry run unless confirm:true.
+  {
+    method: 'POST',
+    pattern: /^\/friction\/prune$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      const confirm = body.confirm === true;
+      const orphanState = confirm ? dbApi.pruneOrphanFrictionState() : null;
+      if (confirm) actionsMemo = null; // result bodies are about to change under the memo
+      let oldResults = null;
+      if (body.days !== undefined && body.days !== null) {
+        try { oldResults = dbApi.pruneOldResults({ days: body.days, dryRun: !confirm }); } catch (err) { throw new HttpError(400, err.message); }
+      }
+      return {
+        dryRun: !confirm,
+        ...(orphanState !== null ? { orphanStateRowsRemoved: orphanState } : {}),
+        ...(oldResults ? { oldResults } : { note: 'pass days (>= 7) to also drop the result bodies of actions older than that' }),
+        ...(confirm ? {} : { hint: 'dry run - repeat with confirm:true to apply' }),
       };
     },
   },
@@ -3766,6 +3872,7 @@ server.on('upgrade', (req, socket) => {
   const loadId = searchParams.get('loadId') || null;
   const build = searchParams.get('build') || null;
   const origin = searchParams.get('origin') || null;
+  const pagePath = (searchParams.get('path') || '').slice(0, 300) || null;
   const accept = crypto.createHash('sha1').update(key + WS_MAGIC).digest('base64');
   socket.write(
     'HTTP/1.1 101 Switching Protocols\r\n'
@@ -3787,7 +3894,7 @@ server.on('upgrade', (req, socket) => {
   // flip-flopping between calls. The counters carry over from the entry being replaced so a
   // back-and-forth fight accumulates instead of resetting to 1 each time.
   agents.set(agentName, {
-    socket, buffer: Buffer.alloc(0), connectedAt: Date.now(), lastAckAt: null, loadId, build, origin,
+    socket, buffer: Buffer.alloc(0), connectedAt: Date.now(), lastAckAt: null, loadId, build, origin, path: pagePath,
     replacedCount: (existing?.replacedCount ?? 0) + (replacingLive ? 1 : 0),
     lastReplacedAt: replacingLive ? Date.now() : (existing?.lastReplacedAt ?? null),
   });

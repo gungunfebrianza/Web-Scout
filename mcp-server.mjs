@@ -94,7 +94,7 @@ const TOOLS = [
       + '  status {} - relay health, agents, active session, DB_VERSION drift\n'
       + '  agents {} - connected multi-tab agent names\n'
       + '  analytics {} - Friction Analytics: recurring failure patterns across ALL sessions\n'
-      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?} - sub: explain (why it warns), resolve|unresolve (mark fixed), list, config, promote (candidate id -> known-issues.json; confirm writes). type may also be macro|verity|type (selector = id/label/command); page.reload/dom.settle/...: selector = origin\n'
+      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?, days?} - sub: explain (why it warns), resolve|unresolve (mark fixed), list, session (what this session was told), config, prune (days: drop old result bodies; confirm applies), promote (candidate id -> known-issues.json; confirm writes). type may also be macro|verity|type|cluster (selector = id/label/command/cluster id); page.reload/dom.settle/...: selector = origin or origin+path\n'
       + '  search {q} - full-text search across every session\'s actions\n'
       + '  db_version_check {agent?, dbJsPath?} - js/db.js\'s DB_VERSION vs the tab\'s LIVE IndexedDB version; on drift also probes whether opening at the source version is blocked\n'
       + '  dashboard_url {} - the realtime dashboard URL (does not open a browser)\n'
@@ -113,10 +113,12 @@ const TOOLS = [
         const sub = requireField(p, 'sub');
         if (sub === 'list') return request('GET', '/friction/resolutions');
         if (sub === 'config') return request('GET', '/friction/config');
+        if (sub === 'session') return request('GET', '/friction/session');
+        if (sub === 'prune') return request('POST', '/friction/prune', { days: p.days, confirm: p.confirm === true });
         if (sub === 'promote') {
           return request('POST', '/known-issues/promote', { id: requireField(p, 'id'), remediation: p.remediation, description: p.description, signature: p.signature, confirm: p.confirm === true });
         }
-        if (sub !== 'explain' && sub !== 'resolve' && sub !== 'unresolve') throw new Error('params.sub must be explain|resolve|unresolve|list|config|promote');
+        if (sub !== 'explain' && sub !== 'resolve' && sub !== 'unresolve') throw new Error('params.sub must be explain|resolve|unresolve|list|session|config|prune|promote');
         const target = { type: requireField(p, 'type'), selector: p.selector, store: p.store };
         if (sub !== 'explain') return request('POST', `/friction/${sub}`, { ...target, note: p.note });
         const q = new URLSearchParams({ type: target.type });
@@ -133,7 +135,7 @@ const TOOLS = [
     name: 'webscout_session',
     description: 'Session lifecycle and evidence. A goal MUST be declared (start) before any dom/idb/net/console/eval/page action is accepted; exactly one session is active at a time.\n'
       + 'Actions:\n'
-      + '  start {goal, context?, strictCrv?, strictCrvStores?, crvCompact?, tags?, tokenBudget?, noBriefing?, lean?, allowRemote?, ifStaleMin?} - declare a session; becomes the active one. ifStaleMin: ends a conflicting active session at least that old (minutes) first; younger still refuses. strictCrvStores scopes strictCrv auto-snapshots (omitted on a real-size db it WILL time out). crvCompact adds a change preview to each strictCrv reply. tokenBudget arms a read guard (past 60% reads over ~3000 tokens return their shape, past 85% ~1000; noGuard overrides). lean makes shaping the DEFAULT (tables; pointer/delta for repeats; shape of bodies over ~4000 tokens). The reply carries a `briefing` (stores + counts, DB version, tab freshness) unless noBriefing. Pinned to its origin: a later write/eval refuses if that changed or is non-local, unless allowRemote\n'
+      + '  start {goal, context?, strictCrv?, strictCrvStores?, crvCompact?, tags?, tokenBudget?, noBriefing?, lean?, allowRemote?, autoRecover?, ifStaleMin?} - declare a session; becomes the active one. ifStaleMin: ends a conflicting active session at least that old (minutes) first; younger still refuses. strictCrvStores scopes strictCrv auto-snapshots (omitted on a real-size db it WILL time out). crvCompact adds a change preview to each strictCrv reply. tokenBudget arms a read guard (past 60% reads over ~3000 tokens return their shape, past 85% ~1000; noGuard overrides). lean makes shaping the DEFAULT (tables; pointer/delta for repeats; shape of bodies over ~4000 tokens). The reply carries a `briefing` (stores + counts, DB version, tab freshness) unless noBriefing. Pinned to its origin: a later write/eval refuses if that changed or is non-local, unless allowRemote\n'
       + '  end {id?, trace?, applySuggestions?} - end a session (default: the active one); trace also exports it (anonymised) to grow the trace.mjs replay corpus; applySuggestions marks the "probably fixed" friction targets fixed\n'
       + '  current {} - the active session, or {active:false}\n'
       + '  list {} - every session, newest first\n'
@@ -156,6 +158,7 @@ const TOOLS = [
           lean: p.lean || undefined,
           agent: p.agent,
           allow_remote: p.allowRemote || undefined,
+          auto_recover: p.autoRecover || undefined,
           if_stale_min: p.ifStaleMin !== undefined && p.ifStaleMin !== null ? Number(p.ifStaleMin) : undefined,
         });
         // Folds the CLI's separate stderr-only warnOnDbVersionDrift() into

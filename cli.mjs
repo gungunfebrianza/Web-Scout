@@ -179,6 +179,8 @@ async function handleSession(sub, rawArgs) {
     ({ args, value: autoSnapshot } = extractBooleanFlag(args, '--auto-snapshot'));
     ({ args, value: tokenBudgetValue } = extractFlag(args, '--token-budget'));
     ({ args, value: allowRemoteValue } = extractBooleanFlag(args, '--allow-remote'));
+    let autoRecoverValue;
+    ({ args, value: autoRecoverValue } = extractBooleanFlag(args, '--auto-recover'));
     let ifStaleMinValue;
     ({ args, value: ifStaleMinValue } = extractFlag(args, '--if-stale-min'));
     ({ args, value: agentFlag } = extractFlag(args, '--agent'));
@@ -188,7 +190,7 @@ async function handleSession(sub, rawArgs) {
     const tags = tagsValue ? tagsValue.split(',').map((t) => t.trim()).filter(Boolean) : [];
     const strictCrvStores = storesValue ? storesValue.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
     await ensureFreshRelayForNewSession();
-    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, crv_compact: crvCompactValue || undefined, tags, token_budget: tokenBudgetValue !== undefined ? Number(tokenBudgetValue) : undefined, briefing: noBriefing ? false : undefined, lean: leanValue || undefined, agent: agentFlag, allow_remote: allowRemoteValue || undefined, if_stale_min: ifStaleMinValue !== undefined ? Number(ifStaleMinValue) : undefined });
+    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, crv_compact: crvCompactValue || undefined, tags, token_budget: tokenBudgetValue !== undefined ? Number(tokenBudgetValue) : undefined, briefing: noBriefing ? false : undefined, lean: leanValue || undefined, agent: agentFlag, allow_remote: allowRemoteValue || undefined, auto_recover: autoRecoverValue || undefined, if_stale_min: ifStaleMinValue !== undefined ? Number(ifStaleMinValue) : undefined });
     if (session.autoEndedSession) {
       console.error(`NOTE: ${session.autoEndedSession.reason} (session #${session.autoEndedSession.id}: "${session.autoEndedSession.goal}").`);
     }
@@ -911,10 +913,18 @@ async function main() {
     ({ args: fargs, value: note } = extractFlag(fargs, '--note'));
     if (sub === 'list') { printResult(await request('GET', '/friction/resolutions')); return; }
     if (sub === 'config') { printResult(await request('GET', '/friction/config')); return; }
+    if (sub === 'session') { printResult(await request('GET', '/friction/session')); return; }
+    if (sub === 'prune') {
+      let days; let confirm;
+      ({ args: fargs, value: days } = extractFlag(fargs, '--days'));
+      ({ args: fargs, value: confirm } = extractBooleanFlag(fargs, '--confirm'));
+      printResult(await request('POST', '/friction/prune', { days: days !== undefined ? Number(days) : undefined, confirm: confirm === true }));
+      return;
+    }
     if (sub === 'resolve' || sub === 'unresolve' || sub === 'explain') {
       const [type, target] = fargs;
       if (!type || !target) throw new Error(`friction ${sub} requires <type> <selector>, e.g. friction ${sub} dom.click "#submit" (for idb.* types the second argument is the store name)`);
-      const aim = type.startsWith('idb.') ? { store: target } : { selector: target };
+      const aim = type.startsWith('idb.') && type !== 'idb.list' ? { store: target } : { selector: target };
       if (sub === 'explain') {
         const q = new URLSearchParams({ type, ...aim });
         if (agentFlag) q.set('agent', agentFlag);
@@ -924,7 +934,7 @@ async function main() {
       }
       return;
     }
-    throw new Error('friction requires a subcommand: explain <type> <selector> | resolve <type> <selector> [--note "..."] | unresolve <type> <selector> | list | config');
+    throw new Error('friction requires a subcommand: explain <type> <selector> | resolve <type> <selector> [--note "..."] | resolve cluster <id> | unresolve <type> <selector> | list | session | config | prune [--days N] [--confirm]');
   }
 
   // known-issues promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm]

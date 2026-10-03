@@ -125,6 +125,7 @@ export function cleanupAllSync() {
   for (const [dir, entry] of [...live]) {
     for (const pid of entry.pids) killTree(pid); // children first: the browser locks the profile
     const released = removeDirSync(dir);
+    if (!released) reapLater(dir);
     if (ledgered.delete(dir)) ledger({ ev: 'dispose', dir: path.basename(dir), released, processes: entry.pids.size, via: 'exit' });
     live.delete(dir);
   }
@@ -174,10 +175,17 @@ export function ownScratchDir(dir) {
       if (entry.pids.size) sleepSync(150);
       logFootprint(dir);
       const released = removeDirSync(dir);
+      if (!released) reapLater(dir);
       if (ledgered.delete(dir)) ledger({ ev: 'dispose', dir: path.basename(dir), released, processes: entry.pids.size });
       live.delete(dir);
     },
   };
+}
+
+// Files still locked after the inline retries: hand the dir to a detached process that keeps trying for
+// two minutes, so a slow antivirus scan does not turn into a leaked profile.
+export function reapLater(dir) {
+  try { spawn(process.execPath, [GUARD, '--reap', dir], { detached: true, stdio: 'ignore', windowsHide: true }).unref(); } catch { /* the sweep is the backstop */ }
 }
 
 // try/finally wrapper: fn(dir, handle) - dir is removed on return, throw, or timeout.

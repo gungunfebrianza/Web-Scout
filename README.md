@@ -171,33 +171,23 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   that has failed 3+ times before gets an `x-webscout-selector-risk` warning header before
   it fails again; a session whose own recent action types match a recorded-but-never-run
   macro gets an `x-webscout-macro-match` nudge (recording a macro mid-session makes it
-  immediately nudge-eligible for that same still-active session, not only future ones);
-  (round 2 of this system - see roadmap V40 - made the warning history origin-scoped, success-aware,
-  selector-normalized and live: this session's own failures count at once, it is said once and
-  escalates when ignored, and `friction resolve <type> <selector>` declares a selector fixed so
-  its old history stops counting; failed replies carry the error class and what worked before;
-  `analytics` drafts known-issue candidates and weights ranking by time wasted;
-  round 3 - roadmap V41 - made it one coherent system: one selector list for the warning and the
-  dashboard, history read on demand instead of frozen at session start, stores and macro steps
-  covered, `friction explain <type> <selector>` to see why it did or did not warn,
-  `friction config` for the thresholds in effect, `known-issues promote <candidateId>` to turn a draft
-  into a registry entry, and a "mark fixed?" suggestion at `session end`;
-  round 4 - roadmap V42 - closed the remaining seams: page-level commands (reload, settle, screenshot)
-  are targets keyed by origin, `crv preflight --plan` checks a plan before it runs, `session end
-  --apply-suggestions` applies the "mark fixed?" list, a candidate arrives with a suggested remediation,
-  `friction resolve` also takes `type <command>`, `macro <id>` and `verity <label>`, targets that fail with
-  one message are grouped as a single cause (`frictionClusters`), failures in strict-CRV sessions weigh more,
-  and `--try-recovery` retries a failed click/fill/wait once on the selector that reliably worked after it;)
-  `friction unresolve <type> <selector>` undoes it and `friction list` shows every declaration)
-  and `session end` reports `emergentFriction` - a type/selector failing for the first
-  time ever, flagged before it has accumulated enough history to rank in the global
-  `topFrictionItems` digest. A saved/exported session report (`GET /sessions/:id/report`)
-  carries the same known-issues matches for that session's own failed actions, and the
-  MCP server's tool-failure replies carry the same `knownIssue`/post-timeout-verification
-  info the CLI already prints - a failure looks the same whichever front end hit it. The
-  per-session checks are read from a snapshot frozen at `session start` (from the same
-  analytics `analytics` itself reads), never a live per-command analytics call, so they
-  can never go stale mid-session or poison the shared 5s analytics cache
+  immediately nudge-eligible for that same still-active session, not only future ones).
+  This is one system, not a set of features - the pre-action header, the failure's error body, the macro
+  runner, `friction explain` and the dashboard all read the same per-target facts. **Reference:
+  `node cli.mjs help friction` (usage.txt) is the canonical description**; this paragraph only names what exists:
+  `friction explain <type> <selector>` (why it warned or not), `friction resolve <type> <selector>` /
+  `friction resolve type|macro|verity|cluster <id>` and `friction unresolve` (mark fixed, only what happens
+  after counts), `friction list`, `friction session` (what this session's agent was told), `friction config`
+  (thresholds), `friction prune [--days N] [--confirm]` (retention: orphaned state and old result bodies,
+  never history or declarations), `known-issues promote <candidateId>`, `crv preflight --plan` (check a plan
+  before running it), `session start --auto-recover` / `--try-recovery` (retry a failed click/fill/wait once on
+  the selector that reliably worked after it), `session end --apply-suggestions`, and at `session start` a
+  `frictionBriefing` of still-failing targets on the session's origin or named by its goal.
+  `session end` also reports `emergentFriction` - a type/selector failing for the first time ever. A
+  saved/exported session report (`GET /sessions/:id/report`) carries the same known-issues matches for that
+  session's own failed actions, and the MCP server's tool-failure replies carry the same
+  `knownIssue`/post-timeout-verification info the CLI prints. History is read on demand (indexed by
+  target), never frozen at session start, and the per-command check never touches the shared 5s analytics cache
 - `crv seed <store> <rows-json>` writes rows (`idb put-many`) and records every
   stored row's real key into a manifest file, so `crv cleanup` can delete exactly
   those ids later (`idb delete-many`, one call per store) without hand-tracking ids

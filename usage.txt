@@ -52,8 +52,9 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    blocked RIGHT NOW (another tab - web-scout-connected or not -
                                    holding a connection at the older version), and by what, instead
                                    of only reporting THAT a version-bump "page reload" hasn't taken.
-  session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--crv-compact] [--tags a,b,c] [--token-budget N] [--lean] [--no-briefing] [--agent <name>] [--allow-remote] [--if-stale-min N]
-                                   declare context/goal - REQUIRED before any action.
+  session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--crv-compact] [--tags a,b,c] [--token-budget N] [--lean] [--no-briefing] [--agent <name>] [--allow-remote] [--auto-recover] [--if-stale-min N]
+                                   declare context/goal - REQUIRED before any action
+                                   (--auto-recover and frictionBriefing: see friction below).
                                    --strict-crv auto-snapshots+diffs before/after every
                                    dom.click/dom.fill/eval/idb.put/idb.delete in this session.
                                    Unscoped, this snapshots the WHOLE db every time and WILL
@@ -807,13 +808,19 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   friction resolve type <command-type>      the same for a whole command type's failure rate
   friction resolve macro <id>               ... for a macro that never once succeeded
   friction resolve verity <label>           ... for a verity label still failing
+  friction resolve cluster <id>             ... for every target of a one-cause cluster (ids: analytics
+                                   frictionClusters); the reply lists them, undo with friction unresolve
                                    (each: only runs/imports AFTER now count; unresolve brings it back)
   friction unresolve <type> <selector|store>    undo it
   friction list                           every declaration, newest first
   friction explain <type> <selector|store>  why it does / doesn't warn right now: per-origin history,
                                    this session's failures, resolutions, recoveries ("worked 4 of 5
                                    times"), the decision and the thresholds it was judged on
+  friction session                        what THIS session ran into and what the agent was told
   friction config                         the thresholds in effect (all WEBSCOUT_* env knobs)
+  friction prune [--days N] [--confirm]   retention, dry run unless --confirm: sweeps orphaned warning
+                                   state; with --days (>= 7) also drops the stored result BODIES of
+                                   older actions. History, rankings and declarations are kept.
   known-issues promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm]
                                    turns an analytics knownIssueCandidates draft into a real
                                    known-issues.json entry. Needs the remediation (a draft cannot
@@ -828,12 +835,14 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   blocks, unless the relay runs with WEBSCOUT_RISKY_BLOCK=1: then an ESCALATED target is refused
   (409) until the call passes --ack-risk (MCP: ackRisk:true in the action's params). --try-recovery (MCP:
   tryRecovery:true) makes a failed click/fill/wait run ONCE more on the alternative selector that worked
-  after that failure in >= 80% of >= 3 recorded trials; the reply note says which selector actually ran.
-  Tune with
+  after that failure in >= 80% of >= 3 recorded trials; the reply note says which selector actually ran; session start --auto-recover makes that
+  the default for the session. session start also returns frictionBriefing: still-failing targets
+  on this origin or named by the goal, with what worked before. Tune with
   WEBSCOUT_RISKY_FAIL_THRESHOLD (3), WEBSCOUT_RISKY_LIVE_FAIL_THRESHOLD (2),
   WEBSCOUT_RISKY_ESCALATE_FAILS (3), WEBSCOUT_WASTE_MIN_CALLS (5), WEBSCOUT_SPIKE_FACTOR (3).
   A store is a target too (idb.put/patch fail by store), and so is a page for commands that aim
-  at no element (keyed by origin: a reload that keeps timing out on one site). A macro run checks each step the same way
+  at no element (keyed by origin + route, numeric/uuid segments as :id: a reload that keeps timing
+  out on /checkout; pass the origin or origin+path to friction resolve/explain). A macro run checks each step the same way
   (frictionWarnings on the reply; a failed step carries selectorFriction). A failed /command
   carries selectorFriction (error class, failures this session / earlier, what worked before) and
   emergentFriction in its error reply - the CLI prints both. Session end adds a failure-rate SPIKE

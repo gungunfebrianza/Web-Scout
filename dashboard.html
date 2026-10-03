@@ -360,7 +360,10 @@
   #frictionDetail h3 { font-size: 11px; margin: 10px 0 4px; }
   #frictionDetail ul { margin: 0; padding-left: 16px; }
   .friction-act { font-size: 10px; padding: 1px 6px; cursor: pointer; }
-  #frictionLive { font-size: 11px; margin-top: 8px; }
+  #frictionControls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 11px; margin-top: 8px; }
+#frictionControls input, #frictionControls select { font-size: 11px; }
+#frictionToast { font-size: 11px; margin-top: 6px; padding: 4px 8px; border: 1px solid currentColor; border-radius: 4px; }
+#frictionLive { font-size: 11px; margin-top: 8px; }
   #frictionLive h3 { font-size: 11px; margin: 0 0 4px; }
   .friction-form { margin-top: 4px; }
   .friction-form label { display: block; margin: 4px 0; }
@@ -699,6 +702,15 @@
   <div class="muted">selectors and stores that failed more than once, linked to the action type they failed on - line thickness = fail count; the table is what the pre-action warning is built from</div>
   <div class="hud-scroll-body" id="selectorGraphContainer"></div>
   <div id="selectorGraphEmpty" class="empty" hidden>No repeated selector failures yet.</div>
+  <div id="frictionToast" hidden></div>
+  <div id="frictionControls">
+    <input id="frictionFilter" type="search" placeholder="filter: target, type, origin, error class" aria-label="filter friction table">
+    <select id="frictionSort" aria-label="sort friction table">
+      <option value="cost">sort: cost</option><option value="fails">sort: fails</option><option value="wasted">sort: time wasted</option>
+      <option value="recent">sort: most recent failure</option><option value="oldest">sort: oldest failure</option>
+    </select>
+    <span id="frictionCount" class="muted"></span>
+  </div>
   <div id="frictionLive"></div>
   <div id="frictionDetail"></div>
   </section>
@@ -3892,12 +3904,50 @@ async function renderFrictionLive() {
 // detail view is not rebuilt underneath them by the next analytics refresh.
 const frictionFormOpen = () => Boolean(el('frictionDetail')?.querySelector('details[open]'));
 
+// Filter + sort act on the rows the relay already ranked (analytics.selectorFriction), client-side: the same
+// list the agent's warning is built from, just viewed differently. The controls are static markup so typing
+// is never interrupted by a refresh re-rendering the table.
+const FRICTION_SORTS = {
+  cost: (x, y) => y.score - x.score,
+  fails: (x, y) => y.failCount - x.failCount || y.score - x.score,
+  wasted: (x, y) => y.wastedMs - x.wastedMs || y.score - x.score,
+  recent: (x, y) => String(y.lastFailedAt || '').localeCompare(String(x.lastFailedAt || '')),
+  oldest: (x, y) => String(x.lastFailedAt || '~').localeCompare(String(y.lastFailedAt || '~')),
+};
+function frictionView(list) {
+  const q = (el('frictionFilter')?.value || '').trim().toLowerCase();
+  const sort = FRICTION_SORTS[el('frictionSort')?.value] || FRICTION_SORTS.cost;
+  const hit = (f) => !q || [f.selector, f.type, f.targetKind, ...Object.keys(f.origins || {}), ...Object.keys(f.errorClasses || {}), f.lastError || ''].join(' ').toLowerCase().includes(q);
+  return list.filter(hit).sort(sort);
+}
+for (const id of ['frictionFilter', 'frictionSort']) {
+  el(id)?.addEventListener('input', () => { if (lastAnalyticsData) renderFrictionDetail(lastAnalyticsData, { force: true }); });
+}
+
+// "Marked fixed" with a way back: the undo button lives for a few seconds so a mis-click is one more click.
+let frictionToastTimer = null;
+function frictionUndoToast(text, undo) {
+  const box = el('frictionToast');
+  if (!box) return;
+  box.hidden = false;
+  box.innerHTML = `${esc(text)} <button class="friction-act" data-friction-act="toast-undo">undo</button>`;
+  box.querySelector('button').onclick = async () => {
+    box.hidden = true;
+    try { await undo(); await refreshFriction({ force: true }); } catch (err) { window.alert('friction: ' + err.message); }
+  };
+  clearTimeout(frictionToastTimer);
+  frictionToastTimer = setTimeout(() => { box.hidden = true; }, 10000);
+}
+
 function renderFrictionDetail(a, { force = false } = {}) {
   const box = el('frictionDetail');
   if (!box) return;
   renderFrictionLive();
   if (!force && frictionFormOpen()) return;
-  const rows = (a.selectorFriction || []).slice(0, 12);
+  const all = a.selectorFriction || [];
+  const viewed = frictionView(all);
+  const rows = viewed.slice(0, 30);
+  if (el('frictionCount')) el('frictionCount').textContent = all.length ? `${rows.length < viewed.length ? `first ${rows.length} of ` : ''}${viewed.length}${viewed.length !== all.length ? ` of ${all.length}` : ''} target(s)` : '';
   const classMix = (f) => Object.entries(f.errorClasses || {}).sort((x, y) => y[1] - x[1]).map(([k, n]) => `${esc(k)} ${n}`).join(', ');
   const originCount = (f) => Object.keys(f.origins || {}).filter(Boolean).length;
   const body = rows.map((f) => `<tr>
@@ -3906,7 +3956,7 @@ function renderFrictionDetail(a, { force = false } = {}) {
     <td>${classMix(f)}</td><td>${originCount(f) || '-'}</td><td>${frictionRecoveryText(f.recovery)}</td>
     <td><button class="friction-act" data-friction-act="resolve" data-type="${esc(f.type)}" data-target="${esc(f.selector)}" data-kind="${esc(f.targetKind || 'selector')}">mark fixed</button></td></tr>`).join('');
   const table = rows.length ? `<table class="heatmap-table"><thead><tr><th>target</th><th>type</th><th>fails</th><th>wasted</th><th>retries</th><th>cost</th><th>error classes</th><th>origins</th><th>worked after</th><th></th></tr></thead><tbody>${body}</tbody></table>` : '';
-  const clusters = (a.frictionClusters || []).map((c) => `<li>${esc(c.summary)} - ${c.targets.slice(0, 4).map((t) => `<code>${esc(t.selector)}</code>`).join(', ')}${c.targetCount > 4 ? ` +${c.targetCount - 4} more` : ''}</li>`).join('');
+  const clusters = (a.frictionClusters || []).map((c) => `<li>${esc(c.summary)} <button class="friction-act" data-friction-act="resolve-cluster" data-id="${esc(c.id)}" data-label="${esc(c.targetCount + ' targets')}">mark all fixed</button> - ${c.targets.slice(0, 4).map((t) => `<code>${esc(t.selector)}</code>`).join(', ')}${c.targetCount > 4 ? ` +${c.targetCount - 4} more` : ''}</li>`).join('');
   const suggestions = (a.resolveSuggestions || []).map((s) => `<li>${esc(s.hint)} <button class="friction-act" data-friction-act="resolve" data-type="${esc(s.type)}" data-target="${esc(s.selector)}" data-kind="${esc(s.targetKind || 'selector')}">mark fixed</button></li>`).join('');
   const resolved = (a.resolvedFriction || []).map((r) => `<li>${esc(r.type)} ${esc(r.selector)} fixed at ${esc(fmtTime(r.resolvedAt))}${r.note ? ' - ' + esc(r.note) : ''} <button class="friction-act" data-friction-act="unresolve" data-type="${esc(r.type)}" data-target="${esc(r.selector)}" data-kind="${/^idb\./.test(r.type) ? 'store' : 'selector'}">undo</button></li>`).join('');
   const candidates = (a.knownIssueCandidates || []).map((c) => `<li><code>${esc(c.draft.signature)}</code> seen ${c.count}x in ${c.sessionCount} session(s) [${esc(c.errorClass)}]
@@ -3946,8 +3996,15 @@ el('frictionDetail')?.addEventListener('click', async (e) => {
       btn.disabled = false;
       return;
     }
+    if (act === 'resolve-cluster') {
+      const res = await api('POST', '/friction/resolve', { type: 'cluster', selector: btn.dataset.id });
+      frictionUndoToast(`marked ${res.count} target(s) fixed (one cause)`, () => api('POST', '/friction/unresolve', { type: 'cluster', targets: res.resolved }));
+      await refreshFriction({ force: true });
+      return;
+    }
     const aim = btn.dataset.kind === 'store' ? { store: btn.dataset.target } : { selector: btn.dataset.target };
     await api('POST', '/friction/' + act, { type: btn.dataset.type, ...aim });
+    if (act === 'resolve') frictionUndoToast(`marked fixed: ${btn.dataset.type} ${btn.dataset.target}`, () => api('POST', '/friction/unresolve', { type: btn.dataset.type, ...aim }));
     await refreshFriction({ force: true });
   } catch (err) {
     btn.disabled = false;
