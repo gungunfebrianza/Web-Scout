@@ -356,6 +356,17 @@
   .heatmap-table { border-collapse: collapse; font-size: 11px; }
   .heatmap-table th, .heatmap-table td { border: 1px solid var(--border-hud); padding: 3px 6px; white-space: nowrap; }
   .heatmap-table th { position: sticky; top: 0; background: var(--bg-panel); }
+  #frictionDetail { font-size: 11px; margin-top: 8px; }
+  #frictionDetail h3 { font-size: 11px; margin: 10px 0 4px; }
+  #frictionDetail ul { margin: 0; padding-left: 16px; }
+  .friction-act { font-size: 10px; padding: 1px 6px; cursor: pointer; }
+  #frictionLive { font-size: 11px; margin-top: 8px; }
+  #frictionLive h3 { font-size: 11px; margin: 0 0 4px; }
+  .friction-form { margin-top: 4px; }
+  .friction-form label { display: block; margin: 4px 0; }
+  .friction-form textarea, .friction-form input { width: 100%; box-sizing: border-box; font: inherit; }
+  .friction-form small { display: block; color: var(--ink-muted); margin-bottom: 4px; }
+  .friction-preview { margin: 4px 0 0; padding: 4px; white-space: pre-wrap; background: var(--bg-panel-inset); }
   .heat-cell { text-align: center; color: var(--ink-primary); cursor: help; }
   .heat-cell[data-reveal] { cursor: pointer; }
   .heat-cell.heat-empty { color: var(--ink-muted); background: var(--bg-panel-inset) !important; }
@@ -368,6 +379,25 @@
   .burn-chart-svg .burn-over { fill: var(--accent-danger); }
   .burn-chart-svg .burn-axis { stroke: var(--border-hud); }
   .burn-chart-legend { font-size: 10px; color: var(--ink-muted); margin-top: 4px; }
+  .host-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 6px; margin-top: 8px; }
+  .host-tile { border: 1px solid var(--border-hud); border-left-width: 4px; border-radius: 3px; padding: 6px 8px; background: var(--bg-panel-raised); cursor: help; }
+  .host-tile .v { font-size: 18px; font-weight: 600; }
+  .host-tile .k { font-size: 10px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: .04em; }
+  .host-tile.ok { border-left-color: var(--accent-alien); }
+  .host-tile.warn { border-left-color: var(--accent-predator); }
+  .host-tile.crit { border-left-color: var(--accent-danger); }
+  .host-tile.unknown { border-left-color: var(--border-hud); }
+  .host-tile.warn .v { color: var(--accent-predator); }
+  .host-tile.crit .v { color: var(--accent-danger); }
+  .host-result { margin-top: 6px; padding: 6px 8px; border: 1px solid var(--border-hud); border-radius: 3px; font-size: 12px; }
+  .host-dead { color: var(--accent-danger); }
+  .host-alive { color: var(--accent-alien); }
+  .host-chart-svg .h-line { fill: none; stroke-width: 1.5; }
+  .host-chart-svg .h-dirs { stroke: var(--accent-info); }
+  .host-chart-svg .h-mb { stroke: var(--accent-predator); }
+  .host-chart-svg .h-pt { fill: var(--accent-info); }
+  .host-chart-svg .h-jump { fill: var(--accent-danger); }
+  .host-chart-svg .h-base { stroke: var(--ink-muted); stroke-dasharray: 3 3; fill: none; }
   .duration-bar-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border-hud); font-size: 12px; }
   .duration-bar-label { min-width: 90px; flex-shrink: 0; color: var(--ink-muted); font-size: 11px; }
   .duration-bar-track { position: relative; flex: 1; height: 14px; background: var(--bg-panel-inset); border-radius: 2px; }
@@ -666,9 +696,11 @@
 
   <section class="hud-section hud-scroll-col" id="selectorsSection">
   <h2>Recurring selector failures</h2>
-  <div class="muted">selectors that failed more than once, linked to the action type they failed on - line thickness = fail count</div>
+  <div class="muted">selectors and stores that failed more than once, linked to the action type they failed on - line thickness = fail count; the table is what the pre-action warning is built from</div>
   <div class="hud-scroll-body" id="selectorGraphContainer"></div>
   <div id="selectorGraphEmpty" class="empty" hidden>No repeated selector failures yet.</div>
+  <div id="frictionLive"></div>
+  <div id="frictionDetail"></div>
   </section>
 </div>
 
@@ -759,6 +791,71 @@
   </p>
   <div id="repairCausalDiffContainer"></div>
   <div id="repairCausalDiffEmpty" class="empty">Pick two session ids and run the diff.</div>
+</section>
+
+<section class="hud-section" id="hostHealthSection">
+  <h2>Host health</h2>
+  <div class="muted">what web-scout has left in the temp dir, browsers it has running, and free disk (GET /host/health). Colours: green ok, amber warn, red critical - thresholds in the tooltip of each tile.</div>
+  <div id="hostTiles" class="host-tiles"></div>
+  <p style="margin-top:8px;">
+    <button type="button" id="hostPreviewBtn">Preview cleanup (dry-run)</button>
+    <button type="button" id="hostConfirmBtn" hidden>Confirm &amp; delete</button>
+    <button type="button" id="hostCancelBtn" hidden>Cancel</button>
+    <span id="hostCleanupTarget" class="muted"></span>
+  </p>
+  <div id="hostCleanupResult" class="host-result" hidden></div>
+  <div id="hostHealthEmpty" class="empty" hidden>No host data yet - the relay may be unreachable (or WEBSCOUT_NO_HOST_SCAN=1).</div>
+</section>
+
+<section class="hud-section" id="hostTrendSection">
+  <h2>Host resource trend</h2>
+  <div class="muted">scratch dirs and MB over the last 14 days (samples every ~10 min), plus new dirs created per day by source (from the scratch ledger) - a "14 new profiles a day" leak shows as a rising bar without a matching "released" bar.</div>
+  <div id="hostTrendChart"></div>
+  <div class="sv-h3">Created per day, by source</div>
+  <div id="hostTrendDaily"></div>
+  <div id="hostTrendEmpty" class="empty" hidden>No samples yet - the relay records one every ~10 minutes.</div>
+</section>
+
+<section class="hud-section" id="hostDirsSection">
+  <h2>Scratch dirs</h2>
+  <div class="muted">every web-scout scratch dir with its owner pid (alive / dead), size and age. A dead-owner row is reclaimable: its Clean button runs the dry-run preview first (same Confirm flow as above).</div>
+  <div class="hud-scroll-body">
+    <table id="hostDirsTable"><thead><tr><th>Dir</th><th>Source</th><th>Owner</th><th>Size</th><th>Age</th><th></th></tr></thead><tbody></tbody></table>
+  </div>
+  <div id="hostDirsEmpty" class="empty" hidden>No web-scout scratch dirs on disk.</div>
+</section>
+
+<section class="hud-section" id="hostOrphansSection">
+  <h2>Orphan browsers</h2>
+  <div class="muted">browsers whose parent (or scratch owner) is dead. Only browsers whose command line names a web-scout profile dir are listed - your own Edge/Chrome is never shown or touched.</div>
+  <p><button type="button" id="hostKillAllBtn" disabled>Kill all orphans</button></p>
+  <div class="hud-scroll-body">
+    <table id="hostOrphansTable"><thead><tr><th>PID</th><th>Parent</th><th>Profile dir</th><th>Why</th><th></th></tr></thead><tbody></tbody></table>
+  </div>
+  <div id="hostOrphansEmpty" class="empty" hidden>No orphan browsers.</div>
+</section>
+
+<section class="hud-section" id="hostSessionsSection">
+  <h2>Per-session scratch cost</h2>
+  <div class="muted">scratch dirs and browser processes each session spawned vs released (ledger events inside the session's start..end window). Leaked &gt; 0 means a flow left a profile behind. Click a row to open the session.</div>
+  <div class="hud-scroll-body">
+    <table id="hostSessionsTable"><thead><tr><th>Session</th><th>Spawned</th><th>Released</th><th>Leaked</th><th>Processes</th><th>Size</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div id="hostSessionsEmpty" class="empty" hidden>No session has spawned a scratch dir yet.</div>
+</section>
+
+<section class="hud-section" id="hostTestRunSection">
+  <h2>Test runs</h2>
+  <div class="muted">the last <code>node run-tests.mjs</code> result: entries its tests leaked in the private root, detached helpers and orphan browsers it had to kill, and whether the real temp dir stayed clean.</div>
+  <div id="hostTestRunBody"></div>
+  <div id="hostTestRunEmpty" class="empty" hidden>No run-tests result recorded yet - run <code>node run-tests.mjs</code>.</div>
+</section>
+
+<section class="hud-section" id="hostFootprintSection">
+  <h2>Profile footprint log</h2>
+  <div class="muted">browser-profile size at dispose, from webscout-scratch-log.jsonl (set WEBSCOUT_SCRATCH_LOG=1). A red dot is a run at least 1.5x the median of the ten before it - e.g. a slim flag was dropped.</div>
+  <div id="hostFootprintChart"></div>
+  <div id="hostFootprintEmpty" class="empty" hidden>No footprint log yet - run with WEBSCOUT_SCRATCH_LOG=1.</div>
 </section>
 
 <div class="hud-grid-2">
@@ -3740,7 +3837,7 @@ function renderHeatmap(a) {
 // ---------- Recurring-selector failure graph (bipartite: type <-> selector) ----------
 function renderSelectorGraph(a) {
   const container = el('selectorGraphContainer');
-  const items = (a.topFailedSelectors || []).slice(0, 12);
+  const items = (a.selectorFriction || []).slice(0, 12);
   if (!items.length) { container.innerHTML = ''; el('selectorGraphEmpty').hidden = false; return; }
   el('selectorGraphEmpty').hidden = true;
   const types = [...new Set(items.map((i) => i.type))];
@@ -3764,6 +3861,99 @@ function renderSelectorGraph(a) {
   }).join('');
   container.innerHTML = `<svg class="selector-graph-svg" viewBox="0 0 ${width} ${height}" style="width:100%; height:${height}px;">${lines}${typeNodes}${selNodes}</svg>`;
 }
+
+// ---------- Friction detail: the same data the pre-action warning uses, with the controls ----------
+// One list (analytics.selectorFriction) feeds the graph above, this table and the agent's warning,
+// so they cannot disagree. Controls are the ones the CLI has: mark fixed / undo, promote a candidate.
+function frictionTargetLabel(f) { return (f.targetKind === 'store' ? 'store ' : f.targetKind === 'page' ? 'page ' : '') + f.selector; }
+function frictionRecoveryText(r) {
+  if (!r) return '';
+  const what = r.kind === 'alt-selector' ? esc(r.selector) : esc(r.type + (r.selector ? ' ' + r.selector : ''));
+  return `${what} (${r.worked}/${r.of})`;
+}
+// What THIS session has run into, from the same live tracker the agent's warning reads - so the person
+// watching sees what the agent was told, not only what the history says.
+async function renderFrictionLive() {
+  const box = el('frictionLive');
+  if (!box) return;
+  try {
+    const live = await api('GET', '/friction/session');
+    if (!live.session || !live.targets.length) { box.innerHTML = ''; return; }
+    const rows = live.targets.slice(0, 8).map((t) => `<tr>
+      <td>${esc(frictionTargetLabel({ targetKind: t.kind, selector: t.value }))}</td><td>${esc(t.type || '')}</td><td>${t.fails}</td><td>${t.unresolved}</td>
+      <td>${esc(t.errorClass || '')}</td>
+      <td>${t.lastOkAt && !t.unresolved ? 'worked since' : t.warned ? `warned x${t.warned.count}${t.unresolved >= 3 ? ' (escalated)' : ''}` : 'not warned yet'}</td></tr>`).join('');
+    box.innerHTML = `<h3>This session (#${live.session.id}) - what the agent has been told</h3>
+      <table class="heatmap-table"><thead><tr><th>target</th><th>type</th><th>fails</th><th>in a row</th><th>class</th><th>agent was</th></tr></thead><tbody>${rows}</tbody></table>`;
+  } catch { /* best-effort - the history table below still renders */ }
+}
+
+// The promote form is a <details> so it stays out of the way; while one is open (someone is typing) the
+// detail view is not rebuilt underneath them by the next analytics refresh.
+const frictionFormOpen = () => Boolean(el('frictionDetail')?.querySelector('details[open]'));
+
+function renderFrictionDetail(a, { force = false } = {}) {
+  const box = el('frictionDetail');
+  if (!box) return;
+  renderFrictionLive();
+  if (!force && frictionFormOpen()) return;
+  const rows = (a.selectorFriction || []).slice(0, 12);
+  const classMix = (f) => Object.entries(f.errorClasses || {}).sort((x, y) => y[1] - x[1]).map(([k, n]) => `${esc(k)} ${n}`).join(', ');
+  const originCount = (f) => Object.keys(f.origins || {}).filter(Boolean).length;
+  const body = rows.map((f) => `<tr>
+    <td title="${esc(f.key)}">${esc(frictionTargetLabel(f))}</td><td>${esc(f.type)}</td><td>${f.failCount}</td>
+    <td>${f.wastedMs >= 1000 ? (f.wastedMs / 1000).toFixed(1) + 's' : f.wastedMs + 'ms'}</td><td>${f.retries || 0}</td><td>${f.score}</td>
+    <td>${classMix(f)}</td><td>${originCount(f) || '-'}</td><td>${frictionRecoveryText(f.recovery)}</td>
+    <td><button class="friction-act" data-friction-act="resolve" data-type="${esc(f.type)}" data-target="${esc(f.selector)}" data-kind="${esc(f.targetKind || 'selector')}">mark fixed</button></td></tr>`).join('');
+  const table = rows.length ? `<table class="heatmap-table"><thead><tr><th>target</th><th>type</th><th>fails</th><th>wasted</th><th>retries</th><th>cost</th><th>error classes</th><th>origins</th><th>worked after</th><th></th></tr></thead><tbody>${body}</tbody></table>` : '';
+  const clusters = (a.frictionClusters || []).map((c) => `<li>${esc(c.summary)} - ${c.targets.slice(0, 4).map((t) => `<code>${esc(t.selector)}</code>`).join(', ')}${c.targetCount > 4 ? ` +${c.targetCount - 4} more` : ''}</li>`).join('');
+  const suggestions = (a.resolveSuggestions || []).map((s) => `<li>${esc(s.hint)} <button class="friction-act" data-friction-act="resolve" data-type="${esc(s.type)}" data-target="${esc(s.selector)}" data-kind="${esc(s.targetKind || 'selector')}">mark fixed</button></li>`).join('');
+  const resolved = (a.resolvedFriction || []).map((r) => `<li>${esc(r.type)} ${esc(r.selector)} fixed at ${esc(fmtTime(r.resolvedAt))}${r.note ? ' - ' + esc(r.note) : ''} <button class="friction-act" data-friction-act="unresolve" data-type="${esc(r.type)}" data-target="${esc(r.selector)}" data-kind="${/^idb\./.test(r.type) ? 'store' : 'selector'}">undo</button></li>`).join('');
+  const candidates = (a.knownIssueCandidates || []).map((c) => `<li><code>${esc(c.draft.signature)}</code> seen ${c.count}x in ${c.sessionCount} session(s) [${esc(c.errorClass)}]
+    <details class="friction-form" data-id="${esc(c.draft.id)}"><summary>promote to known issue</summary>
+      <label>root cause <textarea rows="2" data-field="description" placeholder="${esc(c.draft.description)}"></textarea></label>
+      <label>fix <input data-field="remediation" value="${esc(c.suggestedRemediation || '')}" placeholder="what to do about it (required)"></label>
+      ${c.suggestedRemediation ? `<small>fix prefilled from ${c.suggestedFrom === 'recovery' ? 'what worked after this failure' : 'the generic advice for this error class'} - edit it</small>` : ''}
+      <button class="friction-act" data-friction-act="promote-preview">preview</button>
+      <button class="friction-act" data-friction-act="promote-write">write to known-issues.json</button>
+      <pre class="friction-preview" hidden></pre>
+    </details></li>`).join('');
+  box.innerHTML = table
+    + (clusters ? `<h3>One cause, many targets</h3><ul>${clusters}</ul>` : '')
+    + (suggestions ? `<h3>Probably fixed - declare it?</h3><ul>${suggestions}</ul>` : '')
+    + (candidates ? `<h3>Unrecognised repeating errors</h3><ul>${candidates}</ul>` : '')
+    + (resolved ? `<h3>Marked fixed</h3><ul>${resolved}</ul>` : '');
+}
+el('frictionDetail')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-friction-act]');
+  if (!btn) return;
+  const act = btn.dataset.frictionAct;
+  btn.disabled = true;
+  try {
+    if (act === 'promote-preview' || act === 'promote-write') {
+      const form = btn.closest('.friction-form');
+      const out = form.querySelector('.friction-preview');
+      const payload = { id: form.dataset.id, description: form.querySelector('[data-field="description"]').value.trim() || undefined, remediation: form.querySelector('[data-field="remediation"]').value.trim() || undefined };
+      try {
+        const res = await api('POST', '/known-issues/promote', { ...payload, confirm: act === 'promote-write' });
+        out.hidden = false;
+        out.textContent = act === 'promote-write' ? `written to ${res.file}:\n${JSON.stringify(res.entry, null, 2)}` : `${res.note || 'dry run'}\n${JSON.stringify(res.wouldWrite, null, 2)}`;
+        if (act === 'promote-write') { form.open = false; await refreshFriction({ force: true }); return; }
+      } catch (err) {
+        out.hidden = false;
+        out.textContent = 'not written: ' + err.message;
+      }
+      btn.disabled = false;
+      return;
+    }
+    const aim = btn.dataset.kind === 'store' ? { store: btn.dataset.target } : { selector: btn.dataset.target };
+    await api('POST', '/friction/' + act, { type: btn.dataset.type, ...aim });
+    await refreshFriction({ force: true });
+  } catch (err) {
+    btn.disabled = false;
+    window.alert('friction: ' + err.message);
+  }
+});
 
 // ---------- Cross-session cumulative token burn ----------
 function renderBurnChart(a) {
@@ -4062,9 +4252,183 @@ el('repairToggleBtn').addEventListener('click', async () => {
   }
 });
 
-function renderCrossSessionCharts(a) {
+// ---------- Host health (scratch dirs, browsers, disk) ----------
+// Server-side scan (GET /host/health, cached ~15s) - this page never inspects the machine itself. Health is
+// fetched on every poll; the heavier/rarer feeds (trend, per-session cost, footprint log, last test run) at
+// most every 30s or when a host SSE event / panel refresh asks for them.
+let lastHost = null;
+let lastHostTrend = null;
+let lastHostSessions = null;
+let lastHostFootprint = null;
+let lastHostTestRun = undefined; // undefined = not fetched, null = none recorded
+let hostSlowFetchedAt = 0;
+let hostPending = null; // { dirs: [names]|null } - the dry-run preview awaiting Confirm
+const hostMB = (bytes) => (bytes >= 1073741824 ? `${(bytes / 1073741824).toFixed(1)} GB` : `${(bytes / 1048576).toFixed(bytes >= 10485760 ? 0 : 1)} MB`);
+const hostAge = (ms) => (ms < 3600000 ? `${Math.max(1, Math.round(ms / 60000))}m` : ms < 172800000 ? `${(ms / 3600000).toFixed(1)}h` : `${Math.round(ms / 86400000)}d`);
+
+function renderHostTiles() {
+  const h = lastHost;
+  el('hostHealthEmpty').hidden = !!h;
+  if (!h) { el('hostTiles').innerHTML = ''; return; }
+  const t = h.thresholds;
+  const tile = (key, label, value, fmt, tip) => `<div class="host-tile ${h.levels[key] || 'unknown'}" title="${esc(tip)}"><div class="v">${value === null || value === undefined ? '?' : esc(fmt(value))}</div><div class="k">${esc(label)}</div></div>`;
+  const m = h.metrics;
+  el('hostTiles').innerHTML = [
+    tile('dirs', 'scratch dirs', m.dirs, String, `warn >= ${t.dirs.warn}, critical >= ${t.dirs.crit}`),
+    tile('mb', 'scratch size', m.mb, (v) => hostMB(v * 1048576), `warn >= ${t.mb.warn} MB, critical >= ${t.mb.crit} MB`),
+    tile('reclaimable', 'reclaimable dirs', m.reclaimable, String, `owner dead or too old. ${hostMB(h.staleBytes)} would be freed. warn >= ${t.reclaimable.warn}, critical >= ${t.reclaimable.crit}`),
+    tile('browsers', 'live browsers', m.browsers, String, `web-scout headless browsers running now. warn >= ${t.browsers.warn}, critical >= ${t.browsers.crit}`),
+    tile('orphans', 'orphan browsers', m.orphans, String, `parent or owner dead. warn >= ${t.orphans.warn}, critical >= ${t.orphans.crit}`),
+    tile('freeGb', `free disk${h.root ? ` (${h.root.slice(0, 2)})` : ''}`, m.freeGb, (v) => `${v} GB`, `warn < ${t.freeGb.warn} GB, critical < ${t.freeGb.crit} GB. scan at ${h.at}`),
+  ].join('');
+  el('hostKillAllBtn').disabled = !h.orphanBrowsers.length;
+}
+
+function renderHostDirs() {
+  const tbody = el('hostDirsTable').querySelector('tbody');
+  const dirs = lastHost?.dirs ?? [];
+  el('hostDirsEmpty').hidden = dirs.length > 0 || !lastHost;
+  tbody.innerHTML = dirs.slice(0, 300).map((d) => {
+    const owner = d.ownerPid === null ? '<span class="muted">no marker</span>' : `${d.ownerPid} <span class="${d.ownerAlive ? 'host-alive' : 'host-dead'}">${d.ownerAlive ? 'alive' : 'dead'}</span>`;
+    const clean = d.stale && !d.foreign ? `<button type="button" data-host-clean="${esc(d.name)}">Clean</button>` : '';
+    return `<tr${d.stale ? ' class="host-dead-row"' : ''}><td title="${esc(d.name)}">${esc(clip(d.name, 44))}</td><td>${esc((d.source || 'other').replace(/^webscout-|-$/g, ''))}</td><td>${owner}</td><td>${hostMB(d.bytes)}</td><td>${hostAge(d.ageMs)}</td><td>${clean}</td></tr>`;
+  }).join('') + (dirs.length > 300 ? `<tr><td colspan="6" class="muted">${dirs.length - 300} more (largest shown first)</td></tr>` : '');
+}
+
+function renderHostOrphans() {
+  const tbody = el('hostOrphansTable').querySelector('tbody');
+  const list = lastHost?.orphanBrowsers ?? [];
+  el('hostOrphansEmpty').hidden = list.length > 0 || !lastHost;
+  tbody.innerHTML = list.map((o) => `<tr><td>${o.pid}</td><td>${o.ppid}</td><td title="${esc(o.dir)}">${esc(clip(o.dir, 44))}</td><td>${esc(o.reason)}</td><td><button type="button" data-host-kill="${o.pid}">Kill</button></td></tr>`).join('');
+}
+
+function renderHostTrend() {
+  const chart = el('hostTrendChart');
+  const tr = lastHostTrend;
+  const samples = tr?.samples ?? [];
+  el('hostTrendEmpty').hidden = samples.length > 1 || (tr?.daily ?? []).length > 0;
+  if (samples.length < 2) { chart.innerHTML = samples.length ? '<div class="muted">1 sample so far - a trend needs at least 2.</div>' : ''; }
+  else {
+    const width = 900, height = 110, padL = 4, padR = 4, padT = 8, padB = 8;
+    const innerW = width - padL - padR, innerH = height - padT - padB;
+    const t0 = Date.parse(samples[0].at), t1 = Date.parse(samples[samples.length - 1].at) || t0 + 1;
+    const x = (s) => padL + ((Date.parse(s.at) - t0) / Math.max(1, t1 - t0)) * innerW;
+    const line = (key) => { const mx = Math.max(1, ...samples.map((s) => s[key] || 0)); return samples.map((s) => `${x(s).toFixed(1)},${(padT + innerH - ((s[key] || 0) / mx) * innerH).toFixed(1)}`).join(' '); };
+    const last = samples[samples.length - 1];
+    chart.innerHTML = `<svg class="host-chart-svg" viewBox="0 0 ${width} ${height}" style="width:100%; height:${height}px;" preserveAspectRatio="none"><polyline class="h-line h-dirs" points="${line('dirs')}"/><polyline class="h-line h-mb" points="${line('mb')}"/></svg><div class="burn-chart-legend"><span style="color:var(--accent-info)">dirs</span> (now ${last.dirs}) and <span style="color:var(--accent-predator)">MB</span> (now ${last.mb}), each scaled to its own max - ${samples.length} samples, ${fmtTime(samples[0].at)} to ${fmtTime(last.at)}</div>`;
+  }
+  const daily = tr?.daily ?? [];
+  const maxCreated = Math.max(1, ...daily.map((d) => d.created));
+  el('hostTrendDaily').innerHTML = daily.map((d) => {
+    const src = Object.entries(d.bySource).map(([k, n]) => `${k.replace(/^webscout-|-$/g, '')}: ${n}`).join(', ');
+    return `<div class="duration-bar-row"><div class="duration-bar-label">${esc(d.day)}</div><div class="duration-bar-track" title="${esc(src)}"><div class="duration-bar-max" style="width:${Math.max(2, (d.created / maxCreated) * 100).toFixed(1)}%"></div></div><div class="duration-bar-value">${d.created} new, ${d.released} released${d.created > d.released ? ` <span class="host-dead">(+${d.created - d.released} kept)</span>` : ''} <span class="muted">${esc(src)}</span></div></div>`;
+  }).join('');
+}
+
+function renderHostSessions() {
+  const tbody = el('hostSessionsTable').querySelector('tbody');
+  const rows = lastHostSessions ?? [];
+  el('hostSessionsEmpty').hidden = rows.length > 0 || lastHostSessions === null;
+  tbody.innerHTML = rows.slice().reverse().map((r) => `<tr data-session-id="${r.sessionId}" style="cursor:pointer;"><td title="${esc(r.goal)}">#${r.sessionId} ${esc(clip(r.goal, 30))}</td><td>${r.spawned}</td><td>${r.released}</td><td class="${r.leaked ? 'host-dead' : ''}">${r.leaked}</td><td>${r.processes}</td><td>${r.bytes ? hostMB(r.bytes) : '<span class="muted">-</span>'}</td></tr>`).join('');
+}
+
+function renderHostTestRun() {
+  const r = lastHostTestRun;
+  el('hostTestRunEmpty').hidden = !!r || r === undefined;
+  if (!r) { el('hostTestRunBody').innerHTML = ''; return; }
+  const cell = (label, value, bad) => `<div class="host-tile ${bad ? 'crit' : 'ok'}"><div class="v">${esc(value)}</div><div class="k">${esc(label)}</div></div>`;
+  el('hostTestRunBody').innerHTML = `<div class="muted">${esc(new Date(r.at).toLocaleString())} - ${r.failed ? '<span class="host-dead">FAILED</span>' : '<span class="host-alive">clean</span>'}</div>
+    <div class="host-tiles">${cell('leaked entries', r.leakedCount, r.leakedCount > 0)}${cell('helpers stopped', r.helpersStopped ?? 0, (r.helpersStopped ?? 0) > 0)}${cell('orphans killed', r.orphansKilled, r.orphansKilled > 0)}${cell('private root', r.rootWiped ? 'wiped' : 'NOT wiped', !r.rootWiped)}${cell('real temp gained', `${r.realTempGained} dir(s)`, r.realTempGained > 0)}</div>
+    ${r.leakedEntries?.length ? `<div class="burn-chart-legend">leaked: ${esc(r.leakedEntries.slice(0, 20).join(', '))}${r.leakedEntries.length > 20 ? ` (+${r.leakedEntries.length - 20} more)` : ''}</div>` : ''}`;
+}
+
+function renderHostFootprint() {
+  const rows = lastHostFootprint ?? [];
+  el('hostFootprintEmpty').hidden = rows.length > 0 || lastHostFootprint === null;
+  const chart = el('hostFootprintChart');
+  if (!rows.length) { chart.innerHTML = ''; return; }
+  const width = 900, height = 120, padL = 4, padR = 4, padT = 8, padB = 8;
+  const innerW = width - padL - padR, innerH = height - padT - padB;
+  const maxB = Math.max(1, ...rows.map((r) => r.bytes));
+  const x = (i) => padL + (rows.length === 1 ? innerW / 2 : (i / (rows.length - 1)) * innerW);
+  const y = (b) => padT + innerH - (b / maxB) * innerH;
+  const line = rows.map((r, i) => `${x(i).toFixed(1)},${y(r.bytes).toFixed(1)}`).join(' ');
+  const base = rows.map((r, i) => (r.baseline ? `${x(i).toFixed(1)},${y(r.baseline).toFixed(1)}` : null)).filter(Boolean).join(' ');
+  const dots = rows.map((r, i) => `<circle class="${r.jump ? 'h-jump' : 'h-pt'}" cx="${x(i).toFixed(1)}" cy="${y(r.bytes).toFixed(1)}" r="${r.jump ? 4 : 2}"><title>${esc(r.at)} ${esc(r.dir)}: ${hostMB(r.bytes)}${r.jump ? ` (jump: baseline ${hostMB(r.baseline)})` : ''}</title></circle>`).join('');
+  const jumps = rows.filter((r) => r.jump).length;
+  const last = rows[rows.length - 1];
+  chart.innerHTML = `<svg class="host-chart-svg" viewBox="0 0 ${width} ${height}" style="width:100%; height:${height}px;" preserveAspectRatio="none"><polyline class="h-line h-dirs" points="${line}"/>${base ? `<polyline class="h-base" points="${base}"/>` : ''}${dots}</svg><div class="burn-chart-legend">${rows.length} profile(s), latest ${hostMB(last.bytes)}, peak ${hostMB(maxB)}; dashed = rolling median of the previous 10. ${jumps ? `<span class="host-dead">${jumps} jump(s) - check that SLIM_FLAGS are still passed</span>` : 'no jumps'}</div>`;
+}
+
+async function refreshHost({ slow = false, fresh = false } = {}) {
+  try { lastHost = await api('GET', `/host/health${fresh ? '?fresh=1' : ''}`); } catch { lastHost = null; }
+  renderHostTiles(); renderHostDirs(); renderHostOrphans();
+  panelTouch('hostHealthSection'); panelTouch('hostDirsSection'); panelTouch('hostOrphansSection');
+  if (!slow && Date.now() - hostSlowFetchedAt < 30000) return;
+  hostSlowFetchedAt = Date.now();
+  const get = async (p) => { try { return await api('GET', p); } catch { return undefined; } };
+  const [trend, sessions, footprint, testRun] = await Promise.all([get('/host/trend'), get('/host/sessions'), get('/host/footprint'), get('/host/test-run')]);
+  lastHostTrend = trend ?? null; lastHostSessions = sessions ?? null; lastHostFootprint = footprint ?? null; lastHostTestRun = testRun === undefined ? undefined : testRun;
+  renderHostTrend(); renderHostSessions(); renderHostTestRun(); renderHostFootprint();
+  for (const id of ['hostTrendSection', 'hostSessionsSection', 'hostTestRunSection', 'hostFootprintSection']) panelTouch(id);
+}
+
+// Cleanup: ALWAYS a dry-run preview first; the delete is a second, explicit step. More than confirmAbove dirs
+// also needs the operator to type the count (the relay refuses it without confirm:true either way).
+function hostShowResult(html) { const box = el('hostCleanupResult'); box.innerHTML = html; box.hidden = !html; }
+function hostClearPending() { hostPending = null; el('hostConfirmBtn').hidden = true; el('hostCancelBtn').hidden = true; el('hostCleanupTarget').textContent = ''; }
+async function hostPreview(dirs) {
+  try {
+    const r = await api('POST', '/host/cleanup', { dryRun: true, ...(dirs ? { dirs } : {}) });
+    const n = r.removed.length;
+    hostShowResult(`<b>Preview:</b> would remove ${n} dir(s), <b>${hostMB(r.freedBytes)}</b> freed; ${r.killedProcesses.length} orphan browser process(es) would be killed; ${r.skippedLive} kept (owner alive / too new).${n ? `<br><span class="muted">${esc(r.removed.slice(0, 8).map((x) => x.name).join(', '))}${n > 8 ? ` (+${n - 8} more)` : ''}</span>` : ''}`);
+    hostPending = n ? { dirs: dirs ?? null, count: n } : null;
+    el('hostConfirmBtn').hidden = !n; el('hostCancelBtn').hidden = !n;
+    el('hostCleanupTarget').textContent = n ? (dirs ? `target: ${dirs.join(', ')}` : 'target: every reclaimable dir') : '';
+  } catch (err) { hostShowResult(`preview failed: ${esc(err.message)}`); hostClearPending(); }
+}
+el('hostPreviewBtn').addEventListener('click', () => hostPreview(null));
+el('hostCancelBtn').addEventListener('click', () => { hostClearPending(); hostShowResult(''); });
+el('hostConfirmBtn').addEventListener('click', async () => {
+  if (!hostPending) return;
+  const { dirs, count } = hostPending;
+  const big = count > (lastHost?.confirmAbove ?? 200);
+  if (big) {
+    const typed = window.prompt(`This deletes ${count} dirs (more than ${lastHost?.confirmAbove ?? 200}). Type ${count} to confirm:`, '');
+    if (typed === null || Number(typed) !== count) return;
+  } else if (!window.confirm(`Delete ${count} scratch dir(s)?`)) return;
+  try {
+    const r = await api('POST', '/host/cleanup', { dryRun: false, confirm: true, ...(dirs ? { dirs } : {}) });
+    hostShowResult(`<b>Freed ${hostMB(r.freedBytes)}</b>: removed ${r.removed.length} dir(s), killed ${r.killedProcesses.length} orphan browser process(es)${r.failed.length ? `, <span class="host-dead">${r.failed.length} still locked (retry later)</span>` : ''}.`);
+  } catch (err) { hostShowResult(`cleanup failed: ${esc(err.message)}`); }
+  hostClearPending();
+  refreshHost({ slow: true, fresh: true });
+});
+el('hostDirsTable').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-host-clean]');
+  if (b) hostPreview([b.dataset.hostClean]);
+});
+async function hostKill(pids) {
+  const what = pids ? `orphan browser ${pids[0]}` : `all ${lastHost?.orphanBrowsers.length ?? 0} orphan browsers`;
+  if (!window.confirm(`Kill ${what} (and their child processes)?`)) return;
+  try { const r = await api('POST', '/host/kill-orphans', pids ? { pids } : {}); hostShowResult(`killed ${r.killed.length} orphan browser tree(s)${r.skipped.length ? `; ${r.skipped.length} no longer listed (already gone)` : ''}.`); }
+  catch (err) { hostShowResult(`kill failed: ${esc(err.message)}`); }
+  refreshHost({ slow: true, fresh: true });
+}
+el('hostKillAllBtn').addEventListener('click', () => hostKill(null));
+el('hostOrphansTable').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-host-kill]');
+  if (b) hostKill([Number(b.dataset.hostKill)]);
+});
+el('hostSessionsTable').addEventListener('click', (e) => {
+  const row = e.target.closest('[data-session-id]');
+  if (row) openSessionById(Number(row.dataset.sessionId));
+});
+
+function renderCrossSessionCharts(a, opts = {}) {
   renderHeatmap(a);
   renderSelectorGraph(a);
+  renderFrictionDetail(a, opts);
   renderBurnChart(a);
   renderDurationChart(a);
   renderWasteBySession(a);
@@ -4096,12 +4460,12 @@ function renderFriction(a) {
   el('frictionList').innerHTML = items.map((i) => `<li>${i}</li>`).join('');
 }
 
-async function refreshFriction() {
+async function refreshFriction(opts = {}) {
   try {
     const a = await api('GET', '/analytics');
     lastAnalyticsData = a;
     renderAllSessionsHero(a);
-    renderCrossSessionCharts(a);
+    renderCrossSessionCharts(a, opts && typeof opts === 'object' && opts.force ? { force: true } : {});
     renderFriction(a);
     renderTokenTrend();
     panelTickAnalytics(a);
@@ -4138,6 +4502,7 @@ async function refreshAll() {
     await refreshFriction();
     await refreshRepairStatus();
     await refreshRepairActivity();
+    await refreshHost();
     syncBannerStack();
   } catch (err) {
     document.body.classList.add('relay-down');
@@ -4178,6 +4543,7 @@ const KIND_REFRESH = {
   macro: refreshMacros,
   verity: async () => { await refreshVerityRuns(); renderTimeline(); },
   'repair-config': refreshRepairStatus,
+  host: () => refreshHost({ slow: true, fresh: true }),
 };
 
 function connectEvents() {
@@ -4540,7 +4906,7 @@ const analyticsRows = (pick) => { const a = lastAnalyticsData; return a ? pick(a
 const PANELS = {
   allSessionsHero: { group: 'global', wide: true, label: 'Overview', count: () => (lastAnalyticsData ? { n: lastAnalyticsData.totals.sessions, title: 'sessions ever recorded' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => Object.entries(a.totals).map(([metric, value]) => ({ metric, value }))) },
   heatmapSection: { group: 'global', label: 'Heatmap', autoEmpty: true, count: () => (lastAnalyticsData ? { n: lastAnalyticsData.heatmap?.types?.length ?? 0, title: 'action types tracked' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.heatmap?.cells ?? []) },
-  selectorsSection: { group: 'global', label: 'Selectors', autoEmpty: true, failLabel: 'recurring', count: () => { const n = lastAnalyticsData?.topFailedSelectors?.length; return n === undefined ? null : { n, fail: n, title: 'selectors that failed more than once' }; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.topFailedSelectors ?? []) },
+  selectorsSection: { group: 'global', label: 'Selectors', autoEmpty: true, failLabel: 'recurring', count: () => { const n = lastAnalyticsData?.selectorFriction?.length; return n === undefined ? null : { n, fail: n, title: 'selectors that failed more than once' }; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.selectorFriction ?? []) },
   burnSection: { group: 'global', wide: true, label: 'Burn', autoEmpty: true, failLabel: 'over budget', count: () => { const t = lastAnalyticsData?.sessionTokenTotals; return t ? { n: t.filter((s) => s.totalEstTokens > 0).length, fail: t.filter((s) => s.tokenBudget && s.totalEstTokens > s.tokenBudget).length, title: 'sessions with recorded token use' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.sessionTokenTotals ?? []) },
   savingsSection: { group: 'global', wide: true, label: 'Savings', autoEmpty: true, count: () => { const s = lastSavingsReport?.savings; return s?.ledgers ? { n: s.ledgers.filter((l) => l.countedInTotal).length, text: `~${fmtK(s.byKind?.storage?.estTokensSaved ?? 0)} tok-eq.`, title: 'savings mechanisms counted in the totals (disk bytes avoided, not tokens a caller avoided)' } : null; }, refresh: () => refreshSavings(true), exportRows: () => (lastSavingsReport?.savings?.ledgers ?? []).map((l) => ({ mechanism: l.label, kind: l.kind, counted: l.countedInTotal, bytesSaved: l.bytesSaved, estTokensEquivalent: l.estTokensSaved, reductionPct: l.reductionPct, refsTotal: l.refs?.total ?? null, refsStored: l.refs?.unique ?? null })) },
   repairSection: { group: 'global', label: 'Self-repair', count: () => (lastRepairConfig ? { n: lastRepairConfig.enabled ? 1 : 0, title: lastRepairConfig.enabled ? 'self-repair loop is ENABLED' : 'self-repair loop is disabled' } : null), refresh: () => refreshRepairStatus(), exportRows: () => lastRepairConfig?.history ?? null },
@@ -4548,6 +4914,13 @@ const PANELS = {
   repairFunnelSection: { group: 'global', label: 'Self-repair funnel', autoEmpty: true, count: () => { const f = lastRepairActivity?.funnel; return f ? { n: f.patchesAttempted, text: `${f.verifiesPassed}/${f.verifiesRun} confirmed`, title: 'patches attempted, across every session' } : null; }, refresh: () => refreshRepairActivity(), exportRows: () => (lastRepairActivity?.funnel ? Object.entries(lastRepairActivity.funnel).map(([stage, count]) => ({ stage, count })) : null) },
   repairLedgerSection: { group: 'global', wide: true, label: 'Self-repair ledger', autoEmpty: true, failLabel: 'refused/failed', count: () => { const r = lastRepairActivity?.rows; return r ? { n: r.length, fail: r.filter((x) => x.ok === false || x.pass === false).length, title: 'fs.patch / repair.verify actions across every session' } : null; }, refresh: () => refreshRepairActivity(), exportRows: () => lastRepairActivity?.rows ?? null },
   repairCausalDiffSection: { group: 'global', label: 'Self-repair causal diff', count: () => null, refresh: () => {}, exportRows: () => null },
+  hostHealthSection: { group: 'global', wide: true, label: 'Host health', failLabel: 'critical', count: () => { if (!lastHost) return null; const lv = Object.values(lastHost.levels); return { n: lastHost.metrics.dirs, fail: lv.filter((l) => l === 'crit').length, text: `${hostMB(lastHost.scratchBytes)}${lastHost.metrics.freeGb !== null ? `, ${lastHost.metrics.freeGb} GB free` : ''}`, title: 'scratch dirs; red badge = metrics at critical level' }; }, refresh: () => refreshHost({ slow: true, fresh: true }), exportRows: () => (lastHost ? Object.entries(lastHost.metrics).map(([metric, value]) => ({ metric, value, level: lastHost.levels[metric] })) : null) },
+  hostTrendSection: { group: 'global', wide: true, label: 'Host trend', autoEmpty: true, count: () => (lastHostTrend ? { n: lastHostTrend.samples.length, title: 'host-resource samples in the last 14 days' } : null), refresh: () => refreshHost({ slow: true }), exportRows: () => lastHostTrend?.samples?.map((s) => ({ at: s.at, dirs: s.dirs, mb: s.mb, stale: s.stale, browsers: s.browsers, orphans: s.orphans, freeGb: s.freeGb })) ?? null },
+  hostDirsSection: { group: 'global', wide: true, label: 'Scratch dirs', autoEmpty: true, failLabel: 'dead owner', count: () => (lastHost ? { n: lastHost.dirs.length, fail: lastHost.dirs.filter((d) => d.stale).length, title: 'scratch dirs on disk; badge = reclaimable' } : null), refresh: () => refreshHost({ fresh: true }), exportRows: () => lastHost?.dirs ?? null },
+  hostOrphansSection: { group: 'global', label: 'Orphan browsers', autoEmpty: true, failLabel: 'orphaned', count: () => (lastHost ? { n: lastHost.orphanBrowsers.length, fail: lastHost.orphanBrowsers.length, title: 'browsers whose parent or scratch owner is dead' } : null), refresh: () => refreshHost({ fresh: true }), exportRows: () => lastHost?.orphanBrowsers ?? null },
+  hostSessionsSection: { group: 'global', label: 'Session scratch cost', autoEmpty: true, failLabel: 'leaking', count: () => (lastHostSessions ? { n: lastHostSessions.length, fail: lastHostSessions.filter((r) => r.leaked > 0).length, title: 'sessions that spawned scratch dirs; badge = sessions that left some behind' } : null), refresh: () => refreshHost({ slow: true }), exportRows: () => lastHostSessions },
+  hostTestRunSection: { group: 'global', label: 'Test runs', autoEmpty: true, failLabel: 'failed', count: () => (lastHostTestRun ? { n: 1, fail: lastHostTestRun.failed ? 1 : 0, title: 'last run-tests.mjs result' } : null), refresh: () => refreshHost({ slow: true }), exportRows: () => (lastHostTestRun ? [lastHostTestRun] : null) },
+  hostFootprintSection: { group: 'global', label: 'Profile footprint', autoEmpty: true, failLabel: 'jumps', count: () => (lastHostFootprint ? { n: lastHostFootprint.length, fail: lastHostFootprint.filter((r) => r.jump).length, title: 'logged profile sizes; badge = size jumps' } : null), refresh: () => refreshHost({ slow: true }), exportRows: () => lastHostFootprint },
   durationSection: { group: 'global', label: 'Duration', autoEmpty: true, count: () => (lastAnalyticsData ? { n: lastAnalyticsData.durationByType?.length ?? 0, title: 'action types with timing data' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.durationByType ?? []) },
   wasteBySessionSection: { group: 'global', label: 'Wasteful sessions', autoEmpty: true, failLabel: 'over 30%', count: () => { const w = lastAnalyticsData?.wasteBySession; return w ? { n: w.length, fail: w.filter((r) => r.wastePct > 0.3).length, title: 'sessions ranked by wasted-call share (5+ calls)' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.wasteBySession ?? []) },
   punchcardSection: { group: 'global', label: 'Punchcard', autoEmpty: true, count: () => (lastAnalyticsData ? { n: (lastAnalyticsData.activityPunchcard ?? []).flat().reduce((s, v) => s + v, 0), title: 'sessions started' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => (a.activityPunchcard ?? []).flatMap((hours, day) => hours.map((count, hour) => ({ day: PUNCHCARD_DAY_LABELS[day], hour, count })).filter((r) => r.count))) },
@@ -4663,7 +5036,7 @@ function panelTickSig(id, sig) {
   return panelTick(id, changed);
 }
 function panelTickAnalytics(a) {
-  const slices = { allSessionsHero: [a.totals, a.failureRateByType], heatmapSection: a.heatmap, selectorsSection: a.topFailedSelectors, burnSection: a.sessionTokenTotals, durationSection: a.durationByType, wasteBySessionSection: a.wasteBySession, punchcardSection: a.activityPunchcard };
+  const slices = { allSessionsHero: [a.totals, a.failureRateByType], heatmapSection: a.heatmap, selectorsSection: a.selectorFriction, burnSection: a.sessionTokenTotals, durationSection: a.durationByType, wasteBySessionSection: a.wasteBySession, punchcardSection: a.activityPunchcard };
   for (const [id, slice] of Object.entries(slices)) panelTickSig(id, JSON.stringify(slice ?? null));
 }
 

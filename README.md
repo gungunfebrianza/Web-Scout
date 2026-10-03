@@ -163,7 +163,7 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   `knownIssueMatches` from an optional, untracked `known-issues.json` you maintain per
   checkout (`known-issues.example.json` is the template; see CONTRIBUTING.md), and
   `knownFriction` - the same ranked `topFrictionItems` digest `analytics` returns, so a
-  pass can front-load the riskiest known-bad selectors/types before it starts. Never
+  pass can front-load the riskiest known-bad selectors/types before it starts; `--plan '<json>'` checks the steps you are about to run against the same friction facts (`planRisk`). Never
   requires an active session
 - Friction analytics is not just something you go read - it reaches an agent live, at the
   moment it matters: a failed command whose error matches `known-issues.json` gets a
@@ -172,6 +172,23 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   it fails again; a session whose own recent action types match a recorded-but-never-run
   macro gets an `x-webscout-macro-match` nudge (recording a macro mid-session makes it
   immediately nudge-eligible for that same still-active session, not only future ones);
+  (round 2 of this system - see roadmap V40 - made the warning history origin-scoped, success-aware,
+  selector-normalized and live: this session's own failures count at once, it is said once and
+  escalates when ignored, and `friction resolve <type> <selector>` declares a selector fixed so
+  its old history stops counting; failed replies carry the error class and what worked before;
+  `analytics` drafts known-issue candidates and weights ranking by time wasted;
+  round 3 - roadmap V41 - made it one coherent system: one selector list for the warning and the
+  dashboard, history read on demand instead of frozen at session start, stores and macro steps
+  covered, `friction explain <type> <selector>` to see why it did or did not warn,
+  `friction config` for the thresholds in effect, `known-issues promote <candidateId>` to turn a draft
+  into a registry entry, and a "mark fixed?" suggestion at `session end`;
+  round 4 - roadmap V42 - closed the remaining seams: page-level commands (reload, settle, screenshot)
+  are targets keyed by origin, `crv preflight --plan` checks a plan before it runs, `session end
+  --apply-suggestions` applies the "mark fixed?" list, a candidate arrives with a suggested remediation,
+  `friction resolve` also takes `type <command>`, `macro <id>` and `verity <label>`, targets that fail with
+  one message are grouped as a single cause (`frictionClusters`), failures in strict-CRV sessions weigh more,
+  and `--try-recovery` retries a failed click/fill/wait once on the selector that reliably worked after it;)
+  `friction unresolve <type> <selector>` undoes it and `friction list` shows every declaration)
   and `session end` reports `emergentFriction` - a type/selector failing for the first
   time ever, flagged before it has accumulated enough history to rank in the global
   `topFrictionItems` digest. A saved/exported session report (`GET /sessions/:id/report`)
@@ -311,6 +328,21 @@ relay status                  # works even when the relay is down; reports pid, 
 relay restart                 # stop + start (also: relay start, relay stop). Replaces `pkill` -
                                # which silently does nothing against a Windows-native node process
 ```
+**Scratch dirs / browsers**: headless profiles live in `%TEMP%` with an owner marker and are
+removed (browser process tree killed first) on exit, error, Ctrl+C and SIGTERM. `scratch cleanup
+[--dry-run] [--include-wl] [--confirm]` (and `scratch status`) reclaims what a hard kill (or a closed `crv launch` browser) left behind
+and prints dirs and MB freed; it also runs before every browser launch.
+The dashboard makes the same leak visible early: **Host health** (dirs, MB, reclaimable, live/orphan
+browsers, free disk, colour-coded), **Host trend**, **Scratch dirs** (owner pid alive/dead, per-row Clean),
+**Orphan browsers** (kill; only browsers naming a web-scout profile dir), **Session scratch cost**,
+**Test runs** (last `node run-tests.mjs`) and **Profile footprint** (`WEBSCOUT_SCRATCH_LOG=1`). Cleanup is
+always a dry-run preview first; deleting more than 200 dirs needs an explicit confirm. Backed by
+`GET /host/{health,trend,sessions,footprint,test-run}` and `POST /host/{cleanup,kill-orphans}`.
+`/analytics` carries a `host` block and `topFrictionItems` (hence `crv preflight`'s `knownFriction`) gains
+orphan-browser / scratch-leak / low-disk items; `crv preflight` also returns `host` (free disk, scratch
+dirs, orphans, `warnings[]`), and a browser launch warns on stderr when the disk is low
+(`WEBSCOUT_MIN_FREE_GB`, default 10). `WEBSCOUT_NO_HOST_SCAN=1` turns the background scan off.
+
 Every reply also warns once on stderr when the relay is running code older
 than what is on disk, so a green run can't quietly be validating stale code.
 
@@ -327,6 +359,7 @@ session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b
                                # --no-briefing skips the warm-start briefing in the reply
 session end [id]              # defaults to the active session; nudges "macro record" if the
                                # session logged 5+ replayable actions and never saved one
+                               # --apply-suggestions marks the "probably fixed" friction targets fixed
 session current
 session list
 session show <id>             # everything for one session

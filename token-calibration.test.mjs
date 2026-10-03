@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,7 +18,7 @@ const KINDS = { json: { ratio: 3, low: 2.5, high: 3.4 }, html: { ratio: 2.9, low
 const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString();
 
 function withCalibration(json, fn) {
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-cal-status-')), 'cal.json');
+  const file = path.join(tmpDir('webscout-cal-status-'), 'cal.json');
   if (json !== null) fs.writeFileSync(file, JSON.stringify(json));
   try { return fn(file); } finally { fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
 }
@@ -69,11 +70,11 @@ test('calibrate-tokens.mjs --check is offline and exits 0 only for a complete, f
   assert.equal(check({ model: 'm', sampledAt: daysAgo(400), kinds: KINDS }).status, 1);
 });
 
-// Opt-in: the committed calibration must be complete and fresh. This repository has not been
-// measured yet (it needs an API key), so the test skips with that reason until it has.
+// Opt-in: the committed calibration must be complete and fresh. This repository's is partial
+// (it needs an API key for the rest), so the test skips with that reason until it is complete.
 const requireCalibration = process.env.WEBSCOUT_REQUIRE_CALIBRATION === '1';
 const committed = fs.existsSync(path.join(dir, 'token-calibration.json'));
-test('the committed token-calibration.json is complete and fresh (CI: WEBSCOUT_REQUIRE_CALIBRATION=1)', { skip: requireCalibration ? false : (committed ? false : 'no committed token-calibration.json yet - run calibrate-tokens.mjs --write with ANTHROPIC_API_KEY, then set WEBSCOUT_REQUIRE_CALIBRATION=1 in CI') }, () => {
+test('the committed token-calibration.json is complete and fresh (CI: WEBSCOUT_REQUIRE_CALIBRATION=1)', { skip: requireCalibration ? false : (committed ? 'opt-in: the committed calibration is partial (json/html measured from transcripts, no text sample); run calibrate-tokens.mjs --write with ANTHROPIC_API_KEY, then set WEBSCOUT_REQUIRE_CALIBRATION=1 in CI' : 'no committed token-calibration.json yet - run calibrate-tokens.mjs --write with ANTHROPIC_API_KEY, then set WEBSCOUT_REQUIRE_CALIBRATION=1 in CI') }, () => {
   const r = spawnClean([path.join(dir, 'calibrate-tokens.mjs'), '--check'], { env: { WEBSCOUT_TOKEN_CALIBRATION: path.join(dir, 'token-calibration.json') } });
   assert.equal(r.status, 0, r.stdout + r.stderr);
 });

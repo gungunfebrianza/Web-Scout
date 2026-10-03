@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,7 +18,7 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 const dump = (n, pad, tag = 'a') => ({ store: `s${tag}`, keyPath: 'id', count: n, rows: Array.from({ length: n }, (_, i) => ({ id: i + 1, owner: `user-${i}`, note: 'n'.repeat(pad) })) });
 const ev = (type, params, result) => ({ t: 0, type, ok: true, params, result });
 
-function tmpAutoDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-rank-auto-')); }
+function tmpAutoDir() { return tmpDir('webscout-rank-auto-'); }
 
 test('a trace whose reads are all distrusted under leanWorst ranks above one that never is', () => {
   const auto = tmpAutoDir();

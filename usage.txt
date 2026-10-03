@@ -9,6 +9,18 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    is OLDER than relay.mjs/db.mjs/ai.mjs/report.mjs/command-
                                    registry.mjs on disk (an edit is invisible until it restarts).
                                    Every command reply also warns once on stderr when that is so.
+  scratch status                  count of web-scout scratch dirs in the temp dir and how many MB are
+                                   reclaimable. Every command also warns on stderr at >=20 stale dirs,
+                                   and "session end" at >=1 (--confirm is needed above 200 dirs).
+  scratch cleanup [--dry-run] [--include-wl] [--min-age-min <n>] [--confirm]
+                                   sweep %TEMP% for webscout-browser-profile-*, webscout-crv-tab-profile-*
+                                   and webscout-net-console-known-issues-* dirs whose owner (pid in the
+                                   .webscout-owner.json marker) is dead - or, with no marker, older than
+                                   24h - after killing any browser whose --user-data-dir is that dir.
+                                   Never follows symlinks/junctions. --dry-run only lists (dirs, MB);
+                                   --include-wl also sweeps wl-browser-/wl-story-/wl-anchor- dirs
+                                   (not created by web-scout). --min-age-min lowers the 24h age at which a
+                                   marker-less (pre-marker) dir counts as stale, e.g. 60. Runs automatically before each launch.
   relay start                     launch the relay detached (log: <tmpdir>/webscout-relay-<port>.log)
   relay stop                      signal the relay's pid (from its pidfile; for a relay started
                                    before pidfiles existed, asks the OS which process LISTENS on the
@@ -124,7 +136,8 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    already wrote it down. No --transcript = every transcript written since the session
                                    started. Re-running is safe. Actions with no matching narration keep an inferred why,
                                    shown in the dashboard as inferred, never as the agent's words.
-  session end [id] [--trace]        end the given session, or the active one if omitted -
+  session end [id] [--trace] [--apply-suggestions]
+                                   end the given session, or the active one if omitted -
                                    prints a one-line token-cost receipt (calls, estTokens, top
                                    offender type; also a --token-budget warning if declared and
                                    exceeded), a savings line (scoped reads and cache hits this
@@ -140,6 +153,9 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    (or, for a selector, fail more than once) - flagged the moment
                                    it happens instead of only after it quietly repeats enough to
                                    rank in "analytics"' own topFrictionItems digest.
+                                   A target that failed 3+ times and has now worked 3+ times in a row
+                                   across 2+ sessions is listed as "mark fixed?"; --apply-suggestions
+                                   declares those fixed right away (undo: friction unresolve).
                                    --trace also exports the session (anonymised, same as
                                    "trace.mjs export") into traces/auto/ (gitignored) - grows the
                                    replay benchmark's corpus of real sessions past the four
@@ -387,7 +403,7 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    exactly "idb verify"'s own (see above). If the ACTION itself
                                    fails the whole call fails - no baseline was consumed by a
                                    verify that then couldn't mean anything.
-  crv preflight [--stores a,b,c] [<selector>] [--agent <name>]
+  crv preflight [--stores a,b,c] [<selector>] [--plan '<json>'] [--agent <name>]
                                    one read-only call replacing the four hand-run before a CRV
                                    pass (status + db version-check + dom query + idb list): agent
                                    connectivity/origin/staleness, DB version drift, whether --stores
@@ -399,6 +415,9 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    "analytics" returns (worst failing type/selector, a macro that never
                                    once succeeds, ...) - front-load the riskiest known-bad selectors
                                    into the pass about to run instead of hitting each one live first.
+                                   --plan '[{"type":"dom.click","params":{"selector":"#save"}}]' also checks each
+                                   planned step against the same friction facts the pre-action warning
+                                   uses; result.planRisk lists the steps that would warn (advisory).
                                    Never requires an active session, never mutates anything.
   crv seed <store> <rows-json> [--manifest <path>] [--agent <name>]
                                    "idb put-many", plus records every stored row's real key into a
@@ -767,6 +786,59 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    remediation) folded straight into that command's own error
                                    reply (cli.mjs prints it as "Known issue: ..."), no separate
                                    "analytics" call needed.
+                                   analytics also carries: selectorFriction (the richer per-selector
+                                   view behind the pre-action warn AND the dashboard panel - the one
+                                   selector list: selector-normalized so #row-41 and #row-97 are one entry, dom.click/dom.clickWait merged, per-origin
+                                   failure counts, "unresolved" failures since the last success,
+                                   error classes, wastedMs, what worked right after a failure);
+                                   knownIssueCandidates (the same unmatched error repeating - a DRAFT
+                                   known-issues.json entry to review, never auto-written); and wastedMs
+                                   on every failing type/selector. topFrictionItems severity is
+                                   failures + 1 point per second spent failing + half a point per retry,
+                                   so a 15s-timeout selector outranks ten instant misses.
+
+  friction resolve <type> <selector|store|origin> [--note "..."]
+                                   "mark fixed": analytics and the pre-action warn then count only
+                                   failures AFTER now for that target (normalized, click and
+                                   clickWait are one; for an idb.* type the argument is a STORE;
+                                   for a page-level command - page.reload, page.hardReload, dom.settle,
+                                   dom.screenshot, console.wait, net.wait, react.tree, idb.list - it is
+                                   the ORIGIN, e.g. http://localhost:3000).
+  friction resolve type <command-type>      the same for a whole command type's failure rate
+  friction resolve macro <id>               ... for a macro that never once succeeded
+  friction resolve verity <label>           ... for a verity label still failing
+                                   (each: only runs/imports AFTER now count; unresolve brings it back)
+  friction unresolve <type> <selector|store>    undo it
+  friction list                           every declaration, newest first
+  friction explain <type> <selector|store>  why it does / doesn't warn right now: per-origin history,
+                                   this session's failures, resolutions, recoveries ("worked 4 of 5
+                                   times"), the decision and the thresholds it was judged on
+  friction config                         the thresholds in effect (all WEBSCOUT_* env knobs)
+  known-issues promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm]
+                                   turns an analytics knownIssueCandidates draft into a real
+                                   known-issues.json entry. Needs the remediation (a draft cannot
+                                   know the fix); without --confirm it only prints the entry.
+
+  The pre-action warning (x-webscout-selector-risk) is scoped, not global: history comes from
+  EARLIER sessions via an indexed lookup (nothing frozen at session start) and counts only for the
+  origin the tab is on (older rows with no origin count everywhere); a success after the failures
+  clears them ("unresolved" must reach 3); this session's own failures count immediately (2 warns
+  - no prior history needed); it is said once per target per session (surviving a relay restart)
+  and again only after a NEW failure; at 3 same-session failures it is prefixed ESCALATED. It never
+  blocks, unless the relay runs with WEBSCOUT_RISKY_BLOCK=1: then an ESCALATED target is refused
+  (409) until the call passes --ack-risk (MCP: ackRisk:true in the action's params). --try-recovery (MCP:
+  tryRecovery:true) makes a failed click/fill/wait run ONCE more on the alternative selector that worked
+  after that failure in >= 80% of >= 3 recorded trials; the reply note says which selector actually ran.
+  Tune with
+  WEBSCOUT_RISKY_FAIL_THRESHOLD (3), WEBSCOUT_RISKY_LIVE_FAIL_THRESHOLD (2),
+  WEBSCOUT_RISKY_ESCALATE_FAILS (3), WEBSCOUT_WASTE_MIN_CALLS (5), WEBSCOUT_SPIKE_FACTOR (3).
+  A store is a target too (idb.put/patch fail by store), and so is a page for commands that aim
+  at no element (keyed by origin: a reload that keeps timing out on one site). A macro run checks each step the same way
+  (frictionWarnings on the reply; a failed step carries selectorFriction). A failed /command
+  carries selectorFriction (error class, failures this session / earlier, what worked before) and
+  emergentFriction in its error reply - the CLI prints both. Session end adds a failure-rate SPIKE
+  line for a type that already had history, and "mark fixed?" for a target that failed 3+ times
+  and then succeeded 3+ times in a row across 2+ sessions (resolveSuggestions).
 
   ask [--session <id>] "<question>"   ask the AI backend about the (current, or given) session's
                                        recorded actions/snapshots/diffs - persisted to the session's Q&A log

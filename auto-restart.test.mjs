@@ -5,13 +5,14 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { freePort, spawnClean } from './test-relay.mjs';
 
 const realDir = path.dirname(fileURLToPath(import.meta.url));
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-auto-restart-'));
+const tmp = tmpDir('webscout-auto-restart-');
 const pidPath = path.join(tmp, 'relay.pid');
 process.env.WEBSCOUT_PID_PATH = pidPath;
 const { startRelay, stopRelay, readRelayEvents, RELAY_SOURCE_FILES } = await import('./relay-control.mjs');
@@ -42,7 +43,7 @@ before(async () => {
   // WEBSCOUT_TOKEN_CALIBRATION keeps any write inside `tmp`, WEBSCOUT_TRANSCRIPT_HOME points
   // discoverTranscripts at an empty dir so it finds nothing and returns immediately instead of
   // scanning this machine's real Claude Code history.
-  env = { WEBSCOUT_PORT: String(port), WEBSCOUT_DB_PATH: path.join(tmp, 'test.db'), WEBSCOUT_PID_PATH: pidPath, WEBSCOUT_NO_AUTOOPEN: '1', WEBSCOUT_TOKEN_CALIBRATION: path.join(tmp, 'token-calibration.json'), WEBSCOUT_TRANSCRIPT_HOME: tmp };
+  env = { WEBSCOUT_PORT: String(port), WEBSCOUT_DB_PATH: path.join(tmp, 'test.db'), WEBSCOUT_PID_PATH: pidPath, WEBSCOUT_NO_AUTOOPEN: '1', WEBSCOUT_RELAY_LOG: path.join(tmp, 'relay.log'), WEBSCOUT_TOKEN_CALIBRATION: path.join(tmp, 'token-calibration.json'), WEBSCOUT_TRANSCRIPT_HOME: tmp };
   const started = await startRelay({ port, script: path.join(tmp, 'relay.mjs'), logPath: path.join(tmp, 'relay.log'), env });
   assert.equal(started.started, true, JSON.stringify(started));
 });

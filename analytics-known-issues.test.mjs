@@ -2,7 +2,7 @@
 // operator-maintained known-issues.json registry (see relay.mjs's "Known-issues registry"
 // section) previously only matched against live boot-console-errors during "crv preflight";
 // this checks it now also matches against failed actions' own error text, annotating
-// failureRateByType/topFailedSelectors/topFrictionItems with the already-diagnosed remediation
+// failureRateByType/selectorFriction/topFrictionItems with the already-diagnosed remediation
 // instead of a known bug looking identical to a brand-new mystery. Real relay, real fake-agent
 // tab, no browser. Each test gets its own relay + its own known-issues.json (a temp file, never
 // the real per-checkout registry) so tests never share state.
@@ -10,12 +10,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { startTestRelay, connectFakeAgent } from './test-relay.mjs';
 
 async function withRelay(issues, fn) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-known-issues-analytics-'));
+  const dir = tmpDir('webscout-known-issues-analytics-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify(issues));
   const relay = await startTestRelay({ env: { WEBSCOUT_KNOWN_ISSUES: registryPath } });
@@ -39,7 +40,7 @@ async function withRelay(issues, fn) {
   }
 }
 
-test('a failed action matching a known-issues signature carries knownIssues in failureRateByType, topFailedSelectors and topFrictionItems', async () => {
+test('a failed action matching a known-issues signature carries knownIssues in failureRateByType, selectorFriction and topFrictionItems', async () => {
   await withRelay([{ id: 'flaky-broken-el', signature: 'detached from DOM', description: 'stale DOM reference after a rerender', remediation: 'use dom.click-wait instead of a bare click' }], async ({ api }) => {
     const id = (await api('POST', '/sessions', { goal: 'known-issue test', context: 'analytics-known-issues.test.mjs', briefing: false })).id;
     for (let i = 0; i < 2; i += 1) {
@@ -53,8 +54,8 @@ test('a failed action matching a known-issues signature carries knownIssues in f
     assert.equal(t.knownIssues?.[0]?.id, 'flaky-broken-el');
     assert.equal(t.knownIssues[0].remediation, 'use dom.click-wait instead of a bare click');
 
-    const s = a.topFailedSelectors.find((x) => x.selector === '#broken');
-    assert.ok(s, '#broken should appear in topFailedSelectors');
+    const s = a.selectorFriction.find((x) => x.selector === '#broken');
+    assert.ok(s, '#broken should appear in selectorFriction');
     assert.equal(s.knownIssues?.[0]?.id, 'flaky-broken-el');
 
     assert.match(a.topFrictionItems[0].summary, /known issue: flaky-broken-el/);
@@ -73,7 +74,7 @@ test('a failure that matches no known-issue signature carries no knownIssues fie
     const a = await api('GET', '/analytics');
     const t = a.failureRateByType.find((x) => x.type === 'dom.click');
     assert.equal(t.knownIssues, undefined);
-    const s = a.topFailedSelectors.find((x) => x.selector === '#broken');
+    const s = a.selectorFriction.find((x) => x.selector === '#broken');
     assert.equal(s.knownIssues, undefined);
   });
 });

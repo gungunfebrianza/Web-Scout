@@ -32,10 +32,25 @@ export const CLI_SPEC = [
   { cmd: 'dashboard', pos: [0, 0], mcp: 'webscout_meta.dashboard_url' },
   { cmd: 'analytics', pos: [0, 0], mcp: 'webscout_meta.analytics' },
   { cmd: 'search', pos: [1, Infinity], mcp: 'webscout_meta.search' },
+  { cmd: 'friction resolve', pos: [2, 2], val: ['--note'], mcp: 'webscout_meta.friction', params: { '--note': 'note' } },
+  { cmd: 'friction unresolve', pos: [2, 2], mcp: 'webscout_meta.friction' },
+  { cmd: 'friction explain', pos: [2, 2], mcp: 'webscout_meta.friction' },
+  { cmd: 'friction list', pos: [0, 0], mcp: 'webscout_meta.friction' },
+  { cmd: 'friction config', pos: [0, 0], mcp: 'webscout_meta.friction' },
+  {
+    cmd: 'known-issues promote', pos: [1, 1], bool: ['--confirm'], val: ['--remediation', '--description', '--signature'], mcp: 'webscout_meta.friction',
+    params: { '--confirm': 'confirm', '--remediation': 'remediation', '--description': 'description' },
+    cliOnly: { '--signature': 'rarely needed - the draft already carries the stable literal prefix; an MCP caller can edit known-issues.json directly for a custom matcher' },
+  },
   { cmd: 'token-report', pos: [0, 0], val: ['--session'], mcp: 'webscout_meta.token_report', params: { '--session': 'sessionId' } },
   { cmd: 'ask', pos: [1, Infinity], val: ['--session', '--agent'], mcp: 'webscout_session.ask', params: { '--session': 'sessionId' } },
   { cmd: 'db version-check', pos: [0, 0], val: ['--agent'], mcp: 'webscout_meta.db_version_check' },
 
+  {
+    cmd: 'scratch cleanup', pos: [0, 0], bool: ['--dry-run', '--include-wl', '--confirm'], val: ['--min-age-min'], mcp: null,
+    mcpExempt: 'deletes temp dirs and kills browser processes on the local machine - host housekeeping, not something an MCP tool call should trigger',
+  },
+  { cmd: 'scratch status', pos: [0, 0], mcp: null, mcpExempt: 'host disk housekeeping report - not an MCP capability' },
   { cmd: 'relay start', pos: [0, 0], mcp: null, mcpExempt: NOMCP_PROCESS },
   { cmd: 'relay stop', pos: [0, 0], mcp: null, mcpExempt: NOMCP_PROCESS },
   { cmd: 'relay restart', pos: [0, 0], mcp: null, mcpExempt: NOMCP_PROCESS },
@@ -47,7 +62,7 @@ export const CLI_SPEC = [
     params: { '--strict-crv': 'strictCrv', '--stores': 'strictCrvStores', '--tags': 'tags', '--token-budget': 'tokenBudget', '--if-stale-min': 'ifStaleMin', '--no-briefing': 'noBriefing', '--lean': 'lean', '--crv-compact': 'crvCompact', '--allow-remote': 'allowRemote' },
     cliOnly: { '--auto-snapshot': 'convenience wrapper - an MCP caller takes an explicit webscout_idb snapshot action' },
   },
-  { cmd: 'session end', pos: [0, 1], bool: ['--trace'], mcp: 'webscout_session.end', params: { '--trace': 'trace' } },
+  { cmd: 'session end', pos: [0, 1], bool: ['--trace', '--apply-suggestions'], mcp: 'webscout_session.end', params: { '--trace': 'trace', '--apply-suggestions': 'applySuggestions' } },
   { cmd: 'session current', pos: [0, 0], mcp: 'webscout_session.current' },
   { cmd: 'session list', pos: [0, 0], mcp: 'webscout_session.list' },
   { cmd: 'session show', pos: [1, 1], mcp: 'webscout_session.show' },
@@ -114,8 +129,8 @@ export const CLI_SPEC = [
     // selector - CLI convention (domSelector, same as every dom.* command);
     // MCP takes it as the named param `selector` instead (no flag/param
     // mapping needed for a bare positional).
-    cmd: 'crv preflight', pos: [0, 1], val: ['--stores', '--agent'], mcp: 'webscout_idb.crv_preflight',
-    params: { '--stores': 'stores' },
+    cmd: 'crv preflight', pos: [0, 1], val: ['--stores', '--agent', '--plan'], mcp: 'webscout_idb.crv_preflight',
+    params: { '--stores': 'stores', '--plan': 'plan' },
   },
   {
     cmd: 'crv seed', pos: [2, 2], val: ['--manifest', '--agent'], mcp: 'webscout_idb.crv_seed',
@@ -185,8 +200,10 @@ export const CLI_SPEC = [
   { cmd: 'repair causal-diff', pos: [2, 2], mcp: 'webscout_repair.causal_diff' },
 ];
 
-// Output formatting, accepted by every command and never sent to the relay.
-export const UNIVERSAL_BOOL = new Set(['--pretty']);
+// Output formatting (--pretty), accepted by every command and never sent to the relay; and
+// --ack-risk, which acknowledges an escalated selector-risk warning on a relay running with
+// WEBSCOUT_RISKY_BLOCK=1 (sent as a request-level flag, never as a page param).
+export const UNIVERSAL_BOOL = new Set(['--pretty', '--ack-risk', '--try-recovery']);
 
 const BY_CMD = new Map(CLI_SPEC.map((s) => [s.cmd, s]));
 

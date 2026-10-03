@@ -11,6 +11,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -61,7 +62,7 @@ export async function startTestRelay({ script = path.join(__dirname, 'relay.mjs'
     return { port, env: { WEBSCOUT_PORT: String(port) }, stop: async () => {}, live: true };
   }
   if (!reaped) { reaped = true; reapLeakedRelays(); }
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-test-'));
+  const dir = tmpDir('webscout-test-');
   const port = await freePort();
   const env = {
     WEBSCOUT_PORT: String(port),
@@ -78,6 +79,8 @@ export async function startTestRelay({ script = path.join(__dirname, 'relay.mjs'
     // anyway, defense in depth against whatever this test process's OWN env happens to carry.
     WEBSCOUT_TOKEN_CALIBRATION: path.join(dir, 'token-calibration.json'),
     WEBSCOUT_AUTO_CALIBRATE: '',
+    // A test relay must not spawn process scans or write host-trend samples about the machine it runs on.
+    WEBSCOUT_NO_HOST_SCAN: '1',
     ...envOverride,
   };
   const child = spawn(process.execPath, [script], { cwd: path.dirname(script), env: { ...process.env, ...env }, stdio: 'ignore', windowsHide: true });

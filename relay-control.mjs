@@ -19,7 +19,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Files the relay process loads once at boot. An edit to any of them is
 // invisible to a running relay until it restarts.
-export const RELAY_SOURCE_FILES = ['relay.mjs', 'db.mjs', 'ai.mjs', 'report.mjs', 'command-registry.mjs', 'build-id.mjs', 'relay-control.mjs', 'read-pipeline.mjs', 'read-shape.mjs', 'token-estimate.mjs', 'crv-verify.mjs', 'session-viz.mjs', 'intent-import.mjs', 'trace.mjs', 'transcript-tokens.mjs'];
+export const RELAY_SOURCE_FILES = ['relay.mjs', 'db.mjs', 'ai.mjs', 'report.mjs', 'command-registry.mjs', 'build-id.mjs', 'relay-control.mjs', 'read-pipeline.mjs', 'read-shape.mjs', 'token-estimate.mjs', 'crv-verify.mjs', 'session-viz.mjs', 'intent-import.mjs', 'trace.mjs', 'transcript-tokens.mjs', 'friction.mjs', 'self-repair.mjs', 'host-health.mjs', 'scratch.mjs'];
 
 export function pidfilePath(port) {
   return process.env.WEBSCOUT_PID_PATH || path.join(os.tmpdir(), `webscout-relay-${port}.pid`);
@@ -159,7 +159,7 @@ export async function stopRelay({ port, host = '127.0.0.1' }) {
 export async function startRelay({ port, host = '127.0.0.1', env = {}, logPath, script = path.join(__dirname, 'relay.mjs') }) {
   const base = `http://${host}:${port}`;
   if (await healthOk(base)) return { started: false, reason: `a relay is already answering on ${base}`, pid: resolveRelayPid(port)?.pid };
-  const log = logPath || path.join(os.tmpdir(), `webscout-relay-${port}.log`);
+  const log = logPath || process.env.WEBSCOUT_RELAY_LOG || path.join(os.tmpdir(), `webscout-relay-${port}.log`);
   const fd = fs.openSync(log, 'a');
   const child = spawn(process.execPath, [script], {
     cwd: path.dirname(script),

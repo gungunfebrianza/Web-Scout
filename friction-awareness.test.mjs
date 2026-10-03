@@ -1,6 +1,6 @@
 // "friction analytics awareness" round: analytics used to be something an agent had to
 // separately go read ("analytics" / GET /analytics) - these five pieces put the SAME data
-// (topFailedSelectors, macrosNeverRun, known-issues.json, topFrictionItems) in front of the
+// (selectorFriction, macrosNeverRun, known-issues.json, topFrictionItems) in front of the
 // agent at the moment it matters, instead of only on request:
 //   1. A failed /command's OWN error carries a matched known-issues.json remediation inline
 //      (relay.mjs's matchKnownIssueForError, wired into dispatchTracked's catch).
@@ -12,14 +12,15 @@
 //      before it has accumulated enough history to rank in the global digest.
 //   5. "crv preflight" carries knownFriction (the same topFrictionItems digest) so a pass can
 //      front-load the riskiest known-bad selectors/types before starting.
-// #2 and #3 are read from a per-session snapshot frozen at session start (see
-// buildSessionFrictionSnapshot's own comment) specifically so they never touch - and never
-// poison - the shared 5s analytics cache other callers (GET /analytics) rely on being fresh.
+// #2 reads the indexed per-target history and #3 the macro candidates on demand (macroCandidates()),
+// each through its own short-lived path, so neither poisons the shared analytics cache other
+// callers (GET /analytics) rely on being fresh.
 // Real relay, real fake-agent tab, no browser. Each test gets its own relay.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { startTestRelay, connectFakeAgent } from './test-relay.mjs';
@@ -46,7 +47,7 @@ async function withRelay(fn, { handlers = {}, envOverride = {} } = {}) {
 }
 
 test('a failed /command carries a matched known-issues.json remediation inline (no separate analytics call needed)', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-'));
+  const dir = tmpDir('webscout-friction-awareness-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify([{ id: 'flaky-broken-el', signature: 'detached from DOM', description: 'stale DOM reference after a rerender', remediation: 'use dom.click-wait instead of a bare click' }]));
   await withRelay(async ({ apiRaw }) => {
@@ -144,7 +145,7 @@ test('session end reports no emergentFriction for a clean session', async () => 
 });
 
 test('a session report carries the same known-issues.json match a live failure already showed, not just a bare error string', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-report-'));
+  const dir = tmpDir('webscout-friction-awareness-report-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify([{ id: 'report-flaky-el', signature: 'detached from DOM', description: 'stale DOM reference', remediation: 'use dom.click-wait instead' }]));
   await withRelay(async ({ apiRaw, api }) => {
@@ -175,7 +176,7 @@ test('a macro recorded mid-session is immediately nudge-eligible for that same s
     assert.equal(macro.steps.length, 2);
 
     // SAME still-active session, one more action of the matching type - previously impossible
-    // to nudge for at all (sessionFrictionSnapshot froze before this macro existed), so this
+    // to nudge for at all (the old per-session snapshot froze before this macro existed), so this
     // session would never have been nudged for its own just-recorded macro. The macro's own
     // two recording actions already count as the tail of the match (maybeMacroMatchNudge reads
     // the session's whole action history, not only actions after the macro existed), so the
@@ -188,7 +189,7 @@ test('a macro recorded mid-session is immediately nudge-eligible for that same s
 });
 
 test('a malformed known-issues.json is reported as a check error, not silently treated as "no match"', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-badregistry-'));
+  const dir = tmpDir('webscout-friction-awareness-badregistry-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, '{ not valid json');
   await withRelay(async ({ apiRaw }) => {

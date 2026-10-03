@@ -7,6 +7,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,7 +30,7 @@ const api = async (method, route, body) => {
 const command = (type, params) => api('POST', '/command', { type, params });
 
 before(async () => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-viz-'));
+  tmp = tmpDir('ws-viz-');
   relay = await startTestRelay();
   const rows = [{ id: 1 }];
   tab = await connectFakeAgent(relay.port, {

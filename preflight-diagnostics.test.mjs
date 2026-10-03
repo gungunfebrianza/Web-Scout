@@ -9,6 +9,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +17,7 @@ import { startTestRelay, connectFakeAgent, spawnAsync } from './test-relay.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 // The relay reads this path on every preflight - a temp file, never the real per-checkout registry.
-const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-known-issues-'));
+const registryDir = tmpDir('webscout-known-issues-');
 const registryPath = path.join(registryDir, 'known-issues.json');
 const relay = await startTestRelay({ env: { WEBSCOUT_KNOWN_ISSUES: registryPath } });
 const BASE = `http://127.0.0.1:${relay.port}`;

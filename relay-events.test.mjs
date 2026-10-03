@@ -6,6 +6,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +14,7 @@ import { freePort, isUp } from './test-relay.mjs';
 import { stopRelay, recordRelayEvent, readRelayEvents, summarizeRelayEvents, eventsPath } from './relay-control.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-events-'));
+const tmp = tmpDir('webscout-events-');
 const port = await freePort();
 process.env.WEBSCOUT_PID_PATH = path.join(tmp, 'relay.pid'); // this process reads the same event log the relay writes
 const env = { ...process.env, WEBSCOUT_PORT: String(port), WEBSCOUT_DB_PATH: path.join(tmp, 'test.db'), WEBSCOUT_NO_AUTOOPEN: '1', WEBSCOUT_TOKEN_CALIBRATION: path.join(tmp, 'token-calibration.json') };

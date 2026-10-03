@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpDir } from './scratch.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -165,7 +166,7 @@ test('a fit that lands outside plausible chars/token bounds is rejected, not rep
 });
 
 test('readTranscripts aggregates several files and reports a read error without throwing', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-transcripts-'));
+  const tmp = tmpDir('webscout-transcripts-');
   try {
     const ratio = 3;
     let prompt = 1000;
@@ -189,7 +190,7 @@ test('readTranscripts aggregates several files and reports a read error without 
 });
 
 test('CLI: --write stores a token-calibration.json labelled method "transcripts", which token-estimate.mjs then reports as its source', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-transcripts-cli-'));
+  const tmp = tmpDir('webscout-transcripts-cli-');
   try {
     const ratio = 2.8;
     let prompt = 2000;
@@ -229,7 +230,7 @@ test('CLI: --write stores a token-calibration.json labelled method "transcripts"
 });
 
 test('CLI: no transcripts found (nothing to discover) exits 1 with a clear reason, not a crash', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-transcripts-empty-'));
+  const tmp = tmpDir('webscout-transcripts-empty-');
   try {
     const r = spawnClean([path.join(dir, 'transcript-tokens.mjs'), '--home', tmp]);
     assert.equal(r.status, 1);

@@ -51,6 +51,8 @@ import { discoverTranscripts, readTranscriptFile, importIntents } from './intent
 import { exportTrace, writeTrace } from './trace.mjs';
 import { autoCalibrateIfMissing } from './transcript-tokens.mjs';
 import * as repairApi from './self-repair.mjs';
+import * as hostHealth from './host-health.mjs';
+import * as friction from './friction.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
@@ -315,6 +317,7 @@ function getStaleSourceFiles() {
 // on an abrupt disconnect) - no need for a matching req-side listener too.
 
 function broadcastUpdate(kind, sessionId, extra = {}) {
+  if (kind === 'macro' || kind === 'analytics') macroCandidateCache = null; // the nudge's candidates read through this cache
   const payload = `event: update\ndata: ${JSON.stringify({ kind, sessionId, ...extra })}\n\n`;
   for (const res of sseClients) {
     try {
@@ -690,14 +693,18 @@ async function withLoggedAction(sessionId, type, params, fn, agentName = DEFAULT
   // was confirmed friction in a real verification pass. The dashboard clears
   // this the moment the matching 'action' event (full refresh) arrives.
   broadcastUpdate('action_start', sessionId, { type, agentName, startedAt });
+  const origin = agents.get(agentName)?.origin ?? null;
+  ensureFrictionSession(sessionId); // before the first note() below, so a restarted relay's counters are rebuilt, not seeded from one row
   try {
     const result = await fn();
     const endedAt = new Date().toISOString();
-    const actionId = dbApi.logAction({ sessionId, type, params, result, ok: true, error: null, startedAt, endedAt, agentName });
+    const actionId = dbApi.logAction({ sessionId, type, params, result, ok: true, error: null, startedAt, endedAt, agentName, origin });
+    frictionTracker.note(sessionId, { type, params, origin, ok: true, durationMs: Date.parse(endedAt) - Date.parse(startedAt), at: startedAt });
     return { result, actionId };
   } catch (err) {
     const endedAt = new Date().toISOString();
-    dbApi.logAction({ sessionId, type, params, result: null, ok: false, error: err.message, startedAt, endedAt, agentName });
+    dbApi.logAction({ sessionId, type, params, result: null, ok: false, error: err.message, startedAt, endedAt, agentName, origin, errorClass: friction.classifyError(err.message) });
+    frictionTracker.note(sessionId, { type, params, origin, ok: false, error: err.message, durationMs: Date.parse(endedAt) - Date.parse(startedAt), at: startedAt });
     throw err;
   }
 }
@@ -761,6 +768,16 @@ async function dispatchTracked(session, type, params, agentName, dispatchTimeout
     const { match: known, checkError: knownIssuesCheckError } = matchKnownIssueForError(err.message);
     if (known) err.extra = { ...err.extra, knownIssue: known };
     else if (knownIssuesCheckError) err.extra = { ...err.extra, knownIssuesCheckError };
+    // The failure's own reply carries what friction awareness knows (class, repeat count, what
+    // worked last time) - a header on the pre-action reply is easy to miss, and an error body is
+    // where a caller already looks. Best-effort: never masks the original error.
+    try {
+      const facts = frictionFactsFor(session.id, type, params ?? {}, agentName);
+      if (facts?.context) err.extra = { ...err.extra, selectorFriction: facts.context };
+      // Live emergent detection: don't wait for "session end" to say a pattern is new.
+      const emergentNow = liveEmergentFriction(session.id, type, facts);
+      if (emergentNow.length) err.extra = { ...err.extra, emergentFriction: emergentNow };
+    } catch { /* best-effort */ }
     if (AUTO_SCREENSHOT_ON_FAILURE_TYPES.has(type) && params?.selector) {
       // Logged as its own action EITHER way (success or failure) - a
       // silent swallow on failure would hide exactly the case confirmed
@@ -823,7 +840,7 @@ function maybeCacheAwarenessNudge(sessionId, res) {
   } catch { /* best-effort - never block a command reply on this */ }
 }
 
-// ---------- Per-session friction snapshot (risky selectors, never-run macros) ----------
+// ---------- Per-session friction snapshot (selector history, failed types, macro candidates) ----------
 //
 // Both nudges below need "what does analytics already know is risky" on EVERY command
 // dispatch - calling the shared getAnalytics() there would be wrong even though it is
@@ -837,61 +854,218 @@ function maybeCacheAwarenessNudge(sessionId, res) {
 // ONCE per session (at session start, from the SAME uncached computeAnalytics() call
 // session start already makes for macroAdoptionNote/frictionNote - no extra recompute) and
 // consulted here as a plain in-memory lookup - never touches the shared analytics cache.
-// Deliberately frozen for the session's own duration (a session doesn't need its own nudges
-// to update mid-flight); cleaned up in dropSessionMemory like every other per-session map.
-const sessionFrictionSnapshot = new Map(); // sessionId -> { riskySelectors: Map<"type::selector", entry>, neverRunMacros: [{id, name, steps}] }
-const RISKY_SELECTOR_FAIL_THRESHOLD = 3;
+// The snapshot is HISTORY only and stays frozen; what happens inside the current session is
+// overlaid from frictionTracker (friction.mjs), which every logged action updates, so a
+// selector that starts failing mid-session is no longer invisible until the next session.
+// Cleaned up in dropSessionMemory like every other per-session map.
+// Macro nudge candidates are read on demand (see macroCandidates()), never frozen per session.
+const frictionTracker = friction.createFrictionTracker({
+  // The "already said" state outlives a relay restart (the counters are rebuilt from the action log).
+  persist: {
+    warn: (sessionId, key, atLive, count) => { try { dbApi.saveFrictionWarn(sessionId, key, atLive, count); } catch { /* best-effort */ } },
+    announce: (sessionId, kind, key) => { try { dbApi.saveFrictionAnnounce(sessionId, kind, key); } catch { /* best-effort */ } },
+  },
+});
+const frictionHydrated = new Set(); // sessionIds whose live counters were checked against the DB this process
+const RISKY_SELECTOR_BLOCK = process.env.WEBSCOUT_RISKY_BLOCK === '1';
 
-function buildSessionFrictionSnapshot(sessionId, analytics) {
-  const riskySelectors = new Map();
-  for (const s of analytics.topFailedSelectors) {
-    if (s.failCount >= RISKY_SELECTOR_FAIL_THRESHOLD) riskySelectors.set(`${s.type}::${s.selector}`, s);
-  }
-  const neverRunIds = new Set(analytics.macrosNeverRun.map((m) => m.id));
-  let neverRunMacros = [];
+// A relay restarted under a live session has an empty tracker: without this the session's own
+// failures were forgotten and the warning started again from nothing. Rebuilds the counters from
+// the session's logged actions, once per session per process, before anything reads or writes them.
+function ensureFrictionSession(sessionId) {
+  if (frictionHydrated.has(sessionId)) return;
+  frictionHydrated.add(sessionId);
+  if (frictionTracker.has(sessionId)) return;
   try {
-    neverRunMacros = dbApi.listMacros().filter((m) => neverRunIds.has(m.id) && Array.isArray(m.steps) && m.steps.length >= 2);
-  } catch { /* best-effort - an empty list just means no macro-match nudge this session */ }
-  sessionFrictionSnapshot.set(sessionId, { riskySelectors, neverRunMacros });
+    const rows = dbApi.listActions(sessionId, { ascending: true });
+    if (rows.length) frictionTracker.restore(sessionId, rows, dbApi.listFrictionSessionState(sessionId));
+  } catch { /* best-effort - an unreadable log just means a cold start, the old behaviour */ }
+}
+
+// known-issues.json matcher for the history lookups: loaded lazily (only if some failure needs
+// matching) and once per lookup. Any load problem degrades to "no match", never an error.
+function lazyKnownIssueMatcher() {
+  let issues;
+  return (errorText) => {
+    if (!errorText) return [];
+    if (issues === undefined) {
+      try { issues = loadKnownIssues()?.issues ?? []; } catch { issues = []; }
+    }
+    return issues.filter((issue) => issue.matches(errorText)).map(({ id, description, remediation }) => ({ id, description, remediation }));
+  };
+}
+
+// Everything the system knows about ONE action target, from ONE place: the earlier-session
+// history (an indexed lookup on actions.selector_key - nothing is frozen at session start, so a
+// selector that failed once before is seen as exactly that), this session's live counters, the
+// persisted "already said" state and the operator's resolution. The pre-action header, the
+// failure's own error body, the macro runner and `friction explain` all read this object, so they
+// cannot disagree about a selector.
+function frictionFactsFor(sessionId, type, params, agentName, originOverride) {
+  const origin = originOverride ?? agents.get(agentName)?.origin ?? null;
+  const target = friction.frictionTarget(type, params, origin);
+  if (!target) return null;
+  ensureFrictionSession(sessionId);
+  const key = friction.frictionKeyFor(type, params, origin);
+  const resolutions = new Map();
+  const resolution = dbApi.getFrictionResolution(key);
+  if (resolution) resolutions.set(key, resolution.resolved_at);
+  const rows = dbApi.listFrictionKeyHistory(key, { excludeSessionId: sessionId });
+  const entry = friction.buildSelectorFriction(rows, { matchKnownIssues: lazyKnownIssueMatcher(), resolutions, minFails: 1 }).find((e) => e.key === key) ?? null;
+  const live = frictionTracker.get(sessionId, key);
+  const state = frictionTracker.warnState(sessionId, key);
+  const evaluation = friction.evaluateSelectorRisk({ type, selector: target.value, targetKind: target.kind, entry, live, state, origin });
+  const context = friction.failureContext({ type, selector: target.value, targetKind: target.kind, entry, live, origin });
+  return { key, target, entry, live, state, origin, resolution, evaluation, context };
+}
+
+// --try-recovery: after a click/fill/wait fails, run it ONCE more on the alternative selector that has
+// repeatedly been what worked after this exact failure (>= 3 recorded trials, >= 80% of them). Opt-in
+// per call, same-type and same-params apart from the selector, and never for a page script error.
+// Both attempts are logged as ordinary actions (so the evidence trail shows what really ran) and the
+// reply says which selector actually ran. A different element can be the wrong one: that is the
+// reason it is opt-in and why the bar is "worked 4 of 5 times", not "worked once".
+const RECOVERY_RETRY_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'dom.wait']);
+const RECOVERY_MIN_TRIALS = 3;
+const RECOVERY_MIN_RATE = 0.8;
+function recoveryRetryFor(sessionId, type, params, agentName, err) {
+  if (!RECOVERY_RETRY_TYPES.has(type) || typeof params?.selector !== 'string') return null;
+  if (friction.classifyError(err?.message) === 'eval-throw') return null;
+  let facts = null;
+  try { facts = frictionFactsFor(sessionId, type, params, agentName); } catch { return null; }
+  const r = facts?.entry?.recovery;
+  if (!r || r.kind !== 'alt-selector' || !r.selector || r.of < RECOVERY_MIN_TRIALS || r.worked / r.of < RECOVERY_MIN_RATE) return null;
+  if (friction.normalizeSelector(r.selector) === friction.normalizeSelector(params.selector)) return null;
+  const { nth, ...rest } = params; // an index into the ORIGINAL selector's matches means nothing for another one
+  return { params: { ...rest, selector: r.selector }, recovery: r };
+}
+
+// "Which steps of this plan will draw a warning?" - answered BEFORE any of them runs, from the same
+// facts the pre-action header uses (so the two cannot disagree), but ignoring the once-per-session
+// dedupe: a plan check should list every risky step, not only the ones not yet announced. Side-effect
+// free. Judged against the active session if there is one, else history alone.
+function planFrictionReport(plan, agentName) {
+  const sessionId = dbApi.getCurrentSession()?.id ?? -1;
+  const risky = [];
+  let checked = 0;
+  plan.slice(0, 50).forEach((step, index) => {
+    if (!step || typeof step.type !== 'string') return;
+    let facts = null;
+    try { facts = frictionFactsFor(sessionId, step.type, step.params ?? {}, agentName); } catch { /* one unreadable step must not hide the rest */ }
+    if (!facts) return;
+    checked += 1;
+    const { assessment } = friction.evaluateSelectorRisk({ type: step.type, selector: facts.target.value, targetKind: facts.target.kind, entry: facts.entry, live: facts.live, state: null, origin: facts.origin });
+    if (assessment) risky.push({ step: index + 1, type: step.type, target: facts.target, key: facts.key, level: assessment.level, message: assessment.message });
+  });
+  return { checked, risky };
+}
+
+// Macro nudge candidates: every macro that can still plausibly work - never-run ones AND proven ones -
+// minus macros that have run and never once succeeded (nudging toward a known-broken macro would be
+// worse than silence). Run history rides along so the nudge can say how reliable the macro has been.
+// Read on demand from a short-lived cache instead of a per-session snapshot, so a macro recorded,
+// run, or declared fixed in the middle of a session is seen by the very next command. The cache
+// drops on every macro/analytics change (broadcastUpdate) and otherwise after a minute, which bounds
+// how often the analytics scan behind it runs on the command path.
+const MACRO_CANDIDATE_TTL_MS = 60_000;
+let macroCandidateCache = null; // { at, list }
+function macroCandidates() {
+  if (macroCandidateCache && Date.now() - macroCandidateCache.at < MACRO_CANDIDATE_TTL_MS) return macroCandidateCache.list;
+  const list = buildMacroCandidates(getAnalytics());
+  macroCandidateCache = { at: Date.now(), list };
+  return list;
+}
+
+function buildMacroCandidates(analytics) {
+  const neverRunIds = new Set((analytics.macrosNeverRun ?? []).map((m) => m.id));
+  const brokenIds = new Set((analytics.macrosNeverSucceeding ?? []).map((m) => m.id));
+  const runsById = new Map((analytics.macroHealth ?? []).map((m) => [m.id, m.runs]));
+  try {
+    return dbApi.listMacros()
+      .filter((m) => Array.isArray(m.steps) && m.steps.length >= 2 && !brokenIds.has(m.id))
+      .map((m) => ({ ...m, neverRun: neverRunIds.has(m.id), runs: runsById.get(m.id) ?? [] }));
+  } catch {
+    return []; // best-effort - an empty list just means no macro-match nudge
+  }
 }
 
 // ---------- Pre-action risky-selector warn ----------
 //
-// topFailedSelectors already flags a selector that has repeatedly failed across sessions -
-// previously only visible via a separate "analytics" call, so an agent about to click/fill
-// the SAME risky selector again had no signal until AFTER it failed again, the exact same
-// wall. Checked against this session's own frozen snapshot (see above) right before
-// dispatch and surfaced as a response header, same convention as the mid-session macro
-// nudge below - decorates the reply without changing the result shape for a caller that
-// isn't reading headers, and never blocks the dispatch even when it fires.
-function maybeRiskySelectorWarn(sessionId, type, params, res) {
-  const selector = params?.selector;
-  if (!selector || typeof selector !== 'string') return;
+// A selector that has repeatedly failed was previously only visible via a separate "analytics"
+// call, so an agent about to click/fill the SAME risky selector again had no signal until AFTER
+// it failed again, the exact same wall. friction.assessSelectorRisk combines the frozen history
+// (origin-scoped, success-aware, normalized selector) with this session's own live failures and
+// decides whether to say anything: once per selector per session, again only when a NEW failure
+// happened since, and escalated once the warning has been ignored ESCALATE_AFTER_LIVE_FAILS
+// times. Surfaced as a response header, same convention as the mid-session macro nudge below -
+// decorates the reply without changing the result shape for a caller that isn't reading headers.
+// It never blocks the dispatch, with one opt-in exception: WEBSCOUT_RISKY_BLOCK=1 refuses an
+// ESCALATED selector (409) unless the call passes ackRisk:true.
+function maybeRiskySelectorWarn(sessionId, type, params, res, agentName, ackRisk) {
+  let blockMessage = null;
   try {
-    const hit = sessionFrictionSnapshot.get(sessionId)?.riskySelectors.get(`${type}::${selector}`);
-    if (!hit) return;
-    const known = hit.knownIssues?.[0];
-    res.setHeader('x-webscout-selector-risk', `selector "${selector}" (${type}) has failed ${hit.failCount}x before across ${hit.sessionCount} session(s), last at ${hit.lastFailedAt} - consider dom.click-wait or a settle/wait first.${known ? ` known issue: ${known.id}${known.remediation ? ` (${known.remediation})` : ''}` : ''}`);
-  } catch { /* best-effort - never block a command dispatch on this */ }
+    const facts = frictionFactsFor(sessionId, type, params, agentName);
+    if (!facts) return;
+    const { key, target, live } = facts;
+    const assessment = facts.evaluation.assessment;
+    // A block must outlive the warning's own dedupe: the header is said once, but a refused call
+    // retried without ackRisk has to be refused again, not waved through because "it was already told".
+    const stillEscalated = RISKY_SELECTOR_BLOCK && ackRisk !== true && (live?.unresolved ?? 0) >= friction.ESCALATE_AFTER_LIVE_FAILS;
+    if (!assessment) {
+      if (stillEscalated) blockMessage = `${target.kind} "${target.value}" (${type}) has failed ${live.unresolved}x in a row this session without a success - refusing (WEBSCOUT_RISKY_BLOCK=1); pass ackRisk:true to run it anyway.`;
+    } else {
+      frictionTracker.recordWarn(sessionId, key, assessment.liveUnresolved);
+      // Header values must be printable ASCII - an error text with a newline or non-latin1
+      // character would make setHeader throw and silently swallow the whole warning.
+      res.setHeader('x-webscout-selector-risk', assessment.message.replace(/[^\x20-\x7e]/g, '?'));
+      if (assessment.level === 'escalated' && stillEscalated) blockMessage = `${assessment.message} - refusing (WEBSCOUT_RISKY_BLOCK=1); pass ackRisk:true to run it anyway.`;
+    }
+  } catch { /* best-effort - never block a command dispatch on a bookkeeping failure */ }
+  if (blockMessage) throw new HttpError(409, blockMessage);
+}
+
+// Live version of the session-end emergent diff: said once, on the failure itself, instead of
+// only after the session is over. Judged against the frozen snapshot (no analytics recompute on
+// the hot path), so "no history" means "not in the session-start snapshot".
+function liveEmergentFriction(sessionId, type, facts) {
+  const lines = [];
+  if (!dbApi.typeEverFailed(type, sessionId) && frictionTracker.announceOnce(sessionId, 'type', type)) {
+    lines.push(`"${type}" just failed for the first time ever (no earlier session recorded a failure of this type).`);
+  }
+  // Judged against the indexed history of OTHER sessions, so "no history" is exact: a target that
+  // failed once before is not an emerging pattern, and one that never failed is.
+  if (facts && facts.live && facts.live.fails >= 2 && !facts.entry && frictionTracker.announceOnce(sessionId, 'selector', facts.key)) {
+    lines.push(`${facts.target.kind} "${facts.target.value}" (${type}) has now failed ${facts.live.fails}x this session and never failed in an earlier session - an emerging pattern.`);
+  }
+  return lines;
 }
 
 // ---------- Proactive macro-match nudge ----------
 //
-// macrosNeverRun already flags a macro that was recorded but never once replayed - visible
-// only on a separate "analytics" call, well after the moment it could have saved anything.
-// This catches it LIVE: if this session's own last N replayable actions match a never-run
-// macro's own step TYPE sequence (in order), nudge to replay it now instead of continuing
-// to hand-type the exact sequence it already exists to save. Compares action TYPES only,
-// not param values - a selector/value match would be brittle against dynamic ids (a
-// different row key each run is normal), and a false positive here just means an unwanted
-// nudge, never a wrong action. Reads the same frozen per-session snapshot as the warn
-// above (never the shared analytics cache - see its comment). One nudge per macro per
-// session (sessionMacroMatchNudged), same header convention as the mid-session nudge -
-// never folded into a command's own result body.
+// A macro that was recorded but never replayed (or a proven one that simply was not reused) was
+// previously visible only on a separate "analytics" call, well after the moment it could have
+// saved anything. This catches it LIVE: if this session's own last N replayable actions match a
+// candidate macro's step TYPE sequence (in order), nudge to replay it now instead of continuing
+// to hand-type the exact sequence it already exists to save. The match is by action TYPE (a
+// selector/value match alone would be brittle against dynamic ids - a different row key each run
+// is normal), but the nudge says how strong the match was: "same selectors" when every step's
+// selector/store also matches, "params differ" otherwise, plus the macro's own run record, so a
+// flaky macro is offered with its pass rate instead of as a sure thing. A tail that is itself a
+// macro replay is never nudged (it just ran). Reads the same frozen per-session snapshot as the
+// warn above (never the shared analytics cache - see its comment). One nudge per macro per
+// session (sessionMacroMatchNudged), same header convention as the mid-session nudge - never
+// folded into a command's own result body.
 const sessionMacroMatchNudged = new Map(); // sessionId -> Set<macroId> already nudged this session
+const MACRO_PARAM_KEYS = ['selector', 'store'];
+function describeMacroReliability(macro) {
+  if (macro.neverRun) return 'recorded but never run';
+  const passed = macro.runs.filter(Boolean).length;
+  const verdict = macro.runs.length >= 2 && passed / macro.runs.length < 0.5 ? ' - unreliable, check it first' : '';
+  return `${passed}/${macro.runs.length} recent run(s) passed${verdict}`;
+}
 function maybeMacroMatchNudge(sessionId, res) {
   try {
-    const candidates = sessionFrictionSnapshot.get(sessionId)?.neverRunMacros;
+    const candidates = macroCandidates();
     if (!candidates?.length) return;
     const nudged = sessionMacroMatchNudged.get(sessionId) ?? new Set();
     const recent = dbApi.listActions(sessionId, { ascending: true }).filter((a) => a.ok && DEFAULT_MACRO_TYPES.has(a.type));
@@ -899,9 +1073,11 @@ function maybeMacroMatchNudge(sessionId, res) {
       if (nudged.has(macro.id) || recent.length < macro.steps.length) continue;
       const tail = recent.slice(-macro.steps.length);
       if (!macro.steps.every((step, i) => step.type === tail[i].type)) continue;
+      if (tail.some((a) => a.params?.macroId !== undefined)) continue; // that tail IS a macro replay
       nudged.add(macro.id);
       sessionMacroMatchNudged.set(sessionId, nudged);
-      res.setHeader('x-webscout-macro-match', `last ${macro.steps.length} action(s) match macro "${macro.name}" (#${macro.id}), recorded but never run - "macro run ${macro.id}" instead of continuing by hand.`);
+      const sameParams = macro.steps.every((step, i) => MACRO_PARAM_KEYS.every((k) => step.params?.[k] === undefined || step.params[k] === tail[i].params?.[k]));
+      res.setHeader('x-webscout-macro-match', `last ${macro.steps.length} action(s) match macro "${macro.name}" (#${macro.id}; ${sameParams ? 'same selectors/stores' : 'types match, params differ'}; ${describeMacroReliability(macro)}) - "macro run ${macro.id}" instead of continuing by hand.`.replace(/[^\x20-\x7e]/g, '?'));
       return; // one macro's worth of nudge per reply is enough
     }
   } catch { /* best-effort - never block a command reply on this */ }
@@ -925,7 +1101,9 @@ function dropSessionMemory(sessionId) {
   sessionCacheAwarenessNudged.delete(sessionId);
   sessionCacheHitBytes.delete(sessionId);
   sessionMacroMatchNudged.delete(sessionId);
-  sessionFrictionSnapshot.delete(sessionId);
+  frictionTracker.dropSession(sessionId);
+  frictionHydrated.delete(sessionId);
+  try { dbApi.clearFrictionSessionState(sessionId); } catch { /* best-effort */ }
   readPipeline.endSession(sessionId);
   lastReportedSessionTokens.delete(sessionId);
 }
@@ -1211,7 +1389,7 @@ function computeAnalytics() {
   // Known-issues cross-reference (the operator-maintained known-issues.json registry, see
   // "Known-issues registry" above) previously only matched against live boot-console-errors
   // at "crv preflight" time - a failed action's own error text was never checked against it,
-  // so a failure this engine already flags as recurring (failureRateByType, topFailedSelectors)
+  // so a failure this engine already flags as recurring (failureRateByType, selectorFriction)
   // looked identical whether it was a brand-new mystery or a bug someone already root-caused
   // months ago. Loaded once per call and reused below. Best-effort: any load/parse problem
   // must not break the rest of analytics (same discipline as matchKnownIssues above).
@@ -1224,16 +1402,30 @@ function computeAnalytics() {
     if (!errorText || !knownIssues.length) return [];
     return knownIssues.filter((issue) => issue.matches(errorText)).map(({ id, description, remediation }) => ({ id, description, remediation }));
   };
+  // "Mark fixed" declarations (friction_resolutions): selector failures at or before the
+  // declared instant stop counting, so a fixed selector stops ranking on cumulative-forever history.
+  const resolutions = new Map();
+  let resolutionRows = [];
+  try {
+    resolutionRows = dbApi.listFrictionResolutions();
+    for (const r of resolutionRows) resolutions.set(r.key, r.resolved_at);
+  } catch { /* best-effort - analytics works without resolutions */ }
 
   // 1. Failure rate by action type - only types with >=1 failure matter
   // here (a 100%-ok type is not friction), sorted by raw failure count.
+  // wastedMs (summed duration of the failed calls) is the cost proxy behind the severity
+  // score below: a timeout burns ~15s, a not-found miss ~nothing, and raw counts hid that.
   const byType = new Map();
   const knownIssuesByType = new Map();
+  // after(kind, id, at): false when that scope was declared fixed at or after `at` (friction resolve type|macro|verity).
+  const afterFix = (kind, id, at) => { const cutoff = resolutions.get(friction.scopeKey(kind, id)); return !(cutoff && at && at <= cutoff); };
   for (const a of actions) {
-    const t = byType.get(a.type) ?? { type: a.type, total: 0, failed: 0 };
+    if (!afterFix('type', a.type, a.started_at)) continue;
+    const t = byType.get(a.type) ?? { type: a.type, total: 0, failed: 0, wastedMs: 0 };
     t.total += 1;
     if (!a.ok) {
       t.failed += 1;
+      t.wastedMs += Number(a.duration_ms) || 0;
       for (const hit of matchKnownIssuesFor(a.error)) {
         const list = knownIssuesByType.get(a.type) ?? [];
         if (!list.some((x) => x.id === hit.id)) list.push(hit);
@@ -1258,7 +1450,7 @@ function computeAnalytics() {
     const priorWindowIds = new Set(orderedIds.slice(-TREND_WINDOW * 2, -TREND_WINDOW));
     for (const a of actions) {
       const bucket = recentWindowIds.has(a.session_id) ? recentByType : priorWindowIds.has(a.session_id) ? priorByType : null;
-      if (!bucket) continue;
+      if (!bucket || !afterFix('type', a.type, a.started_at)) continue;
       const t = bucket.get(a.type) ?? { total: 0, failed: 0 };
       t.total += 1;
       if (!a.ok) t.failed += 1;
@@ -1289,23 +1481,24 @@ function computeAnalytics() {
   // ago (since fixed) doesn't rank identically to one still failing this week - a plain
   // count has no way to tell "chronic" from "stale", and chasing a stale entry wastes a
   // session on something already dead.
-  const bySelector = new Map();
-  for (const a of actions) {
-    if (a.ok) continue;
-    const sel = a.params?.selector;
-    if (!sel || typeof sel !== 'string') continue;
-    const key = `${a.type}::${sel}`;
-    const s = bySelector.get(key) ?? { type: a.type, selector: sel, failCount: 0, sessionIds: new Set(), lastFailedAt: null, knownIssues: [] };
-    s.failCount += 1;
-    s.sessionIds.add(a.session_id);
-    if (!s.lastFailedAt || a.started_at > s.lastFailedAt) s.lastFailedAt = a.started_at;
-    for (const hit of matchKnownIssuesFor(a.error)) if (!s.knownIssues.some((x) => x.id === hit.id)) s.knownIssues.push(hit);
-    bySelector.set(key, s);
-  }
-  const topFailedSelectors = [...bySelector.values()]
-    .filter((s) => s.failCount > 1)
-    .map((s) => ({ type: s.type, selector: s.selector, failCount: s.failCount, sessionCount: s.sessionIds.size, lastFailedAt: s.lastFailedAt, ...(s.knownIssues.length ? { knownIssues: s.knownIssues } : {}) }))
-    .sort((a, b) => b.failCount - a.failCount);
+  // One view, not two: the exact-string scan that used to live here disagreed with the warning an
+  // agent was shown (different keys, no origin, no success-awareness), so the panel could say one
+  // thing and the pre-action header another. selectorFriction (friction.mjs's buildSelectorFriction)
+  // is the single source - selector-normalized and type-family-merged, scoped per origin,
+  // success-aware (failures since the last success = "unresolved"), cost-ranked (failures + time
+  // wasted + retries) and annotated with error classes and the recoveries that worked. Stores are
+  // targets too (idb writes fail by store). The old `topFailedSelectors` alias is retired.
+  const sessionWeights = new Map();
+  for (const s of sessions) if (s.strict_crv && friction.STRICT_CRV_FAIL_WEIGHT !== 1) sessionWeights.set(s.id, friction.STRICT_CRV_FAIL_WEIGHT);
+  const selectorFriction = friction.buildSelectorFriction(actions, { matchKnownIssues: matchKnownIssuesFor, resolutions, sessionWeights });
+  // Many targets failing with one message is a single root cause, not N problems.
+  const frictionClusters = friction.buildFrictionClusters(selectorFriction);
+  // Failed a lot, then worked repeatedly across sessions: probably fixed, never declared.
+  const resolveSuggestions = friction.findResolveSuggestions(actions, { resolutions });
+
+  // 2c. Known-issue candidates - the same error text failing repeatedly with no
+  // known-issues.json match is the entry nobody has written yet; draft only, never auto-written.
+  const knownIssueCandidates = friction.buildKnownIssueCandidates(actions, { matchKnownIssues: matchKnownIssuesFor, frictionEntries: selectorFriction });
 
   // 3. Macros recorded but never actually replayed, and macros that HAVE
   // been replayed but never once succeeded on any step (recorded,
@@ -1315,7 +1508,7 @@ function computeAnalytics() {
   const macroRunStats = new Map(); // macroId -> { total, ok }
   for (const a of actions) {
     const macroId = a.params?.macroId;
-    if (macroId === undefined) continue;
+    if (macroId === undefined || !afterFix('macro', macroId, a.started_at)) continue;
     const s = macroRunStats.get(macroId) ?? { total: 0, ok: 0 };
     s.total += 1;
     if (a.ok) s.ok += 1;
@@ -1331,7 +1524,7 @@ function computeAnalytics() {
   // re-import under the same label with passed:true).
   const byLabel = new Map();
   for (const v of verityRuns) {
-    if (!v.label) continue;
+    if (!v.label || !afterFix('verity', v.label, v.imported_at)) continue;
     const arr = byLabel.get(v.label) ?? [];
     arr.push(v);
     byLabel.set(v.label, arr);
@@ -1384,6 +1577,7 @@ function computeAnalytics() {
   for (const a of actions) {
     const macroId = a.params?.macroId;
     if (macroId === undefined) { currentRun = null; continue; }
+    if (!afterFix('macro', macroId, a.started_at)) continue; // declared fixed: older runs no longer describe it
     if (!currentRun || currentRun.macroId !== macroId) {
       currentRun = { macroId, ok: true, startedAt: a.started_at };
       const list = macroRunHistory.get(macroId) ?? [];
@@ -1438,7 +1632,7 @@ function computeAnalytics() {
   // number, made visible across every session at once instead of requiring a human to open each
   // one to notice a chronically wasteful shape of work. Sessions under WASTE_MIN_CALLS are
   // excluded - a 2-call session at 50% waste is noise, not a pattern.
-  const WASTE_MIN_CALLS = 5;
+  const WASTE_MIN_CALLS = friction.WASTE_MIN_CALLS;
   const actionsBySession = new Map();
   for (const a of actions) {
     const list = actionsBySession.get(a.session_id);
@@ -1485,8 +1679,12 @@ function computeAnalytics() {
   // 11. Top friction items - everything above is ~10 separate arrays; this is a single
   // ranked digest of the highest-signal entry from each, so a human/agent can read one
   // short list instead of scanning the whole analytics blob to find what to fix first.
-  // Severity is a deliberately crude frequency-weighted score (not a real cost model) -
-  // good enough to rank a handful of candidates, not meant to be precise.
+  // Severity is a deliberately crude score (not a real cost model) - good enough to rank a
+  // handful of candidates, not meant to be precise. Failure counts are weighted by wasted time
+  // (1 point per second spent inside failed calls), so one selector that burns a 15s timeout
+  // each time outranks ten instant not-found misses. Time is the only cost measured here;
+  // a failed call's reply is tiny, so token cost would add noise, not signal.
+  const wastedText = (ms) => (ms >= 1000 ? `, ~${Math.round(ms / 1000)}s spent failing` : '');
   const topFrictionItems = [];
   const knownIssueText = (list) => (list?.length
     ? ` - known issue: ${list.map((k) => (k.remediation ? `${k.id} (${k.remediation})` : k.id)).join(', ')}`
@@ -1494,17 +1692,18 @@ function computeAnalytics() {
   if (failureRateByType[0]) {
     const t = failureRateByType[0];
     const trendText = t.trend ? `, trend ${t.trend.delta <= 0 ? 'improving' : 'worsening'} (${Math.round(t.trend.priorRate * 100)}% -> ${Math.round(t.trend.recentRate * 100)}%)` : '';
-    topFrictionItems.push({ kind: 'failureRateByType', severity: t.failed, summary: `"${t.type}" failed ${t.failed}/${t.total} times (${Math.round(t.failureRate * 100)}%)${trendText}${knownIssueText(t.knownIssues)}` });
+    topFrictionItems.push({ kind: 'failureRateByType', severity: t.failed + Math.round(t.wastedMs / 1000), summary: `"${t.type}" failed ${t.failed}/${t.total} times (${Math.round(t.failureRate * 100)}%)${wastedText(t.wastedMs)}${trendText}${knownIssueText(t.knownIssues)} - fixed? friction resolve type ${t.type}` });
   }
-  if (topFailedSelectors[0]) {
-    const s = topFailedSelectors[0];
-    topFrictionItems.push({ kind: 'topFailedSelector', severity: s.failCount, summary: `selector "${s.selector}" (${s.type}) failed ${s.failCount}x across ${s.sessionCount} session(s), last at ${s.lastFailedAt}${knownIssueText(s.knownIssues)}` });
+  if (selectorFriction.length) {
+    // Already cost-ranked (failures + time wasted + retries) by buildSelectorFriction.
+    const s = selectorFriction[0];
+    topFrictionItems.push({ kind: 'topFailedSelector', severity: Math.round(s.score), summary: `${s.targetKind === 'store' ? 'store' : 'selector'} "${s.selector}" (${s.type}) failed ${s.failCount}x across ${s.sessionCount} session(s), last at ${s.lastFailedAt}${wastedText(s.wastedMs)}${s.retries ? `, retried ${s.retries}x` : ''}${knownIssueText(s.knownIssues)}` });
   }
   for (const m of macrosNeverSucceeding) {
-    topFrictionItems.push({ kind: 'macroNeverSucceeding', severity: 50 + m.attemptedSteps, summary: `macro "${m.name}" (#${m.id}) has run ${m.attemptedSteps} step(s) and never once succeeded` });
+    topFrictionItems.push({ kind: 'macroNeverSucceeding', severity: 50 + m.attemptedSteps, summary: `macro "${m.name}" (#${m.id}) has run ${m.attemptedSteps} step(s) and never once succeeded - fixed? friction resolve macro ${m.id}` });
   }
   for (const v of verityLabelsStillFailing) {
-    topFrictionItems.push({ kind: 'verityLabelStillFailing', severity: 40 + v.importCount, summary: `verity label "${v.label}" imported ${v.importCount}x, still FAIL as of ${v.lastImportedAt}` });
+    topFrictionItems.push({ kind: 'verityLabelStillFailing', severity: 40 + v.importCount, summary: `verity label "${v.label}" imported ${v.importCount}x, still FAIL as of ${v.lastImportedAt} - fixed? friction resolve verity ${JSON.stringify(v.label)}` });
   }
   if (macroAdoption.note) {
     topFrictionItems.push({ kind: 'macroAdoption', severity: 30 + macroAdoption.nudgeEligibleSessionCount, summary: macroAdoption.note });
@@ -1513,6 +1712,10 @@ function computeAnalytics() {
     const w = wasteBySession[0];
     topFrictionItems.push({ kind: 'wasteBySession', severity: Math.round((w.wastePct / 100) * w.calls), summary: `session ${w.sessionId}${w.goal ? ` ("${w.goal}")` : ''} wasted ${Math.round(w.wastePct)}% of ${w.calls} calls` });
   }
+  // Host resources (scratch dirs/MB, orphan browsers, free disk) from the cached host-health snapshot - peeked, never
+  // awaited, so analytics stays synchronous and fast; null until the first background scan lands (or scan disabled).
+  const host = hostHealth.peekHostHealth();
+  topFrictionItems.push(...hostHealth.hostFrictionItems(host));
   topFrictionItems.sort((a, b) => b.severity - a.severity);
   topFrictionItems.splice(5);
 
@@ -1520,7 +1723,12 @@ function computeAnalytics() {
     totals: { sessions: sessions.length, actions: actions.length, macros: macros.length, verityRuns: verityRuns.length },
     malformedActionsSkipped,
     failureRateByType,
-    topFailedSelectors,
+    selectorFriction,
+    frictionClusters,
+    knownIssueCandidates,
+    resolveSuggestions,
+    frictionConfig: friction.frictionConfig(),
+    resolvedFriction: resolutionRows.map((r) => ({ key: r.key, type: r.type, selector: r.selector, note: r.note, resolvedAt: r.resolved_at })),
     macrosNeverRun,
     macrosNeverSucceeding,
     verityLabelsStillFailing,
@@ -1528,6 +1736,7 @@ function computeAnalytics() {
     macroHealth,
     macroAdoption,
     topFrictionItems,
+    host: host ? { scratchBytes: host.scratchBytes, scratchDirs: host.metrics.dirs, staleDirs: host.staleDirs, orphanBrowsers: host.orphanBrowsers.length, freeDiskGb: host.metrics.freeGb, at: host.at } : null,
     activityPunchcard,
     durationByType,
     wasteBySession,
@@ -1551,7 +1760,8 @@ function computeAnalytics() {
 // tab, regardless of how many are polling - result can be up to that many
 // ms stale, acceptable given the dashboard already tolerates the same lag
 // via its own poll/SSE pattern elsewhere.
-const ANALYTICS_CACHE_MS = 5000;
+// WEBSCOUT_ANALYTICS_CACHE_MS=0 turns the cache off (tests that assert on analytics across several steps).
+const ANALYTICS_CACHE_MS = process.env.WEBSCOUT_ANALYTICS_CACHE_MS ? Number(process.env.WEBSCOUT_ANALYTICS_CACHE_MS) || 0 : 5000;
 let analyticsCache = null; // { at, data }
 
 function getAnalytics() {
@@ -1587,25 +1797,82 @@ function emergentFrictionForSession(sessionId) {
     }
   }
 
-  const failCountBySelector = new Map();
+  const failCountByTarget = new Map();
   for (const a of sessionFails) {
-    const sel = a.params?.selector;
-    if (typeof sel !== 'string') continue;
-    const key = `${a.type}::${sel}`;
-    failCountBySelector.set(key, (failCountBySelector.get(key) ?? 0) + 1);
+    const target = friction.frictionTarget(a.type, a.params, a.origin);
+    if (!target) continue;
+    const key = friction.frictionKeyFor(a.type, a.params, a.origin);
+    const g = failCountByTarget.get(key) ?? { count: 0, target };
+    g.count += 1;
+    failCountByTarget.set(key, g);
   }
-  for (const [key, countThisSession] of failCountBySelector) {
-    // topFailedSelectors only lists failCount > 1 - below that threshold there is nothing
-    // to diff against yet, so a selector failing exactly once this session is left for a
+  for (const [key, { count: countThisSession, target }] of failCountByTarget) {
+    // selectorFriction only lists failCount > 1 - below that threshold there is nothing
+    // to diff against yet, so a target failing exactly once this session is left for a
     // later session to potentially flag, not reported as emergent on a single data point.
     if (countThisSession < 2) continue;
-    const [type, selector] = key.split('::');
-    const global = analytics.topFailedSelectors.find((s) => s.type === type && s.selector === selector);
+    const global = analytics.selectorFriction.find((s) => s.key === key);
     if (global && global.failCount === countThisSession) {
-      emergent.push(`selector "${selector}" (${type}) failed ${countThisSession}x this session - the first session ever to see it fail more than once.`);
+      emergent.push(`${target.kind} "${target.value}" (${friction.typeFamily(global.type)}) failed ${countThisSession}x this session - the first session ever to see it fail more than once.`);
     }
   }
+  // Types that already have failure history are skipped by the "first ever" diff above even
+  // when this session made them dramatically worse - flag a failure-rate spike against the
+  // rate across every OTHER session.
+  emergent.push(...friction.findRateSpikes(dbApi.listActions(sessionId), analytics.failureRateByType));
   return emergent;
+}
+
+// "Mark fixed?" at session end: for each target this session touched (indexed lookups, not a full
+// scan), ask whether it failed repeatedly in the past and has now worked several times running
+// across sessions. A human would have to notice that and run `friction resolve`; this says so.
+// type + (selector | store) from a JSON body or query, normalized to friction.mjs's key.
+// Declares a target fixed as of now. The one place that writes a resolution, so the route, session end's
+// apply path and any future caller store exactly the same row.
+function declareFrictionResolved(type, value, kind, note) {
+  if (friction.SCOPE_KINDS.has(kind)) {
+    return dbApi.markFrictionResolved({ key: friction.scopeKey(kind, value), type: kind, selector: String(value), note: typeof note === 'string' ? note : null });
+  }
+  const params = kind === 'page' ? {} : kind === 'store' ? { store: value } : { selector: value };
+  const origin = kind === 'page' ? value : null;
+  const target = friction.frictionTarget(type, params, origin);
+  if (!target) throw new HttpError(400, `"${type}" cannot be tracked as a ${kind}`);
+  return dbApi.markFrictionResolved({ key: friction.frictionKeyFor(type, params, origin), type: friction.typeFamily(type), selector: target.value, note: typeof note === 'string' ? note : null });
+}
+
+// A page-level type (page.reload, dom.settle, ...) is keyed by origin, which callers pass in the
+// same `selector` slot: `friction explain page.reload http://localhost:3000`.
+function frictionTargetFromBody(body, { allowScopes = true } = {}) {
+  if (typeof body.type !== 'string' || !body.type) throw new HttpError(400, 'type is required (e.g. "dom.click")');
+  if (friction.SCOPE_KINDS.has(body.type)) {
+    const id = typeof body.selector === 'string' && body.selector ? body.selector : typeof body.store === 'string' ? body.store : '';
+    if (!allowScopes) throw new HttpError(400, `"${body.type}" is a whole-scope target (resolve/unresolve only) - explain works on a selector, store or page target`);
+    if (!id) throw new HttpError(400, `${body.type === 'type' ? 'a command type' : body.type === 'macro' ? 'a macro id' : 'a verity label'} is required: friction resolve ${body.type} <${body.type === 'type' ? 'command-type' : body.type === 'macro' ? 'id' : 'label'}>`);
+    return { type: body.type, target: { kind: body.type, value: id }, key: friction.scopeKey(body.type, id), params: {}, origin: null };
+  }
+  const pageLevel = friction.PAGE_TYPES.has(body.type);
+  const value = typeof body.selector === 'string' && body.selector ? body.selector : typeof body.store === 'string' && body.store ? body.store : '';
+  if (!value) throw new HttpError(400, pageLevel ? `an origin is required for "${body.type}" (e.g. http://localhost:3000)` : 'selector (or store, for idb.* types) is required');
+  const params = pageLevel ? {} : typeof body.selector === 'string' && body.selector ? { selector: body.selector } : { store: body.store };
+  const origin = pageLevel ? value : null;
+  const target = friction.frictionTarget(body.type, params, origin);
+  if (!target) throw new HttpError(400, `"${body.type}" cannot be tracked by ${Object.keys(params)[0]} (a store only applies to idb.* types)`);
+  return { type: body.type, target, key: friction.frictionKeyFor(body.type, params, origin), params, origin };
+}
+
+function resolveSuggestionsForSession(sessionId) {
+  try {
+    const keys = new Set(dbApi.listActions(sessionId).map((a) => a.selector_key).filter(Boolean));
+    const out = [];
+    for (const key of keys) {
+      const rows = dbApi.listFrictionKeyHistory(key, { excludeSessionId: -1, recoverySessions: 0 });
+      const cutoff = dbApi.getFrictionResolution(key)?.resolved_at;
+      out.push(...friction.findResolveSuggestions(rows, { resolutions: cutoff ? new Map([[key, cutoff]]) : new Map(), onlyKeys: new Set([key]) }));
+    }
+    return out;
+  } catch {
+    return []; // best-effort - a suggestion is a courtesy, never a reason to fail "session end"
+  }
 }
 
 // ---------- DB_VERSION drift check (dashboard-visible) ----------
@@ -1887,7 +2154,7 @@ const routes = [
       // when it IS the macroAdoption item, to avoid printing the same note twice.
       const topFriction = sessionStartAnalytics.topFrictionItems[0];
       const frictionNote = topFriction && topFriction.kind !== 'macroAdoption' ? topFriction.summary : undefined;
-      buildSessionFrictionSnapshot(session.id, sessionStartAnalytics);
+      macroCandidateCache = { at: Date.now(), list: buildMacroCandidates(sessionStartAnalytics) }; // seed from the scan just paid for
       const budget = session.token_budget
         ? { tokens: session.token_budget, tightenAtTokens: Math.round(session.token_budget * BUDGET_TIGHTEN_PCT / 100), strictAtTokens: Math.round(session.token_budget * BUDGET_STRICT_PCT / 100), note: 'past the first mark, reads over ~3000 tokens return their shape (--no-guard forces the body) and rows come back as {columns, rows}; past the second the guard drops to ~1000 tokens' }
         : undefined;
@@ -1900,8 +2167,9 @@ const routes = [
   {
     method: 'POST',
     pattern: /^\/sessions\/(\d+)\/end$/,
-    handler: async (_req, m) => {
+    handler: async (req, m) => {
       const sessionId = Number(m[1]);
+      const endBody = await readJsonBody(req);
       // Surfaced so the CLI can nudge "consider macro record" for a session
       // that did real, replayable work and never got saved as one -
       // confirmed real: a seed/verify/cleanup shape hand-rolled once in a
@@ -1911,6 +2179,16 @@ const routes = [
       // Computed before endSession/dropSessionMemory - listActions works on an ended
       // session too, but this reads naturally as "one last look at what this session did".
       const emergentFriction = emergentFrictionForSession(sessionId);
+      const resolveSuggestions = resolveSuggestionsForSession(sessionId);
+      // applySuggestions: the caller already decided "yes, those are fixed" - declare each one resolved
+      // through the same call `friction resolve` makes, and report them as applied instead of suggested.
+      const appliedResolutions = [];
+      if (endBody.applySuggestions === true) {
+        for (const s of resolveSuggestions.splice(0)) {
+          try { appliedResolutions.push(declareFrictionResolved(s.type, s.selector, s.targetKind, `auto: session #${sessionId} end --apply-suggestions (${s.failures} failures, then ${s.okStreak} successes)`)); } catch { resolveSuggestions.push(s); }
+        }
+        if (appliedResolutions.length) { analyticsCache = null; broadcastUpdate('analytics', null); }
+      }
       const session = dbApi.endSession(sessionId);
       const deliveredEstTokens = sessionRunningTokens(sessionId); // what the caller actually received, after shaping
       // Nothing under an ended session can change again - an unbounded relay
@@ -1921,7 +2199,7 @@ const routes = [
       const savingsReceipt = { ...(sessionSavingsTally.get(sessionId) ?? { scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0, shapedCalls: 0, shapedBytes: 0 }), deliveredEstTokens };
       sessionSavingsTally.delete(sessionId);
       broadcastUpdate('session', null);
-      return { ...session, replayableActionCount, savingsReceipt, ...(emergentFriction.length ? { emergentFriction } : {}) };
+      return { ...session, replayableActionCount, savingsReceipt, ...(emergentFriction.length ? { emergentFriction } : {}), ...(resolveSuggestions.length ? { resolveSuggestions } : {}), ...(appliedResolutions.length ? { appliedResolutions } : {}) };
     },
   },
   { method: 'GET', pattern: /^\/sessions$/, handler: async () => dbApi.listSessions() },
@@ -2348,17 +2626,8 @@ const routes = [
       const steps = actions.filter((a) => a.ok && (!allow || allow.has(a.type))).map((a) => ({ type: a.type, params: a.params ?? {} }));
       if (!steps.length) throw new HttpError(400, 'no replayable actions found in that session - nothing matched the macro type allowlist (pass {"all":true} to include read-only actions too)');
       const macro = dbApi.createMacro({ name: body.name.trim(), sourceSessionId: Number(body.sessionId), steps });
-      // The mid-session macro-match nudge (maybeMacroMatchNudge) only ever consults
-      // sessionFrictionSnapshot, which is frozen once at session start - a macro recorded
-      // DURING that same still-active session never existed at freeze time, so the session
-      // that just created it could repeat its own exact step-type sequence again and get no
-      // nudge, ever, for a macro it just recorded itself. It is definitionally never-run
-      // (just created), so appending it here is safe without re-querying analytics.
-      const active = dbApi.getCurrentSession();
-      if (active && active.id === Number(body.sessionId) && steps.length >= 2) {
-        const snapshot = sessionFrictionSnapshot.get(active.id);
-        if (snapshot && !snapshot.neverRunMacros.some((m) => m.id === macro.id)) snapshot.neverRunMacros.push(macro);
-      }
+      // The mid-session macro-match nudge reads macroCandidates() on demand, and this broadcast drops
+      // its cache - a macro recorded during a still-active session is offered to that same session.
       broadcastUpdate('macro', null);
       return macro;
     },
@@ -2472,6 +2741,7 @@ const routes = [
         : undefined;
 
       const results = [];
+      const frictionWarnings = [];
       for (const step of macro.steps.slice(fromStep)) {
         if (await isNoOpPut(step)) {
           results.push({ type: step.type, ok: true, skipped: true, reason: 'idb.put: identical row already present' });
@@ -2497,6 +2767,16 @@ const routes = [
         const stepTimeoutMs = LONG_POLL_TYPES.has(step.type) ? (Number(step.params?.timeoutMs) || 15000) + 5000
           : step.type === 'idb.snapshot' ? SNAPSHOT_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
         const stepStartedAt = Date.now();
+        // A macro step is dispatched internally, so it used to bypass the pre-action warn that the
+        // same click gets through POST /command. Same facts, same dedupe, collected per replay.
+        try {
+          const stepFacts = frictionFactsFor(session.id, step.type, step.params ?? {}, agentName);
+          const assessment = stepFacts?.evaluation.assessment;
+          if (assessment) {
+            frictionTracker.recordWarn(session.id, stepFacts.key, assessment.liveUnresolved);
+            frictionWarnings.push({ step: fromStep + results.length + 1, type: step.type, message: assessment.message });
+          }
+        } catch { /* best-effort - friction bookkeeping never blocks a replay */ }
         try {
           const { result } = await withLoggedAction(session.id, step.type, { ...step.params, via: 'macro', macroId: macro.id, macroName: macro.name }, () => dispatchCommand(step.type, step.params ?? {}, stepTimeoutMs, agentName), agentName);
           // A macro's mutating steps (idb.put/delete/eval/...) previously
@@ -2511,11 +2791,14 @@ const routes = [
           if (cacheKey) storeReadCache(session.id, cacheKey, result);
           results.push({ type: step.type, ok: true, result, durationMs: Date.now() - stepStartedAt });
         } catch (err) {
-          results.push({ type: step.type, ok: false, error: err.message, durationMs: Date.now() - stepStartedAt });
+          let stepContext = null;
+          try { stepContext = frictionFactsFor(session.id, step.type, step.params ?? {}, agentName)?.context ?? null; } catch { /* best-effort */ }
+          results.push({ type: step.type, ok: false, error: err.message, durationMs: Date.now() - stepStartedAt, ...(stepContext ? { selectorFriction: stepContext } : {}) });
           if (!continueOnError) break;
         }
       }
       broadcastUpdate('action', session.id);
+      broadcastUpdate('macro', null); // this run changed the macro's own record: the nudge must not keep quoting the old one
       const skippedCount = results.filter((r) => r.skipped).length;
       // Compact by default: a step's full result (can be as large as any
       // other command's - idb.dump/dom.query-shaped) was previously always
@@ -2537,6 +2820,7 @@ const routes = [
         totalSteps: macro.steps.length,
         skippedCount,
         results: compactResults,
+        ...(frictionWarnings.length ? { frictionWarnings } : {}),
         ...(priorNeverSucceeding
           ? { warning: `macro "${macro.name}" (#${macro.id}) has run ${priorNeverSucceeding.attemptedSteps} step(s) before this and never once succeeded - check "macro inspect ${macro.id}" or the dashboard's macro health strip before relying on it again.` }
           : {}),
@@ -2609,7 +2893,7 @@ const routes = [
       if (type === 'idb.snapshot') throw new HttpError(400, "use POST /state/snapshot instead - idb.snapshot must be persisted, never dispatched raw");
       const session = requireActiveSession();
       const dispatchTimeoutMs = LONG_POLL_TYPES.has(type) ? (Number(params?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS;
-      maybeRiskySelectorWarn(session.id, type, params, res);
+      maybeRiskySelectorWarn(session.id, type, params, res, agentName, body.ackRisk);
 
       const cacheKey = readCacheKey(agentName, type, params);
       const budget = cacheKey ? currentBudget(session) : null;
@@ -2684,8 +2968,20 @@ const routes = [
           crv: { before_snapshot_id: beforeSnap.id, after_snapshot_id: afterSnap.id, diff_id: savedDiff.id, diff_summary: savedDiff.summary, ...(compactSamples && Object.keys(compactSamples).length ? { samples: compactSamples } : {}) },
         };
       } else {
-        const { result, actionId } = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
-        noteScopedRead(session.id, result, { agentName, type, params });
+        let outcome;
+        let ranParams = params;
+        try {
+          outcome = await dispatchTracked(session, type, params, agentName, dispatchTimeoutMs);
+        } catch (err) {
+          const retry = body.tryRecovery === true ? recoveryRetryFor(session.id, type, params, agentName, err) : null;
+          if (!retry) throw err;
+          // If the alternative fails too, its own error (with its own friction context) is what the caller gets.
+          outcome = await dispatchTracked(session, type, retry.params, agentName, dispatchTimeoutMs);
+          ranParams = retry.params;
+          res.setHeader('x-webscout-recovered', `"${params.selector}" (${type}) failed; ran "${retry.recovery.selector}" instead (it worked ${retry.recovery.worked} of ${retry.recovery.of} times after this failure)`.replace(/[^\x20-\x7e]/g, '?'));
+        }
+        const { result, actionId } = outcome;
+        noteScopedRead(session.id, result, { agentName, type, params: ranParams });
         broadcastUpdate('action', session.id);
         maybeMidSessionNudge(session.id, res);
         maybeMacroMatchNudge(session.id, res);
@@ -2787,6 +3083,7 @@ const routes = [
       const agentName = body.agent || DEFAULT_AGENT;
       const stores = Array.isArray(body.stores) ? body.stores : [];
       const selector = typeof body.selector === 'string' && body.selector.trim() ? body.selector.trim() : null;
+      const plan = Array.isArray(body.plan) ? body.plan : null;
 
       const agentEntry = agents.get(agentName);
       const connected = !!(agentEntry?.socket && !agentEntry.socket.destroyed);
@@ -2843,6 +3140,11 @@ const routes = [
       // riskiest known-bad selectors/types/macros into the pass it's about to run instead
       // of discovering them one at a time as each one fails live.
       try { report.knownFriction = getAnalytics().topFrictionItems; } catch { /* best-effort - never blocks preflight */ }
+      // The caller's own plan, checked step by step against the facts the pre-action warn will use.
+      // Advisory: a risky step is something to reorder or guard, not a reason to call the page unfit.
+      if (plan) report.planRisk = planFrictionReport(plan, agentName);
+      // Host resources: warns (never fails the preflight) when the disk is low or browsers/profiles have leaked.
+      try { report.host = hostHealth.preflightHostReport(); } catch { /* best-effort */ }
 
       report.ok = !(report.missingStores?.length) && (selector ? report.selectorPresent !== false : true) && !(report.bootErrors?.length);
       return report;
@@ -2887,7 +3189,7 @@ const routes = [
     // postTimeoutVerification, ...) applies exactly as it already does to a bare action.
     method: 'POST',
     pattern: /^\/crv\/run$/,
-    handler: async (req) => {
+    handler: async (req, _m, res) => {
       const body = await readJsonBody(req);
       const agentName = body.agent || DEFAULT_AGENT;
       const session = requireActiveSession();
@@ -2897,6 +3199,7 @@ const routes = [
       if (!type) throw new HttpError(400, 'type is required (the action to run between the two snapshots, e.g. "dom.click")');
       if (type === 'idb.snapshot') throw new HttpError(400, 'use "idb snapshot" for the baseline - "crv run" takes its own');
       const params = body.params ?? {};
+      maybeRiskySelectorWarn(session.id, type, params, res, agentName, body.ackRisk); // before the baseline is taken: a refusal must not leave a snapshot behind
       const before = await withLoggedAction(session.id, 'idb.snapshot', { stores, for: 'crv.run', phase: 'before' }, () => dispatchCommand('idb.snapshot', { stores }, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
       const savedBaseline = dbApi.saveSnapshot({ sessionId: session.id, actionId: before.actionId, stores: before.result.stores, agentName });
       // saveSnapshot's own return value is a SUMMARY (id/counts/byteSize, no store content - see
@@ -3203,6 +3506,167 @@ const routes = [
   // why it's cached.
   { method: 'GET', pattern: /^\/analytics$/, handler: async () => getAnalytics() },
 
+  // ---- "Mark fixed": declare a selector's friction resolved as of now. Analytics then counts
+  // only failures AFTER that instant (the selector's old history stops ranking and stops
+  // warning), and a relapse after the fix is visible as fresh failures. type+selector are
+  // normalized exactly like the pre-action warn (friction.frictionKey), so "dom.clickWait" and
+  // "#row-41" resolve the same entry the warn matched.
+  {
+    method: 'POST',
+    pattern: /^\/friction\/resolve$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      const { type, target } = frictionTargetFromBody(body);
+      const resolution = declareFrictionResolved(type, target.value, target.kind, body.note);
+      analyticsCache = null;
+      broadcastUpdate('analytics', null);
+      return resolution;
+    },
+  },
+  { method: 'GET', pattern: /^\/friction\/resolutions$/, handler: async () => dbApi.listFrictionResolutions() },
+  {
+    method: 'POST',
+    pattern: /^\/friction\/unresolve$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      const { key } = frictionTargetFromBody(body);
+      const result = dbApi.clearFrictionResolved(key);
+      analyticsCache = null;
+      broadcastUpdate('analytics', null);
+      return result;
+    },
+  },
+
+  // ---- "Why did / didn't it warn": everything friction awareness knows about one target, built by
+  // the same frictionFactsFor() the pre-action header and the failure's error body use, plus the
+  // decision's reason and the thresholds it was judged against. Side-effect free (it never
+  // consumes the once-per-session warning). ?type=&selector= (or &store=), optional &session=&agent=.
+  {
+    method: 'GET',
+    pattern: /^\/friction\/explain$/,
+    handler: async (req) => {
+      const q = new URL(req.url, `http://${HOST}`).searchParams;
+      const { type, target } = frictionTargetFromBody({ type: q.get('type'), selector: q.get('selector') ?? undefined, store: q.get('store') ?? undefined }, { allowScopes: false });
+      const params = target.kind === 'page' ? {} : target.kind === 'store' ? { store: target.value } : { selector: target.value };
+      const sessionId = Number(q.get('session')) || dbApi.getCurrentSession()?.id || -1;
+      const facts = frictionFactsFor(sessionId, type, params, q.get('agent') || DEFAULT_AGENT, target.kind === 'page' ? target.value : undefined);
+      const e = facts.entry;
+      return {
+        type: friction.typeFamily(type),
+        target: facts.target,
+        key: facts.key,
+        sessionId: sessionId === -1 ? null : sessionId,
+        origin: facts.origin,
+        wouldWarn: Boolean(facts.evaluation.assessment),
+        decision: facts.evaluation.reason,
+        ...(facts.evaluation.assessment ? { message: facts.evaluation.assessment.message, level: facts.evaluation.assessment.level } : {}),
+        numbers: facts.evaluation.facts,
+        history: e ? {
+          failCount: e.failCount, sessionCount: e.sessionCount, retries: e.retries, wastedMs: e.wastedMs, score: e.score,
+          lastFailedAt: e.lastFailedAt, lastSuccessAt: e.lastSuccessAt, errorClasses: e.errorClasses, lastError: e.lastError,
+          perOrigin: e.origins, recoveries: e.recoveries, knownIssues: e.knownIssues,
+        } : null,
+        thisSession: facts.live ? { ...facts.live } : null,
+        resolution: facts.resolution ? { resolvedAt: facts.resolution.resolved_at, note: facts.resolution.note } : null,
+        failureContext: facts.context,
+        cluster: (() => { try { return getAnalytics().frictionClusters.find((c) => c.targets.some((t) => t.key === facts.key)) ?? null; } catch { return null; } })(),
+        config: friction.frictionConfig(),
+      };
+    },
+  },
+  { method: 'GET', pattern: /^\/friction\/config$/, handler: async () => friction.frictionConfig() },
+
+  // ---- What THIS session has run into so far, from the same live tracker the pre-action warning reads
+  // (so a human watching sees what the agent was told). Targets that never failed are left out.
+  {
+    method: 'GET',
+    pattern: /^\/friction\/session$/,
+    handler: async () => {
+      const session = dbApi.getCurrentSession();
+      if (!session) return { session: null, targets: [] };
+      ensureFrictionSession(session.id);
+      const targets = frictionTracker.keys(session.id)
+        .map((key) => ({ key, e: frictionTracker.get(session.id, key), warned: frictionTracker.warnState(session.id, key) }))
+        .filter(({ e }) => e && e.fails > 0)
+        .map(({ key, e, warned }) => ({
+          key, ...(e.target ?? {}), fails: e.fails, unresolved: e.unresolved, errorClass: e.errorClass, lastError: e.lastError,
+          lastFailedAt: e.lastFailedAt, lastOkAt: e.lastOkAt, wastedMs: e.wastedMs, warned: warned ? { atLive: warned.atLive, count: warned.count } : null,
+        }))
+        .sort((a, b) => b.unresolved - a.unresolved || b.fails - a.fails);
+      return { session: { id: session.id, goal: session.goal }, targets };
+    },
+  },
+
+  // ---- Promote a known-issue candidate (analytics.knownIssueCandidates) into known-issues.json.
+  // Without confirm:true this only returns the entry it WOULD write (a review step); with it, the
+  // entry is appended - never overwriting an existing id, and never with a "TODO" remediation, so a
+  // draft cannot be promoted without a human supplying the one thing a draft cannot know.
+  {
+    method: 'POST',
+    pattern: /^\/known-issues\/promote$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      if (typeof body.id !== 'string' || !body.id) throw new HttpError(400, 'id is required: a candidate id from analytics.knownIssueCandidates[].draft.id');
+      const candidate = computeAnalytics().knownIssueCandidates.find((c) => c.draft.id === body.id);
+      if (!candidate) throw new HttpError(404, `no known-issue candidate "${body.id}" (candidates are listed by "analytics")`);
+      const text = (v, fallback) => (typeof v === 'string' && v.trim() ? v.trim() : fallback);
+      const entry = {
+        id: text(body.newId, candidate.draft.id),
+        signature: text(body.signature, candidate.draft.signature),
+        description: text(body.description, candidate.draft.description),
+        remediation: text(body.remediation, ''),
+      };
+      if (!entry.remediation) {
+        const suggested = candidate.suggestedRemediation;
+        if (suggested && body.confirm !== true) {
+          return { written: false, needsRemediation: true, wouldWrite: { ...entry, remediation: suggested }, suggestedFrom: candidate.suggestedFrom, file: KNOWN_ISSUES_PATH, note: 'dry run - the remediation is a SUGGESTION drawn from this project\'s own history; confirm it by repeating with --remediation "<text>" --confirm' };
+        }
+        throw new HttpError(400, `remediation is required - a candidate does not know the fix. Review it, then promote with e.g. --remediation "..." (draft: ${JSON.stringify(entry)}${suggested ? `, suggested: ${JSON.stringify(suggested)}` : ''})`);
+      }
+      if (/^TODO/i.test(entry.description)) throw new HttpError(400, `description still starts with TODO - say what the root cause is (--description "...")`);
+      let existing = [];
+      try { existing = loadKnownIssues()?.issues ?? []; } catch (err) { throw new HttpError(409, `known-issues.json is unreadable, refusing to touch it: ${err.message}`); }
+      if (existing.some((i) => i.id === entry.id)) throw new HttpError(409, `known-issues.json already has an entry with id "${entry.id}"`);
+      if (body.confirm !== true) return { written: false, wouldWrite: entry, file: KNOWN_ISSUES_PATH, note: 'dry run - repeat with confirm:true (CLI: --confirm) to append it' };
+      let current = [];
+      try { current = JSON.parse(fs.readFileSync(KNOWN_ISSUES_PATH, 'utf8')); } catch (err) { if (err.code !== 'ENOENT') throw new HttpError(409, `known-issues.json could not be read: ${err.message}`); }
+      fs.writeFileSync(KNOWN_ISSUES_PATH, `${JSON.stringify([...current, entry], null, 2)}\n`);
+      analyticsCache = null;
+      broadcastUpdate('analytics', null);
+      return { written: true, entry, file: KNOWN_ISSUES_PATH };
+    },
+  },
+
+  // ---- Host health (dashboard panels): scratch dirs/MB, owners, orphan browsers, free disk, trend, per-session
+  // cost, footprint log, last test run. Cleanup/kill actions re-derive what is safe to touch server-side
+  // (scratch.mjs rules: our prefixes only, stale owner only, browsers naming one of our profile dirs).
+  { method: 'GET', pattern: /^\/host\/health$/, handler: async (req) => hostHealth.getHostHealth({ force: new URL(req.url, `http://${HOST}`).searchParams.get('fresh') === '1' }) },
+  { method: 'GET', pattern: /^\/host\/trend$/, handler: async (req) => hostHealth.readTrend({ days: Math.min(90, Math.max(1, Number(new URL(req.url, `http://${HOST}`).searchParams.get('days')) || 14)) }) },
+  { method: 'GET', pattern: /^\/host\/sessions$/, handler: async () => hostHealth.sessionScratchCost(dbApi.listSessions()) },
+  { method: 'GET', pattern: /^\/host\/footprint$/, handler: async () => hostHealth.readFootprint() },
+  { method: 'GET', pattern: /^\/host\/test-run$/, handler: async () => hostHealth.readLastTestRun() },
+  {
+    method: 'POST',
+    pattern: /^\/host\/cleanup$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      // Dry-run unless the caller explicitly sends dryRun:false; a big real delete also needs confirm:true.
+      const r = hostHealth.cleanupScratch({ dryRun: body.dryRun !== false, confirm: body.confirm === true, dirs: body.dirs });
+      broadcastUpdate('host', null);
+      return r;
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/host\/kill-orphans$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      const r = await hostHealth.killOrphans({ pids: body.pids });
+      broadcastUpdate('host', null);
+      return r;
+    },
+  },
+
   {
     method: 'POST',
     pattern: /^\/ask$/,
@@ -3381,6 +3845,8 @@ if (isMainModule) {
     for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { removePidfile(PORT); unregisterRelay(process.pid, null); process.exit(0); });
     process.on('exit', () => { removePidfile(PORT); unregisterRelay(process.pid, null); });
     // sample the storage-dedup total once a day-ish even if nobody asks for a report
+    // host-resource trend sample (dirs / MB / orphans), at most one per 10 min across processes
+    if (process.env.WEBSCOUT_NO_HOST_SCAN !== '1') { hostHealth.getHostHealth().catch(() => {}); setInterval(() => hostHealth.getHostHealth({ force: true }).catch(() => {}), 10 * 60 * 1000).unref(); }
     setInterval(() => { try { dbApi.snapshotSavings('storage', dbApi.getTokenSavingsReport().byKind.storage.bytesSaved); } catch { /* best effort */ } }, 6 * 3600 * 1000).unref();
     log(`listening on http://${HOST}:${PORT} (bound to localhost only)`);
     log('waiting for the in-page agent to connect at /agent ...');

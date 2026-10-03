@@ -18,6 +18,7 @@
 // outlive many independent calls, so no such global is safe there).
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -103,7 +104,12 @@ const staleAgentWarned = new Set();
 // and a long CLI session should still get reminded eventually.
 const WARN_CACHE_COOLDOWN_MS = 5 * 60 * 1000;
 function warnCachePath() {
-  return process.env.WEBSCOUT_WARN_CACHE_PATH || path.join(process.cwd(), '.webscout-warn-cache.json');
+  if (process.env.WEBSCOUT_WARN_CACHE_PATH) return process.env.WEBSCOUT_WARN_CACHE_PATH;
+  // Under the test runner the project-dir cache would carry a warning (and its 5-minute cooldown)
+  // from one run into the next, and between concurrent test files; key it by relay port in the
+  // private temp root instead, which the runner wipes.
+  if (process.env.NODE_ENV === 'test') return path.join(os.tmpdir(), `webscout-warn-cache-${process.env.WEBSCOUT_PORT || 'default'}.json`);
+  return path.join(process.cwd(), '.webscout-warn-cache.json');
 }
 function readWarnCache() {
   try { return JSON.parse(fs.readFileSync(warnCachePath(), 'utf8')); } catch { return {}; }
@@ -234,6 +240,9 @@ export async function request(method, pathName, body, { autostart = true } = {})
   if (selectorRisk) emitNote(selectorRisk);
   const macroMatch = res.headers.get('x-webscout-macro-match');
   if (macroMatch) emitNote(macroMatch);
+  // --try-recovery ran a different selector than the one asked for: the caller must know which one acted.
+  const recovered = res.headers.get('x-webscout-recovered');
+  if (recovered) emitNote(`recovered: ${recovered}`);
   // The relay process is running OLDER code than what is on disk (an edit to
   // relay.mjs/db.mjs/... is invisible to it until restart) - once per process
   // is enough for a long-lived caller; the warnCacheDue check below is what

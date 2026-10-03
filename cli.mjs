@@ -17,7 +17,13 @@ import {
 } from './client.mjs';
 import { validateArgs, findMsysMangledArgs, findSpec } from './cli-spec.mjs';
 import { parseUsage, helpTopic, helpMissing } from './help.mjs';
+import { describeFailureContext } from './friction.mjs';
 import { resolveRelayPid, stopRelay, startRelay, restartRelay, RELAY_SOURCE_FILES } from './relay-control.mjs';
+import { sweepStale, formatSweep, scratchStats } from './scratch.mjs';
+
+// Above this many dirs a real (non-dry-run) cleanup needs --confirm: it shows the dry-run first.
+const SCRATCH_CONFIRM_ABOVE = 200;
+const SCRATCH_WARN_AT = 20;
 import { rankAutoTraces } from './trace.mjs';
 
 // Set once near the top of main() from a `--agent <name>` flag found
@@ -25,6 +31,8 @@ import { rankAutoTraces } from './trace.mjs';
 // dispatch below includes it as a top-level `agent` field on the request
 // body (never nested inside `params`) - see tools/web-scout/relay.mjs.
 let agentFlag;
+let ackRiskFlag = false;
+let tryRecoveryFlag = false;
 // Reply shaping for cacheable reads (--table / --if-changed / --delta / --peek / --no-guard),
 // set once in main() and sent as the request's `opts` - see relay-side read-pipeline.mjs.
 let shapeOpts;
@@ -34,7 +42,7 @@ let prettyFlag = false;
 const wantPretty = () => prettyFlag || process.env.WEBSCOUT_PRETTY === '1' || (process.stdout.isTTY === true && process.env.WEBSCOUT_COMPACT !== '1');
 
 function send(type, params) {
-  return request('POST', '/command', { type, params, agent: agentFlag, opts: shapeOpts });
+  return request('POST', '/command', { type, params, agent: agentFlag, opts: shapeOpts, ...(ackRiskFlag ? { ackRisk: true } : {}), ...(tryRecoveryFlag ? { tryRecovery: true } : {}) });
 }
 
 // chars/4 - same rough estimate as db.mjs's getActionCostReport, applied
@@ -217,13 +225,15 @@ async function handleSession(sub, rawArgs) {
     let args = rawArgs;
     let traceFlag;
     ({ args, value: traceFlag } = extractBooleanFlag(args, '--trace'));
+    let applySuggestionsFlag;
+    ({ args, value: applySuggestionsFlag } = extractBooleanFlag(args, '--apply-suggestions'));
     let id = args[0];
     if (!id) {
       const health = await request('GET', '/health');
       if (!health.active_session) throw new Error('no active session to end');
       id = health.active_session.id;
     }
-    const ended = await request('POST', `/sessions/${id}/end`);
+    const ended = await request('POST', `/sessions/${id}/end`, applySuggestionsFlag ? { applySuggestions: true } : undefined);
     if (traceFlag) {
       try {
         const trace = await request('POST', `/sessions/${ended.id}/trace`);
@@ -249,6 +259,8 @@ async function handleSession(sub, rawArgs) {
     if (ended.emergentFriction?.length) {
       for (const line of ended.emergentFriction) console.error(`NOTE: emergent friction - ${line}`);
     }
+    for (const suggestion of ended.resolveSuggestions ?? []) console.error(`NOTE: mark fixed? ${suggestion.hint} (or end with --apply-suggestions)`);
+    for (const applied of ended.appliedResolutions ?? []) console.error(`NOTE: marked fixed: ${applied.type} ${JSON.stringify(applied.selector)} (undo: friction unresolve ${applied.type} ${JSON.stringify(applied.selector)})`);
     // One-line cost receipt at the natural end-of-session checkpoint -
     // catches waste the same day it happened instead of only on a later,
     // on-demand "token-report" call nobody remembered to run.
@@ -806,6 +818,13 @@ async function main() {
     console.error(`WARNING: ${mangled.map((m) => JSON.stringify(m)).join(', ')} looks like Git Bash rewrote a leading-slash argument into a Windows path, so it will not match what you meant. Re-run with MSYS_NO_PATHCONV=1 in front of the command, or drop the leading slash.`);
   }
 
+  if (command !== 'scratch' && process.env.WEBSCOUT_NO_SCRATCH_WARN !== '1') {
+    // Leaked profiles/fixtures (each browser profile is hundreds of MB) are invisible until the disk is full.
+    const st = scratchStats();
+    const atEnd = command === 'session' && rest[0] === 'end';
+    if (st.stale >= SCRATCH_WARN_AT || (atEnd && st.stale > 0)) console.error(`WARNING: ${st.stale} stale web-scout scratch dir(s) in the temp dir. Run "scratch cleanup --dry-run" (then "scratch cleanup --confirm").`);
+  }
+
   if (command === 'status') {
     printResult(await request('GET', '/health', undefined, { autostart: false }));
     return;
@@ -813,6 +832,29 @@ async function main() {
 
   if (command === 'relay') {
     await handleRelay(rest[0]);
+    return;
+  }
+
+  if (command === 'scratch') {
+    if (rest[0] === 'status') {
+      const st = scratchStats({ includeForeign: true, sizes: true });
+      printResult({ summary: `${st.dirs} scratch dir(s), ${st.stale} reclaimable (${(st.staleBytes / 1048576).toFixed(1)} MB)`, ...st });
+      return;
+    }
+    if (rest[0] !== 'cleanup') throw new Error('scratch supports: cleanup [--dry-run] [--include-wl] [--min-age-min <n>] [--confirm], status');
+    const minAge = extractFlag(rest, '--min-age-min').value;
+    const opts = { includeForeign: rest.includes('--include-wl'), ...(minAge ? { staleUnownedMs: Number(minAge) * 60000 } : {}) };
+    let dryRun = rest.includes('--dry-run');
+    let note;
+    if (!dryRun && !rest.includes('--confirm')) {
+      const preview = sweepStale({ ...opts, dryRun: true });
+      if (preview.removed.length > SCRATCH_CONFIRM_ABOVE) {
+        dryRun = true; process.exitCode = 1;
+        note = `${preview.removed.length} dirs exceeds ${SCRATCH_CONFIRM_ABOVE}: nothing deleted. Review this dry-run, then re-run with --confirm.`;
+      }
+    }
+    const result = sweepStale({ ...opts, dryRun });
+    printResult({ summary: formatSweep(result), ...(note ? { note } : {}), ...result, removed: result.removed.length > 20 ? `${result.removed.length} dirs (first 20: ${result.removed.slice(0, 20).map((r) => path.basename(r.dir)).join(', ')})` : result.removed.map((r) => r.dir) });
     return;
   }
 
@@ -855,6 +897,49 @@ async function main() {
 
   if (command === 'analytics') {
     printResult(await request('GET', '/analytics'));
+    return;
+  }
+
+  // friction resolve|unresolve <type> <selector|store> [--note "..."] / list / explain <type> <selector|store> / config
+  // "Mark fixed": analytics and the pre-action warn then count only failures AFTER now.
+  // "explain": everything friction awareness knows about one target and why it warns (or doesn't).
+  // For an idb.* type the second argument is a STORE name (those fail by store, not selector).
+  if (command === 'friction') {
+    const sub = rest[0];
+    let fargs = rest.slice(1);
+    let note;
+    ({ args: fargs, value: note } = extractFlag(fargs, '--note'));
+    if (sub === 'list') { printResult(await request('GET', '/friction/resolutions')); return; }
+    if (sub === 'config') { printResult(await request('GET', '/friction/config')); return; }
+    if (sub === 'resolve' || sub === 'unresolve' || sub === 'explain') {
+      const [type, target] = fargs;
+      if (!type || !target) throw new Error(`friction ${sub} requires <type> <selector>, e.g. friction ${sub} dom.click "#submit" (for idb.* types the second argument is the store name)`);
+      const aim = type.startsWith('idb.') ? { store: target } : { selector: target };
+      if (sub === 'explain') {
+        const q = new URLSearchParams({ type, ...aim });
+        if (agentFlag) q.set('agent', agentFlag);
+        printResult(await request('GET', `/friction/explain?${q}`));
+      } else {
+        printResult(await request('POST', `/friction/${sub}`, { type, ...aim, note }));
+      }
+      return;
+    }
+    throw new Error('friction requires a subcommand: explain <type> <selector> | resolve <type> <selector> [--note "..."] | unresolve <type> <selector> | list | config');
+  }
+
+  // known-issues promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm]
+  // Turns an analytics.knownIssueCandidates draft into a real known-issues.json entry. Without
+  // --confirm it only prints the entry it would write.
+  if (command === 'known-issues') {
+    if (rest[0] !== 'promote') throw new Error('known-issues supports: promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm]');
+    let kargs = rest.slice(1);
+    let remediation; let description; let signature; let confirm;
+    ({ args: kargs, value: remediation } = extractFlag(kargs, '--remediation'));
+    ({ args: kargs, value: description } = extractFlag(kargs, '--description'));
+    ({ args: kargs, value: signature } = extractFlag(kargs, '--signature'));
+    ({ args: kargs, value: confirm } = extractBooleanFlag(kargs, '--confirm'));
+    if (!kargs[0]) throw new Error('known-issues promote requires <candidateId> (from "analytics" -> knownIssueCandidates[].draft.id)');
+    printResult(await request('POST', '/known-issues/promote', { id: kargs[0], remediation, description, signature, confirm: confirm === true }));
     return;
   }
 
@@ -918,6 +1003,13 @@ async function main() {
 
   let args = rest;
   ({ args, value: agentFlag } = extractFlag(args, '--agent'));
+  // `--ack-risk`: acknowledge an ESCALATED selector-risk warning so a WEBSCOUT_RISKY_BLOCK=1 relay
+  // lets the call through (see relay.mjs's maybeRiskySelectorWarn). No effect on a relay that
+  // does not block.
+  ({ args, value: ackRiskFlag } = extractBooleanFlag(args, '--ack-risk'));
+  // `--try-recovery`: if a click/fill/wait fails and one alternative selector has repeatedly been what
+  // worked after that failure, run it once (relay.mjs's recoveryRetryFor). The reply header says what ran.
+  ({ args, value: tryRecoveryFlag } = extractBooleanFlag(args, '--try-recovery'));
   {
     const shape = {};
     for (const [flag, key] of [['--table', 'table'], ['--if-changed', 'ifChanged'], ['--delta', 'delta'], ['--peek', 'peek'], ['--no-guard', 'noGuard']]) {
@@ -1008,8 +1100,10 @@ async function main() {
   // "crv run": the action between the two snapshots, given the same way /command takes it.
   let typeValue;
   let paramsValue;
+  let planValue;
   ({ args, value: typeValue } = extractFlag(args, '--type'));
   ({ args, value: paramsValue } = extractFlag(args, '--params'));
+  ({ args, value: planValue } = extractFlag(args, '--plan'));
   // "crv seed"/"crv cleanup": the manifest file that tracks synthetic row ids across
   // separate CLI invocations - see the crv.seed/crv.cleanup entries below.
   let manifestValue;
@@ -1272,12 +1366,15 @@ async function main() {
         agent: agentFlag, stores: csv(storesValue), type: typeValue, params: paramsValue ? JSON.parse(paramsValue) : {},
         expect: expectFileValue ? fs.readFileSync(expectFileValue, 'utf8') : expectValue,
         allowExtra: allowExtraValue || undefined, verbose: verboseValue || undefined, samples: samplesValue !== undefined ? Number(samplesValue) : undefined,
+        ...(ackRiskFlag ? { ackRisk: true } : {}),
       }),
       // One call replacing the four hand-run before every CRV pass ("status" +
       // "db version-check" + "dom query" + "idb list") - see relay.mjs's own
       // POST /crv/preflight comment. Optional trailing selector, same
       // positional convention as every dom.* command (domSelector above).
-      preflight: () => request('POST', '/crv/preflight', { agent: agentFlag, stores: csv(storesValue), selector: domSelector || undefined }),
+      // --plan '[{"type":"dom.click","params":{"selector":"#save"}}, ...]' also checks each step against what
+      // friction awareness already knows, before any of them runs (result.planRisk).
+      preflight: () => request('POST', '/crv/preflight', { agent: agentFlag, stores: csv(storesValue), selector: domSelector || undefined, plan: planValue ? JSON.parse(planValue) : undefined }),
       // Wraps "idb put-many" (same store/rows shape) but also records every
       // stored row's real key into the manifest (see manifestPath above) -
       // replaces hand-tracking ids across a session's separate "idb put"
@@ -1415,5 +1512,10 @@ main().catch((err) => {
   if (err.knownIssue) {
     console.error(`Known issue: ${err.knownIssue.id}${err.knownIssue.description ? ` - ${err.knownIssue.description}` : ''}${err.knownIssue.remediation ? ` (remediation: ${err.knownIssue.remediation})` : ''}`);
   }
+  // What friction awareness knew about THIS failure (see relay.mjs's dispatchTracked): the error
+  // class, how many times it has failed this session, what worked after a failure last time,
+  // and any pattern that is brand new - in the error itself, not only in a pre-action header.
+  if (err.selectorFriction) console.error(describeFailureContext(err.selectorFriction));
+  for (const line of err.emergentFriction ?? []) console.error(`NOTE: emergent friction - ${line}`);
   process.exitCode = 1;
 });
