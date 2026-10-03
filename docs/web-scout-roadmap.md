@@ -3293,7 +3293,7 @@ on the command line are marked, and the params are listed with their kind.
 **Coherence is now run, not declared.** `surface-roundtrip.test.mjs` asks the same question of the relay over HTTP, a real
 CLI process and a real MCP process, and fails if the three answers differ; it also fails if a parameter the spec maps from
 a flag is not read by the CLI or not named in the MCP tool. The relay split went on: macros (`routes-macros.mjs`) and the
-`/state` family (`routes-state.mjs`) left `relay.mjs`; `flaky-sweep.mjs` keeps every run's log under `.sweep/` and prints the
+`/state` family (`routes-state.mjs`) left `relay.mjs`, then the `/sessions` family (`routes-sessions.mjs`); `flaky-sweep.mjs` keeps every run's log under `.sweep/` and prints the
 failing tests and leak lines of a non-zero run (`run-tests` writes `.sweep/last-leaks.json`, now naming the web-scout dirs the run left in the real temp). One such leak (a browser profile that outlived a full run) was seen once and did not recur in a clean rerun.
 
 Not done: sessions routes are still in `relay.mjs`; the CI workflow has not run on a hosted runner (it needs a push to
