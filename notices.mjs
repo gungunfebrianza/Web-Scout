@@ -63,6 +63,16 @@ export function trendCommand(type, value) {
   };
 }
 
+export function promoteCommand(id) {
+  return {
+    label: 'capture as known issue',
+    cli: `known-issues promote ${id} --remediation ${quote('<fix>')}`,
+    mcp: { tool: 'webscout_meta', action: 'friction', params: { sub: 'promote', id, remediation: '<fix>' } },
+    http: 'POST /known-issues/promote',
+    body: { id },
+  };
+}
+
 export function regressionsCommand() {
   return {
     label: 'see them',

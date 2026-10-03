@@ -3247,6 +3247,61 @@ Not done: the rest of the `relay.mjs` split (sessions, macros, state); a CI run 
 Tests: `friction-round7.test.mjs`, one more browser test in `friction-dashboard.test.mjs`, the capabilities-doc test in
 `surfaces.test.mjs`.
 
+## V46 - friction awareness, round 8: one capability, four surfaces, finished (implemented)
+
+Round 7 ended with suggestions you could read on four surfaces but only act on from one, refusals that said what went
+wrong and not what to do, and a map of the product that nothing ran. This round closes those.
+
+**Act on what you were told.** A notice already carried its next steps as a CLI line, an MCP call and an HTTP request.
+`friction next` (`GET`/`POST /friction/next`, `webscout_meta.friction {sub:"next"}`) now *runs* one: with no `--step` it
+lists the steps of the newest notice that has any (or `--notice <id>`); `--step n` runs that step through the relay. A
+step that only reads runs at once; one that writes (`mark fixed`) is described until `--confirm`. The dashboard's notice
+buttons call the same route (a click is the confirmation), and `explain` now returns its own `next` steps, which the
+drawer renders as buttons beside the decision and the trend sparkline. One renderer (`showExplain`) serves every "why".
+
+**Refusals say what to do.** `notices.errorNotice()` recognises the refusals callers hit most (no active session, no
+agent connected, origin moved, cross-context replay, no such session / macro) and the relay attaches the result to the
+error body as a notice (`kind: "error"`, `key` = a stable code). The client appends `Next: ...` to the thrown message in
+the caller's own style: a CLI user reads a command, an MCP caller reads a tool call. Unrecognised errors are unchanged.
+
+**Better or worse.** `friction trend [<type> <selector>] [--sessions n]` (`GET /friction/trend`): one target's failure
+rate per session, newest last, with a direction (`worsening` / `improving` / `steady` / `new`) and a sparkline; a session
+that began after a declared fix is marked `afterFix`, so a fix that held reads as a drop that stays down. With no target:
+what is getting worse and what is getting better, project-wide. `explain` carries the target's trend, the dashboard has a
+"Trend across sessions" panel, and a session report lists the trends of the targets that failed in it.
+
+**Macros: how did the last replay go.** `macro list --health` (`GET /macros?health=1`, MCP `list {health}`, a dashboard
+column): runs, pass rate, and the last run with the first step that failed. Each replay now stamps its own `macroRun` id,
+so two runs back to back are two runs (they were one burst in the log); `friction.buildMacroRuns` is the single
+definition, and the analytics dot strip uses it too.
+
+**Replay says where it diverged.** `session replay --confirm` compares each replayed step with the original: now fails,
+now works, a different failure, a changed result (volatile fields ignored), much slower. The reply's `diff` lists them;
+the CLI prints a `DIVERGED at step n` line and the dashboard shows it. "Still reproduces" is not a divergence.
+
+**Known issues have a lifecycle.** An entry may carry `reviewBy` (a date; `known-issues promote --review-by`). `GET
+/known-issues` marks an entry `reviewDue` once the date passes and lists the ids. A target declared fixed that relapses
+twice or more with an error matching a known-issue candidate's signature offers `known-issues promote` as the next step in
+`friction regressions`. `known-issues export --out` already wrote the shared-file format.
+
+**Reach.** MCP `resources/subscribe`: the server follows the relay's event stream (the one the dashboard uses) while at
+least one resource is subscribed and sends `notifications/resources/updated` with the uri; the client then reads it. No
+polling, and the stream closes with the last unsubscribe. `webscout_meta describe` answers in an MCP caller's terms: the
+CLI help is rewritten with the param names from `cli-spec.mjs` (`noticeDays`, not `--notice-days`), flags that exist only
+on the command line are marked, and the params are listed with their kind.
+
+**Coherence is now run, not declared.** `surface-roundtrip.test.mjs` asks the same question of the relay over HTTP, a real
+CLI process and a real MCP process, and fails if the three answers differ; it also fails if a parameter the spec maps from
+a flag is not read by the CLI or not named in the MCP tool. The relay split went on: macros (`routes-macros.mjs`) and the
+`/state` family (`routes-state.mjs`) left `relay.mjs`; `flaky-sweep.mjs` keeps every run's log under `.sweep/` and prints the
+failing tests and leak lines of a non-zero run (`run-tests` writes `.sweep/last-leaks.json`, now naming the web-scout dirs the run left in the real temp). One such leak (a browser profile that outlived a full run) was seen once and did not recur in a clean rerun.
+
+Not done: sessions routes are still in `relay.mjs`; the CI workflow has not run on a hosted runner (it needs a push to
+exercise); `flaky-sweep.mjs` itself was not run end to end after the forensics change.
+
+Tests: `friction-round8.test.mjs`, `surface-roundtrip.test.mjs`, `sweep-forensics.test.mjs`, one more set of assertions in
+`friction-dashboard.test.mjs`.
+
 ## V40r - CRV workflow friction closed after a real P4.10 pass (implemented; numbered separately from V40-V43 above, merged from the distribution line)
 
 A real-browser CRV pass against a P4.10 (Capital Flow "limited authority pilot outcome

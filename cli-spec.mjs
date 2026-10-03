@@ -53,8 +53,8 @@ export const CLI_SPEC = [
     cmd: 'known-issues import', pos: [1, 1], bool: ['--confirm'], mcp: 'webscout_meta.friction', params: { '--confirm': 'confirm' },
   },
   {
-    cmd: 'known-issues promote', pos: [1, 1], bool: ['--confirm'], val: ['--remediation', '--description', '--signature'], mcp: 'webscout_meta.friction',
-    params: { '--confirm': 'confirm', '--remediation': 'remediation', '--description': 'description' },
+    cmd: 'known-issues promote', pos: [1, 1], bool: ['--confirm'], val: ['--remediation', '--description', '--signature', '--review-by'], mcp: 'webscout_meta.friction',
+    params: { '--confirm': 'confirm', '--remediation': 'remediation', '--description': 'description', '--review-by': 'reviewBy' },
     cliOnly: { '--signature': 'rarely needed - the draft already carries the stable literal prefix; an MCP caller can edit known-issues.json directly for a custom matcher' },
   },
   { cmd: 'token-report', pos: [0, 0], val: ['--session'], mcp: 'webscout_meta.token_report', params: { '--session': 'sessionId' } },
@@ -221,7 +221,7 @@ export const CLI_SPEC = [
   { cmd: 'eval', pos: [0, Infinity], val: ['--file', '--timeout', '--agent'], lenient: true, mcp: 'webscout_eval', params: { '--file': 'filePath', '--timeout': 'timeoutMs' } },
 
   { cmd: 'macro record', pos: [2, 2], bool: ['--all'], mcp: 'webscout_macro.record', params: { '--all': 'all' } },
-  { cmd: 'macro list', pos: [0, 0], bool: ['--risk'], mcp: 'webscout_macro.list', params: { '--risk': 'risk' } },
+  { cmd: 'macro list', pos: [0, 0], bool: ['--risk', '--health'], mcp: 'webscout_macro.list', params: { '--risk': 'risk', '--health': 'health' } },
   { cmd: 'macro show', pos: [1, 1], mcp: 'webscout_macro.show' },
   {
     cmd: 'macro run', pos: [1, 1], bool: ['--continue-on-error', '--confirm', '--full'], val: ['--from-step'], mcp: 'webscout_macro.run',

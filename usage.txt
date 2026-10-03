@@ -183,7 +183,9 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   session replay <id> [--all] [--confirm] [--agent <name>]
                                    re-run a session in the ACTIVE one to its first failure (--all: all of it): does it
                                    still reproduce? Dry run (plan + expected failure) unless --confirm - the steps write
-                                   to the page; --confirm ends with a VERDICT line.
+                                   to the page; --confirm ends with a VERDICT line and a DIVERGED line naming the
+                                   first step that stopped matching the original (now fails, now works, a different
+                                   failure, a changed result, much slower); the reply's diff lists every such step.
   session cleanup <id> [--confirm] [--summary]
                                    --summary collapses pendingDeletes/deleted/failed/changedNotDeleted
                                    down to a per-store row COUNT instead of full row bodies - a dry-run
@@ -767,10 +769,11 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    says how many); the macro's own historical estTokens cost is
                                    stamped once here too (steps_cost_est), read back with zero live
                                    lookup by "macro list"/"macro run".
-  macro list [--risk]             list saved macros (id, name, step count, source session, and
+  macro list [--risk] [--health]  list saved macros (id, name, step count, source session, and
                                    each one's own steps_cost_est/compacted_steps_removed); --risk adds how many
                                    of a macro's steps would draw a friction warning right now (the same facts
-                                   the pre-action header uses) and the worst one
+                                   the pre-action header uses) and the worst one; --health adds how its replays
+                                   went (runs, pass rate, the last run and the first step that failed in it)
   macro show <id>                 full macro detail, including every step
   macro run <id> [--continue-on-error] [--from-step N] [--confirm] [--full]
                                    replay a macro's steps against the CURRENTLY active session -
@@ -962,10 +965,14 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    merge an export in by id: existing ids are left alone, entries without a valid
                                    signature or without a remediation are refused with the reason; a dry run
                                    unless --confirm
-  known-issues promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm]
+  known-issues promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--review-by YYYY-MM-DD] [--confirm]
                                    turns an analytics knownIssueCandidates draft into a real
                                    known-issues.json entry. Needs the remediation (a draft cannot
                                    know the fix); without --confirm it only prints the entry.
+                                   --review-by dates when to re-check the workaround: "known-issues export" marks
+                                   an entry reviewDue once the date passes. A target declared fixed that keeps
+                                   relapsing (2+ failures) with an error matching a candidate offers this step in
+                                   "friction regressions".
 
   The pre-action warning (x-webscout-selector-risk) is scoped, not global: history comes from
   EARLIER sessions via an indexed lookup (nothing frozen at session start) and counts only for the

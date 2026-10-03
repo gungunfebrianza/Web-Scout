@@ -175,6 +175,13 @@ test('friction panels: what the agent was told (with its next step), declared-fi
     await page.evaluate(`document.querySelector('#frictionNotices [data-friction-act=notice-next]').click()`);
     assert.ok(await waitFor(page, `(() => { const o = document.getElementById('frictionExplainOut'); return !o.hidden && /"wouldWarn"/.test(o.textContent); })()`), 'the next step ran and its answer is shown');
 
+    // the explain view: decision, trend, and the target's own next steps as buttons that run the request they carry
+    assert.ok(await waitFor(page, `[...document.querySelectorAll('#frictionExplainOut [data-friction-act=step-run]')].some((b) => b.textContent === 'trend')`), 'explain offers a trend step');
+    await page.evaluate(`[...document.querySelectorAll('#frictionExplainOut [data-friction-act=step-run]')].find((b) => b.textContent === 'trend').click()`);
+    assert.ok(await waitFor(page, `/"direction"/.test(document.getElementById('frictionExplainOut').textContent) && /"points"/.test(document.getElementById('frictionExplainOut').textContent)`), 'the trend step ran and its answer is shown');
+    assert.ok(await waitFor(page, `document.getElementById('frictionTrends').innerText.includes('Trend across sessions')`), 'the trend panel lists what is getting worse');
+    assert.match(await page.evaluate(`document.getElementById('frictionTrends').innerText`), /#pay/);
+
     // relapse
     assert.ok(await waitFor(page, `document.getElementById('frictionRegressions').innerText.includes('failing again (1)')`), 'the relapse is listed');
     assert.match(await page.evaluate(`document.getElementById('frictionRegressions').innerText`), /#pay was declared fixed/);

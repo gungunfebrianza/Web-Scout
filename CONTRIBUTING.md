@@ -50,7 +50,10 @@ not exist, when a capability leaves the CLI or the dashboard empty without a `cl
 a `family: 'friction'` capability is missing a surface at all. A new route therefore needs a line there - say
 where the person reaches it from, or why they do not. The CLI and the MCP action stay in lockstep through
 `cli-spec.mjs` (`cli-parity.test.mjs`). Warnings and nudges to an agent go through `notify()` (`notices.mjs`):
-write the message once and attach the next steps; the CLI, the MCP server and the dashboard render them.
+write the message once and attach the next steps; the CLI, the MCP server and the dashboard render them. A refusal the caller can act on gets the same treatment: add its message pattern to `errorNotice()` in
+`notices.mjs` and the relay sends the way out with the error. A step that writes must say so (a non-GET `http`), because
+`friction next` and the dashboard hold it for confirmation. `surface-roundtrip.test.mjs` runs a read over HTTP, the CLI and
+MCP and fails if the answers differ - a new friction read belongs in its case list.
 Wire names are camelCase (`ackRisk`, `tryRecovery`, `strictCrv`); the snake_case spellings older callers send
 are still accepted for the same fields.
 

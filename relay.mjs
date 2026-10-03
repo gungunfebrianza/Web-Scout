@@ -1710,7 +1710,17 @@ function sessionFrictionSummary(sessionId, session, actions) {
   } catch { /* best-effort */ }
   const byKind = {};
   for (const n of told) byKind[n.kind] = (byKind[n.kind] ?? 0) + 1;
-  return { noticeCount: told.length, told: byKind, notices: told.slice(-50), ignored, resolved };
+  // Is each target that failed here getting better or worse over the sessions? (project-wide history, this session's targets)
+  let trends = [];
+  try {
+    const cutoffs = new Map();
+    for (const x of dbApi.listFrictionResolutions()) cutoffs.set(x.key, x.resolved_at);
+    trends = friction.buildFrictionTrend(allActionsIncremental().actions, { resolutions: cutoffs })
+      .filter((r) => failureTimes.has(r.key) && r.points.length >= 2)
+      .slice(0, 6)
+      .map((r) => ({ key: r.key, type: r.type, selector: r.selector, direction: r.direction, sparkline: r.sparkline }));
+  } catch { /* best-effort */ }
+  return { noticeCount: told.length, told: byKind, notices: told.slice(-50), ignored, resolved, trends };
 }
 
 // The full ranked target list (not the digest's top-N), rebuilt at most once per ANALYTICS_CACHE_MS: the
@@ -2037,22 +2047,7 @@ function computeAnalytics() {
   // between them) is a real run boundary, not an artifact of storage order.
   // Capped to the last MACRO_RUN_HISTORY_LIMIT runs per macro (most recent
   // last) - this feeds a small dot strip, not a full audit log.
-  const MACRO_RUN_HISTORY_LIMIT = 20;
-  const macroRunHistory = new Map(); // macroId -> [{ ok, startedAt }]
-  let currentRun = null;
-  for (const a of actions) {
-    const macroId = a.params?.macroId;
-    if (macroId === undefined) { currentRun = null; continue; }
-    if (!afterFix('macro', macroId, a.started_at)) continue; // declared fixed: older runs no longer describe it
-    if (!currentRun || currentRun.macroId !== macroId) {
-      currentRun = { macroId, ok: true, startedAt: a.started_at };
-      const list = macroRunHistory.get(macroId) ?? [];
-      list.push(currentRun);
-      if (list.length > MACRO_RUN_HISTORY_LIMIT) list.shift();
-      macroRunHistory.set(macroId, list);
-    }
-    if (!a.ok) currentRun.ok = false;
-  }
+  const macroRunHistory = friction.buildMacroRuns(actions, { afterFix });
   const macroHealth = macros.map((m) => ({
     id: m.id,
     name: m.name,
@@ -3109,7 +3104,7 @@ const routes = [
       const untilFailure = body.all !== true;
       const rows = dbApi.listActions(sourceId, { ascending: true });
       const clean = (params) => {
-        const { via, macroId, macroName, replayOf, auto, phase, for: _for, triggered_by_action_id: _t, ...rest } = params ?? {};
+        const { via, macroId, macroName, macroRun, replayOf, auto, phase, for: _for, triggered_by_action_id: _t, ...rest } = params ?? {};
         return rest;
       };
       const replayable = (a) => a.type !== 'idb.snapshot' && a.params?.via !== 'auto-remediate' && a.params?.via !== 'replay' && !a.params?.auto;
@@ -3131,15 +3126,22 @@ const routes = [
       }
       const session = requireActiveSession();
       const ran = [];
+      const compared = []; // original vs replay per step, for friction.buildReplayDiff
+      const originalOf = new Map(rows.map((a) => [a.id, a]));
       let now = null;
       for (const step of plan) {
         const timeoutMs = LONG_POLL_TYPES.has(step.type) ? (Number(step.params?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS;
+        const was = originalOf.get(step.actionId);
+        const original = { ok: Boolean(was?.ok), error: was?.error, durationMs: was?.duration_ms, result: was?.result ?? undefined };
+        const startedAt = Date.now();
         try {
-          await dispatchTracked(session, step.type, { ...step.params, via: 'replay', replayOf: sourceId }, agentName, timeoutMs);
+          const out = await dispatchTracked(session, step.type, { ...step.params, via: 'replay', replayOf: sourceId }, agentName, timeoutMs);
           if (MUTATING_TYPES.has(step.type)) bumpMutationCounter(session.id);
           ran.push({ index: step.index, type: step.type, ok: true });
+          compared.push({ index: step.index, type: step.type, original, replay: { ok: true, durationMs: Date.now() - startedAt, result: out?.result ?? undefined } });
         } catch (err) {
           ran.push({ index: step.index, type: step.type, ok: false, error: err.message });
+          compared.push({ index: step.index, type: step.type, original, replay: { ok: false, error: err.message, durationMs: Date.now() - startedAt } });
           now = { index: step.index, type: step.type, error: err.message, errorClass: friction.classifyError(err.message) };
           break;
         }
@@ -3154,6 +3156,7 @@ const routes = [
           : now ? `failed differently at step ${now.index + 1} (${now.type}: ${now.error}) - not the original failure`
           : 'does NOT reproduce: every step, including the one that failed before, succeeded',
         results: ran,
+        diff: friction.buildReplayDiff(compared),
       };
     },
   },
@@ -3333,7 +3336,7 @@ const routes = [
   },
 
   // Macro routes (record/replay) live in routes-macros.mjs.
-  ...macroRoutes({ broadcastUpdate, bumpMutationCounter, buildMacroRiskPreview, buildMacroSelectorSuggestions, COMMAND_TIMEOUT_MS, dbApi, DEFAULT_AGENT, DEFAULT_MACRO_TYPES, dispatchCommand, frictionFactsFor, frictionTracker, getAnalytics, goalWordSet, HOST, HttpError, jaccardSimilarity, LONG_POLL_TYPES, lookupReadCache, MACRO_CONTEXT_SIMILARITY_THRESHOLD, matchKnownIssueForError, MUTATING_TYPES, noteCacheHit, noteScopedRead, readCacheKey, readJsonBody, requireActiveSession, SNAPSHOT_TIMEOUT_MS, storeReadCache, withLoggedAction }),
+  ...macroRoutes({ allActionsIncremental, broadcastUpdate, bumpMutationCounter, buildMacroRiskPreview, buildMacroSelectorSuggestions, COMMAND_TIMEOUT_MS, dbApi, DEFAULT_AGENT, DEFAULT_MACRO_TYPES, dispatchCommand, frictionFactsFor, frictionTracker, getAnalytics, goalWordSet, HOST, HttpError, jaccardSimilarity, LONG_POLL_TYPES, lookupReadCache, MACRO_CONTEXT_SIMILARITY_THRESHOLD, matchKnownIssueForError, MUTATING_TYPES, noteCacheHit, noteScopedRead, readCacheKey, readJsonBody, requireActiveSession, SNAPSHOT_TIMEOUT_MS, storeReadCache, withLoggedAction }),
 
   {
     // Cross-session search over every session's own action log (type/params/

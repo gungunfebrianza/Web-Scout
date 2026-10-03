@@ -20,6 +20,9 @@ const root = fs.mkdtempSync(path.join(realTmp, 'webscout-testroot-'));
 const IGNORED = ['node-compile-cache', 'webscout-relays.jsonl', 'webscout-scratch-log.jsonl', 'webscout-scratch-ledger.jsonl', 'webscout-host-samples.jsonl', 'webscout-warn-cache-', 'msedge_', 'cv_debug.log']; // shared-by-design files
 const ours = (dir) => scratchStats({ baseDir: dir }).dirs; // our prefixes only: unrelated tools may create wl-* meanwhile
 const before = ours(realTmp);
+// Names, not just a count: "real temp gained 1 dir" is not enough to find which test made it.
+const namesIn = (dir) => { try { return new Set(fs.readdirSync(dir).filter((f) => PREFIXES.some((p) => f.startsWith(p)))); } catch { return new Set(); } };
+const namesBefore = namesIn(realTmp);
 
 const files = process.argv.slice(2);
 const args = ['--test', ...(files.length ? files : fs.readdirSync(here).filter((f) => f.endsWith('.test.mjs')))];
@@ -51,7 +54,8 @@ for (const p of orphans) killTree(p.pid);
 if (left) console.error(`run-tests: leaked: ${fs.readdirSync(root).filter(isLeak).join(', ')}`);
 const ok = removeDirSync(root);
 const grew = ours(realTmp) - before;
-console.error(`\nrun-tests: ${left} scratch entr${left === 1 ? 'y' : 'ies'} left in the private root${left ? ' (tests that leaked - fix them)' : ''}; ${orphans.length} orphan browser(s) killed; root ${ok ? 'wiped' : 'could NOT be fully wiped'}; real temp gained ${grew} web-scout dir(s).`);
+const gainedNames = [...namesIn(realTmp)].filter((n) => !namesBefore.has(n));
+console.error(`\nrun-tests: ${left} scratch entr${left === 1 ? 'y' : 'ies'} left in the private root${left ? ' (tests that leaked - fix them)' : ''}; ${orphans.length} orphan browser(s) killed; root ${ok ? 'wiped' : 'could NOT be fully wiped'}; real temp gained ${grew} web-scout dir(s)${gainedNames.length ? ` (${gainedNames.join(", ")})` : ""}.`);
 // Last-run record for the dashboard's "Test runs" panel. Written to the REAL temp dir (the private root is wiped).
 try {
   fs.writeFileSync(testRunFile(), JSON.stringify({
@@ -63,7 +67,7 @@ if (grew > 0 || orphans.length || left > 0) {
   // Forensics: a leak-only failure has no failing test to point at, so keep the list (flaky-sweep.mjs reads it too).
   try {
     fs.mkdirSync(path.join(here, '.sweep'), { recursive: true });
-    fs.writeFileSync(path.join(here, '.sweep', 'last-leaks.json'), JSON.stringify({ at: new Date().toISOString(), leakedEntries: leakedNames, orphansKilled: orphans.length, realTempGained: grew, helpersStopped: reaped, testExitStatus: r.status ?? null }, null, 2));
+    fs.writeFileSync(path.join(here, '.sweep', 'last-leaks.json'), JSON.stringify({ at: new Date().toISOString(), leakedEntries: leakedNames, orphansKilled: orphans.length, realTempGained: grew, realTempNew: gainedNames, helpersStopped: reaped, testExitStatus: r.status ?? null }, null, 2));
   } catch { /* forensics only */ }
   console.error('run-tests: FAIL - the run leaked (' + (left ? 'entries left in its private root' : 'outside its private root or left a browser running') + ').');
   process.exit(1);

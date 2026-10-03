@@ -112,3 +112,20 @@ export function helpMissing(parsed, topic, sub) {
   const known = unique(parsed.blocks.map((b) => b.topic)).join(', ');
   return `no help for "${[topic, sub].filter(Boolean).join(' ')}" - topics: ${known}. "help" lists them with their commands.`;
 }
+
+// ---- the same help, in an MCP caller's terms ----
+// usage.txt is written for a shell: `--notice-days N`. An MCP caller passes `noticeDays` in params and has no flags.
+// mcpForm() rewrites one command's help with the param names from its cli-spec row, marks flags that only exist on the
+// command line, and lists the params with their kind, so describe() answers in the caller's own vocabulary.
+export function mcpForm(text, row) {
+  const map = row?.params ?? {};
+  const cliOnly = row?.cliOnly ?? {};
+  const rewritten = String(text ?? '').replace(/--[a-z][a-z0-9-]*/g, (flag) => {
+    if (map[flag]) return map[flag];
+    if (flag === '--agent') return 'agent';
+    return cliOnly[flag] !== undefined ? `${flag} (CLI only)` : flag;
+  });
+  const kindOf = (flag) => ((row?.bool ?? []).includes(flag) ? 'boolean' : 'value');
+  const params = Object.entries(map).map(([flag, name]) => ({ name, type: kindOf(flag), from: flag }));
+  return { help: rewritten, params, cliOnly: Object.keys(cliOnly) };
+}

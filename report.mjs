@@ -162,7 +162,7 @@ export function buildReportMarkdown({ session, actions, snapshots, diffs, qa, co
 
   // What friction awareness did for this session: what the agent was told, what it kept doing anyway, and
   // what was declared fixed. Present only when there is something to say.
-  if (friction && (friction.noticeCount || friction.ignored?.length || friction.resolved?.length)) {
+  if (friction && (friction.noticeCount || friction.ignored?.length || friction.resolved?.length || friction.trends?.length)) {
     lines.push('## Friction awareness');
     lines.push('');
     const kinds = Object.entries(friction.told ?? {}).map(([k, n]) => `${n} ${k}`).join(', ');
@@ -180,6 +180,12 @@ export function buildReportMarkdown({ session, actions, snapshots, diffs, qa, co
       lines.push('Declared fixed during this session:');
       lines.push('');
       for (const x of friction.resolved) lines.push(`- ${mdEscapeCell(x.type)} ${mdEscapeCell(x.selector)} at ${x.resolvedAt}${x.note ? ` - ${mdEscapeCell(x.note)}` : ''}`);
+      lines.push('');
+    }
+    if (friction.trends?.length) {
+      lines.push('Across sessions (failure rate per session, newest last):');
+      lines.push('');
+      for (const x of friction.trends) lines.push(`- ${x.sparkline} ${mdEscapeCell(x.type)} ${mdEscapeCell(x.selector)} - ${x.direction}`);
       lines.push('');
     }
   }

@@ -1,7 +1,9 @@
 // The macro (record/replay) family of HTTP routes, split out of relay.mjs. Everything the handlers need arrives in `d`.
 // surfaces.test.mjs reads this file too.
+import * as friction from './friction.mjs';
+
 export function macroRoutes(d) {
-  const { broadcastUpdate, bumpMutationCounter, buildMacroRiskPreview, buildMacroSelectorSuggestions, COMMAND_TIMEOUT_MS, dbApi, DEFAULT_AGENT, DEFAULT_MACRO_TYPES, dispatchCommand, frictionFactsFor, frictionTracker, getAnalytics, goalWordSet, HOST, HttpError, jaccardSimilarity, LONG_POLL_TYPES, lookupReadCache, MACRO_CONTEXT_SIMILARITY_THRESHOLD, matchKnownIssueForError, MUTATING_TYPES, noteCacheHit, noteScopedRead, readCacheKey, readJsonBody, requireActiveSession, SNAPSHOT_TIMEOUT_MS, storeReadCache, withLoggedAction } = d;
+  const { allActionsIncremental, broadcastUpdate, bumpMutationCounter, buildMacroRiskPreview, buildMacroSelectorSuggestions, COMMAND_TIMEOUT_MS, dbApi, DEFAULT_AGENT, DEFAULT_MACRO_TYPES, dispatchCommand, frictionFactsFor, frictionTracker, getAnalytics, goalWordSet, HOST, HttpError, jaccardSimilarity, LONG_POLL_TYPES, lookupReadCache, MACRO_CONTEXT_SIMILARITY_THRESHOLD, matchKnownIssueForError, MUTATING_TYPES, noteCacheHit, noteScopedRead, readCacheKey, readJsonBody, requireActiveSession, SNAPSHOT_TIMEOUT_MS, storeReadCache, withLoggedAction } = d;
   return [
   // ---------- Macros (record/replay) ----------
   //
@@ -31,15 +33,19 @@ export function macroRoutes(d) {
   {
     // ?risk=1 adds, per macro, how many of its steps would draw a friction warning right now (the same facts the
     // pre-action header uses) and the worst one - capped to 50 macros so the dashboard can ask on every refresh.
+    // ?health=1 adds how its replays have gone: runs, pass rate, and what the last run did (the first step that failed).
     method: 'GET',
     pattern: /^\/macros$/,
     handler: async (req) => {
       const macros = dbApi.listMacros();
-      const wantRisk = new URL(req.url, `http://${HOST}`).searchParams.get('risk') === '1';
-      if (!wantRisk) return macros;
+      const q = new URL(req.url, `http://${HOST}`).searchParams;
+      const wantRisk = q.get('risk') === '1';
+      const runs = q.get('health') === '1' ? friction.buildMacroRuns(allActionsIncremental().actions) : null;
+      if (!wantRisk && !runs) return macros;
       const sessionId = dbApi.getCurrentSession()?.id ?? -1;
       return macros.map((m, i) => {
-        if (i >= 50 || !Array.isArray(m.steps)) return m;
+        if (runs) m = { ...m, health: friction.summarizeMacroRuns(runs.get(m.id)) };
+        if (!wantRisk || i >= 50 || !Array.isArray(m.steps)) return m;
         let preview = [];
         try { preview = buildMacroRiskPreview(sessionId, m.steps, 0, DEFAULT_AGENT); } catch { /* best-effort */ }
         return { ...m, risk: { riskySteps: preview.length, worst: preview[0] ? { stepIndex: preview[0].stepIndex, selector: preview[0].selector, failCount: preview[0].failCount } : null } };
@@ -154,6 +160,8 @@ export function macroRoutes(d) {
         : undefined;
 
 
+      // One id per replay: back-to-back runs of the same macro are otherwise one burst in the log (friction.buildMacroRuns).
+      const macroRun = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
       const results = [];
       const frictionWarnings = [];
       // The whole macro's risk shape up front, worst first - before any step runs.
@@ -194,7 +202,7 @@ export function macroRoutes(d) {
           }
         } catch { /* best-effort - friction bookkeeping never blocks a replay */ }
         try {
-          const { result } = await withLoggedAction(session.id, step.type, { ...step.params, via: 'macro', macroId: macro.id, macroName: macro.name }, () => dispatchCommand(step.type, step.params ?? {}, stepTimeoutMs, agentName), agentName);
+          const { result } = await withLoggedAction(session.id, step.type, { ...step.params, via: 'macro', macroId: macro.id, macroName: macro.name, macroRun }, () => dispatchCommand(step.type, step.params ?? {}, stepTimeoutMs, agentName), agentName);
           // A macro's mutating steps (idb.put/delete/eval/...) previously
           // never bumped sessionMutationCounters - invisible to /command's
           // own cache too, so a stale read cached before this macro ran

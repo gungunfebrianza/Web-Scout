@@ -8,6 +8,11 @@ import * as notices from './notices.mjs';
 
 export function frictionRoutes(d) {
   const { allActionsIncremental, allFrictionTargets, broadcastUpdate, COMMAND_TYPES, commitsBetween, compileSignature, computeAnalytics, dbApi, declareFrictionResolved, DEFAULT_AGENT, ensureFrictionSession, frictionFactsFor, frictionTargetFromBody, frictionTracker, getAnalytics, HOST, HttpError, KNOWN_ISSUES_PATH, loadKnownIssues, PORT, readJsonBody, readKnownIssuesRaw, readSharedKnownIssues, resolveFrictionCluster } = d;
+  // An entry may carry reviewBy (YYYY-MM-DD): a workaround is a bet that the cause stays the same, so say when to look again.
+  const validReviewBy = (v) => v === undefined || v === null || v === '' || (/^\d{4}-\d{2}-\d{2}$/.test(String(v)) && !Number.isNaN(Date.parse(v)));
+  const today = () => new Date().toISOString().slice(0, 10);
+  const withReview = (e) => (e && typeof e === 'object' && e.reviewBy ? { ...e, reviewDue: String(e.reviewBy) <= today() } : e);
+  const RELAPSE_PROMOTE_AT = 2;
   const resolutionMap = () => {
     const map = new Map();
     try { for (const x of dbApi.listFrictionResolutions()) map.set(x.key, x.resolved_at); } catch { /* best-effort */ }
@@ -202,7 +207,21 @@ export function frictionRoutes(d) {
   },
 
   // ---- Declared fixed, failing again.
-  { method: 'GET', pattern: /^\/friction\/regressions$/, handler: async () => { const list = friction.buildRelapses(dbApi.listFrictionResolutions(), allActionsIncremental().actions).map((x) => ({ ...x, changedBetween: commitsBetween(x.resolvedAt, x.firstFailedAt) })); return { count: list.length, relapses: list }; } },
+  // A target that relapses RELAPSE_PROMOTE_AT or more times and whose error matches a known-issue candidate's signature is
+  // a cause worth writing down: the relapse then carries the step that captures it.
+  {
+    method: 'GET',
+    pattern: /^\/friction\/regressions$/,
+    handler: async () => {
+      let candidates = [];
+      try { candidates = computeAnalytics().knownIssueCandidates ?? []; } catch { /* best-effort */ }
+      const list = friction.buildRelapses(dbApi.listFrictionResolutions(), allActionsIncremental().actions).map((x) => {
+        const hit = x.failuresSince >= RELAPSE_PROMOTE_AT && x.lastError ? candidates.find((c) => c.draft?.signature && x.lastError.includes(c.draft.signature)) : null;
+        return { ...x, changedBetween: commitsBetween(x.resolvedAt, x.firstFailedAt), ...(hit ? { next: [notices.promoteCommand(hit.draft.id)] } : {}) };
+      });
+      return { count: list.length, relapses: list };
+    },
+  },
 
   { method: 'GET', pattern: /^\/friction\/config$/, handler: async () => friction.frictionConfig() },
 
@@ -230,7 +249,7 @@ export function frictionRoutes(d) {
   // ---- The registry as written, for sharing between checkouts. Import merges by id: an id already present is
   // reported and left alone, an invalid entry (no id/signature, a signature that does not compile) is refused
   // with the reason; nothing is written unless confirm:true.
-  { method: 'GET', pattern: /^\/known-issues$/, handler: async () => ({ file: KNOWN_ISSUES_PATH, entries: readKnownIssuesRaw(), shared: readSharedKnownIssues() }) },
+  { method: 'GET', pattern: /^\/known-issues$/, handler: async () => { const entries = readKnownIssuesRaw().map(withReview); return { file: KNOWN_ISSUES_PATH, entries, ...(entries.some((e) => e?.reviewDue) ? { reviewDue: entries.filter((e) => e?.reviewDue).map((e) => e.id) } : {}), shared: readSharedKnownIssues() }; } },
   {
     method: 'POST',
     pattern: /^\/known-issues\/import$/,
@@ -247,7 +266,8 @@ export function frictionRoutes(d) {
         try { compileSignature(entry.signature); } catch (err) { skipped.push({ id: entry.id, reason: `signature does not compile: ${err.message}` }); continue; }
         if (entry.remediation === undefined || entry.remediation === null || entry.remediation === '') { skipped.push({ id: entry.id, reason: 'remediation is required - an entry without a fix is not worth sharing' }); continue; }
         have.add(entry.id);
-        add.push({ id: entry.id, signature: entry.signature, description: entry.description ?? null, remediation: entry.remediation });
+        if (!validReviewBy(entry.reviewBy)) { skipped.push({ id: entry.id, reason: 'reviewBy must be a date like 2026-12-31' }); continue; }
+        add.push({ id: entry.id, signature: entry.signature, description: entry.description ?? null, remediation: entry.remediation, ...(entry.reviewBy ? { reviewBy: entry.reviewBy } : {}) });
       }
       if (body.confirm !== true) return { written: false, wouldAdd: add, skipped, file: KNOWN_ISSUES_PATH, note: 'dry run - repeat with confirm:true (CLI: --confirm) to append them' };
       if (add.length) {
@@ -269,14 +289,16 @@ export function frictionRoutes(d) {
     handler: async (req) => {
       const body = await readJsonBody(req);
       if (typeof body.id !== 'string' || !body.id) throw new HttpError(400, 'id is required: a candidate id from analytics.knownIssueCandidates[].draft.id');
+      if (!validReviewBy(body.reviewBy)) throw new HttpError(400, 'reviewBy must be a date like 2026-12-31 - when to look at this workaround again');
       const candidate = computeAnalytics().knownIssueCandidates.find((c) => c.draft.id === body.id);
       if (!candidate) throw new HttpError(404, `no known-issue candidate "${body.id}" (candidates are listed by "analytics")`);
-      const text = (v, fallback) => (typeof v === 'string' && v.trim() ? v.trim() : fallback);
+      const text =(v, fallback) => (typeof v === 'string' && v.trim() ? v.trim() : fallback);
       const entry = {
         id: text(body.newId, candidate.draft.id),
         signature: text(body.signature, candidate.draft.signature),
         description: text(body.description, candidate.draft.description),
         remediation: text(body.remediation, ''),
+        ...(body.reviewBy ? { reviewBy: String(body.reviewBy) } : {}),
       };
       if (!entry.remediation) {
         const suggested = candidate.suggestedRemediation;

@@ -50,7 +50,8 @@ const MCP_TOOL_MAX_BYTES = 2500;
 // 15,774) - same convention, same commit as the text.
 // Raised to 15900 in friction round 5 (session start --auto-recover / frictionBriefing, measured 15,872) - same convention.
 // Raised to 16300 in round 6 (session replay, measured 16,255) - same convention.
-const HELP_GROUP_MAX_CHARS = 16300;
+// Raised to 16600 in round 8 (session replay's DIVERGED line, measured 16,517) - same convention.
+const HELP_GROUP_MAX_CHARS = 16600;
 const HELP_INDEX_MAX_CHARS = 2200;
 
 let child;

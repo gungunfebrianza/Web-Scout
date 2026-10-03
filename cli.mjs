@@ -393,6 +393,8 @@ async function handleSession(sub, rawArgs) {
     if (!id) throw new Error('session replay requires the id of the session to replay, e.g. session replay 12 (a dry run) or session replay 12 --confirm');
     const out = await request('POST', `/sessions/${id}/replay`, { all: all === true, confirm: confirm === true, agent: agentFlag });
     if (!out.dryRun && out.verdict) console.error(`VERDICT: ${out.verdict}`);
+    const first = out.diff?.firstDivergence;
+    if (first) console.error(`DIVERGED at step ${first.index + 1} (${first.type}): ${first.kind}${first.error ? ` - ${first.error}` : first.changed ? ` - changed: ${first.changed.join(', ')}` : first.kind === 'slower' ? ` - ${first.originalMs}ms then, ${first.replayMs}ms now` : ''}`);
     printResult(out);
     return;
   }
@@ -593,10 +595,12 @@ async function handleMacro(sub, rawArgs) {
     return;
   }
   if (sub === 'list') {
-    let risk;
+    let risk; let health;
     ({ args: rawArgs, value: risk } = extractBooleanFlag(rawArgs, '--risk'));
-    const macros = await request('GET', risk ? '/macros?risk=1' : '/macros');
+    ({ args: rawArgs, value: health } = extractBooleanFlag(rawArgs, '--health'));
+    const macros = await request('GET', `/macros${risk || health ? `?${[risk ? 'risk=1' : '', health ? 'health=1' : ''].filter(Boolean).join('&')}` : ''}`);
     for (const m of macros) {
+      if (m.health?.lastRun && !m.health.lastRun.ok) console.error(`NOTE: macro #${m.id} "${m.name}" failed on its last run at step ${m.health.lastRun.failedStep?.step} (${m.health.lastRun.failedStep?.type} ${m.health.lastRun.failedStep?.target ?? ''}): ${m.health.lastRun.failedStep?.error ?? ''}`);
       if (m.risk?.riskySteps) console.error(`NOTE: macro #${m.id} "${m.name}" has ${m.risk.riskySteps} step(s) that would draw a friction warning right now (worst: step ${m.risk.worst.stepIndex} "${m.risk.worst.selector}", failed ${m.risk.worst.failCount}x)`);
     }
     printResult(macros);
@@ -1157,15 +1161,16 @@ async function main() {
       printResult(await request('POST', '/known-issues/import', { entries, confirm: confirm === true }));
       return;
     }
-    if (rest[0] !== 'promote') throw new Error('known-issues supports: promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm] | export [--out <file>] | import <file> [--confirm]');
+    if (rest[0] !== 'promote') throw new Error('known-issues supports: promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--review-by YYYY-MM-DD] [--confirm] | export [--out <file>] | import <file> [--confirm]');
     let kargs = rest.slice(1);
-    let remediation; let description; let signature; let confirm;
+    let remediation; let description; let signature; let confirm; let reviewBy;
+    ({ args: kargs, value: reviewBy } = extractFlag(kargs, '--review-by'));
     ({ args: kargs, value: remediation } = extractFlag(kargs, '--remediation'));
     ({ args: kargs, value: description } = extractFlag(kargs, '--description'));
     ({ args: kargs, value: signature } = extractFlag(kargs, '--signature'));
     ({ args: kargs, value: confirm } = extractBooleanFlag(kargs, '--confirm'));
     if (!kargs[0]) throw new Error('known-issues promote requires <candidateId> (from "analytics" -> knownIssueCandidates[].draft.id)');
-    printResult(await request('POST', '/known-issues/promote', { id: kargs[0], remediation, description, signature, confirm: confirm === true }));
+    printResult(await request('POST', '/known-issues/promote', { id: kargs[0], remediation, description, signature, reviewBy, confirm: confirm === true }));
     return;
   }
 

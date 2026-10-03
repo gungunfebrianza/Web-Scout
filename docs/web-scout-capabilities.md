@@ -37,6 +37,8 @@ A `-` in the CLI or Dashboard column carries a reason in `surfaces.mjs` (`cliWhy
 | friction-config _(friction)_ | `GET /friction/config` | `friction config` | `webscout_meta.friction` | `GET /friction/config` |
 | friction-targets _(friction)_ | `GET /friction/targets` | `friction targets` | `webscout_meta.friction` | `GET /friction/targets` |
 | friction-notices _(friction)_ | `GET /friction/notices` | `friction notices`<br>`friction watch` | `webscout_meta.friction` | `GET /friction/notices` |
+| friction-next _(friction)_ | `GET /friction/next`<br>`POST /friction/next` | `friction next` | `webscout_meta.friction` | `POST /friction/next` |
+| friction-trend _(friction)_ | `GET /friction/trend` | `friction trend` | `webscout_meta.friction` | `GET /friction/trend` |
 | friction-regressions _(friction)_ | `GET /friction/regressions` | `friction regressions` | `webscout_meta.friction` | `GET /friction/regressions` |
 | friction-prune _(friction)_ | `POST /friction/prune` | `friction prune` | `webscout_meta.friction` | `POST /friction/prune` |
 | known-issues _(friction)_ | `POST /known-issues/promote`<br>`GET /known-issues`<br>`POST /known-issues/import` | `known-issues promote`<br>`known-issues export`<br>`known-issues import` | `webscout_meta.friction` | `POST /known-issues/promote`<br>`GET /known-issues`<br>`POST /known-issues/import` |

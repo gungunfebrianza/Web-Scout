@@ -39,7 +39,7 @@ import {
 } from './client.mjs';
 import { describeFailureContext } from './friction.mjs';
 import { CLI_SPEC } from './cli-spec.mjs';
-import { parseUsage, helpTopic } from './help.mjs';
+import { parseUsage, helpTopic, mcpForm } from './help.mjs';
 
 const SERVER_NAME = 'web-scout';
 const SERVER_VERSION = '0.27.0'; // bumped alongside docs/web-scout-roadmap.md's V39 entry
@@ -97,7 +97,7 @@ const TOOLS = [
       + '  describe {tool?, action?} - the full help for one action (or a whole tool): usage text and the flag-to-param mapping\n'
       + '  agents {} - connected multi-tab agent names\n'
       + '  analytics {} - Friction Analytics: recurring failure patterns across ALL sessions\n'
-      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?, days?, noticeDays?, readDays?, filter?, sort?, limit?, session?, since?, entries?, notice?, step?, sessions?} - sub: explain (why it warns), resolve|unresolve (mark fixed; type may also be macro|verity|type|cluster, selector = its id/label/command), list, session, targets (ranked; filter text, sort cost|fails|wasted|tokens|recent|oldest), notices (what agents were told; since = last id seen), next (a notice's steps; step runs one, a write needs confirm), trend (type+selector: its rate per session; none: worse/better project-wide), regressions (fixed, failing again), issues (known-issues.json; entries imports, confirm writes), config, prune (days: result bodies; noticeDays; readDays; confirm applies), promote (candidate id; confirm writes). Page commands (page.reload...): selector = origin or origin+path\n'
+      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?, days?, noticeDays?, readDays?, filter?, sort?, limit?, session?, since?, entries?, notice?, step?, sessions?, reviewBy?} - sub: explain (why it warns), resolve|unresolve (mark fixed; type may also be macro|verity|type|cluster, selector = its id/label/command), list, session, targets (ranked; filter text, sort cost|fails|wasted|tokens|recent|oldest), notices (what agents were told; since = last id seen), next (steps a notice offered; step runs one, a write needs confirm), trend (type+selector: its rate per session; none: worse/better project-wide), regressions (fixed, failing again), issues (known-issues.json; entries imports, confirm writes), config, prune (days: result bodies; noticeDays; readDays; confirm applies), promote (candidate id; reviewBy = a date to re-check it; confirm writes). Page commands (page.reload...): selector = origin or origin+path\n'
       + '  search {q} - full-text search across every session\'s actions\n'
       + '  db_version_check {agent?, dbJsPath?} - js/db.js\'s DB_VERSION vs the tab\'s LIVE IndexedDB version; on drift also probes whether opening at the source version is blocked\n'
       + '  dashboard_url {} - the realtime dashboard URL (does not open a browser)\n'
@@ -127,7 +127,7 @@ const TOOLS = [
         if (sub === 'issues') return Array.isArray(p.entries) ? request('POST', '/known-issues/import', { entries: p.entries, confirm: p.confirm === true }) : request('GET', '/known-issues');
         if (sub === 'prune') return request('POST', '/friction/prune', { days: p.days, noticeDays: p.noticeDays, readDays: p.readDays, confirm: p.confirm === true });
         if (sub === 'promote') {
-          return request('POST', '/known-issues/promote', { id: requireField(p, 'id'), remediation: p.remediation, description: p.description, signature: p.signature, confirm: p.confirm === true });
+          return request('POST', '/known-issues/promote', { id: requireField(p, 'id'), remediation: p.remediation, description: p.description, signature: p.signature, reviewBy: p.reviewBy, confirm: p.confirm === true });
         }
         if (sub !== 'explain' && sub !== 'resolve' && sub !== 'unresolve') throw new Error('params.sub must be explain|resolve|unresolve|list|session|targets|notices|next|trend|regressions|issues|config|prune|promote');
         const target = { type: requireField(p, 'type'), selector: p.selector, store: p.store };
@@ -453,7 +453,7 @@ const TOOLS = [
     description: 'Named, replayable sequences of a session\'s recorded actions.\n'
       + 'Actions:\n'
       + '  record {name, sessionId, all?} - save that session\'s replayable actions (dom.click/fill/wait, idb.put/delete/deleteMany/clear/wait, page.reload, eval) as a macro\n'
-      + '  list {risk?} - id, name, step count, source session per macro; risk adds steps that would draw a friction warning now\n'
+      + '  list {risk?, health?} - id, name, step count, source session per macro; risk: steps that would warn now; health: pass rate and last run\n'
       + '  show {id} - full detail incl. every step\n'
       + '  run {id, continueOnError?, fromStep?, confirm?, full?} - replay against the ACTIVE session (409 if its goal looks unrelated to the macro\'s source session unless confirm:true); full:true returns every step\'s complete result instead of the compact summary\n'
       + '  update {id, steps} - replace the whole step array (fix/reorder/remove a step without deleting and re-recording)\n'
@@ -461,7 +461,7 @@ const TOOLS = [
       + '  export_verity {id, outPath?} - skeleton Verity scenario JSON from dom.click/dom.wait steps (selectors left as TODO)',
     actions: {
       record: (p) => request('POST', '/macros', { name: requireField(p, 'name'), sessionId: Number(requireField(p, 'sessionId')), all: !!p.all }),
-      list: (p) => request('GET', p?.risk ? '/macros?risk=1' : '/macros'),
+      list: (p) => request('GET', `/macros${p?.risk || p?.health ? `?${[p?.risk ? 'risk=1' : '', p?.health ? 'health=1' : ''].filter(Boolean).join('&')}` : ''}`),
       show: (p) => request('GET', `/macros/${requireField(p, 'id')}`),
       run: (p) => request('POST', `/macros/${requireField(p, 'id')}/run`, {
         continueOnError: !!p.continueOnError, confirm: !!p.confirm, full: !!p.full, fromStep: p.fromStep !== undefined ? Number(p.fromStep) : undefined,
@@ -608,7 +608,9 @@ function describeAction(p) {
     tool: found.name, action, signature: line?.trim() ?? null,
     commands: rows.map((r) => {
       const [topic, sub] = r.cmd.split(' ');
-      return { cli: r.cmd, flagToParam: r.params ?? {}, help: helpTopic(usageParsed, topic, sub) };
+      // The help is rewritten into params terms (noticeDays, not --notice-days); `cli` stays so a caller can map it back.
+      const form = mcpForm(helpTopic(usageParsed, topic, sub), r);
+      return { cli: r.cmd, flagToParam: r.params ?? {}, params: form.params, cliOnly: form.cliOnly, help: form.help };
     }),
   };
 }
@@ -624,6 +626,58 @@ const RESOURCES = [
   { uri: 'webscout://regressions', name: 'Regressions', description: 'targets declared fixed that have failed again', mimeType: 'application/json', route: '/friction/regressions' },
   { uri: 'webscout://targets', name: 'Friction targets', description: 'the ranked list of recurring failures', mimeType: 'application/json', route: '/friction/targets?limit=20' },
 ];
+
+// ---------- resource subscriptions: the relay pushes, the client is told ----------
+// A client that subscribed to a resource (resources/subscribe) gets notifications/resources/updated when the relay says
+// the thing changed, instead of having to poll. The relay's own event stream (GET /events, what the dashboard listens to)
+// is the source: one connection, opened with the first subscription and closed with the last. The notification carries
+// only the uri - the client then reads it, as it would any resource.
+const subscribed = new Set();
+const RESOURCE_EVENTS = { notice: ['webscout://notices'], analytics: ['webscout://regressions', 'webscout://targets'], action: ['webscout://targets'] };
+const pendingNotify = new Map();
+let eventStream = null;
+
+function notifyUpdated(uri) {
+  if (!subscribed.has(uri) || pendingNotify.has(uri)) return;
+  pendingNotify.set(uri, setTimeout(() => { pendingNotify.delete(uri); if (subscribed.has(uri)) sendMessage({ jsonrpc: '2.0', method: 'notifications/resources/updated', params: { uri } }); }, 150));
+}
+
+async function followRelayEvents() {
+  if (eventStream) return;
+  const controller = new AbortController();
+  eventStream = controller;
+  while (!controller.signal.aborted) {
+    try {
+      const res = await fetch(`${BASE}/events`, { signal: controller.signal });
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for await (const chunk of res.body) {
+        buffer += decoder.decode(chunk, { stream: true });
+        let end;
+        while ((end = buffer.indexOf('\n\n')) >= 0) {
+          const block = buffer.slice(0, end);
+          buffer = buffer.slice(end + 2);
+          const data = block.split('\n').find((l) => l.startsWith('data: '));
+          if (!data) continue;
+          let kind;
+          try { kind = JSON.parse(data.slice(6)).kind; } catch { continue; }
+          for (const uri of RESOURCE_EVENTS[kind] ?? []) notifyUpdated(uri);
+        }
+      }
+    } catch { /* relay down or stream dropped - retry below */ }
+    if (!controller.signal.aborted) await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
+function subscribeResource(uri) {
+  subscribed.add(uri);
+  followRelayEvents().catch(() => {});
+}
+
+function unsubscribeResource(uri) {
+  subscribed.delete(uri);
+  if (!subscribed.size && eventStream) { eventStream.abort(); eventStream = null; }
+}
 
 async function callTool(name, args) {
   if (name === EVAL_TOOL.name) return EVAL_TOOL.call(args ?? {});
@@ -644,7 +698,7 @@ function handleInitialize(msg) {
   const protocolVersion = msg.params?.protocolVersion || '2025-06-18';
   sendResult(msg.id, {
     protocolVersion,
-    capabilities: { tools: {}, resources: {} },
+    capabilities: { tools: {}, resources: { subscribe: true } },
     serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
   });
 }
@@ -697,6 +751,13 @@ async function handleMessage(msg) {
       const body = await request('GET', res.route);
       sendResult(msg.id, { contents: [{ uri: res.uri, mimeType: res.mimeType, text: JSON.stringify(body) }] });
     } catch (err) { sendError(msg.id, -32603, err.message); }
+    return;
+  }
+  if (msg.method === 'resources/subscribe' || msg.method === 'resources/unsubscribe') {
+    const uri = msg.params?.uri;
+    if (!RESOURCES.some((r) => r.uri === uri)) { sendError(msg.id, -32602, `unknown resource: ${uri}`); return; }
+    if (msg.method === 'resources/subscribe') subscribeResource(uri); else unsubscribeResource(uri);
+    sendResult(msg.id, {});
     return;
   }
   if (msg.method === 'ping') { sendResult(msg.id, {}); return; }

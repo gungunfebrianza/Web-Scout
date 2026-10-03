@@ -403,6 +403,87 @@ export function buildRelapses(resolutions, actions) {
   }).sort((a, b) => b.failuresSince - a.failuresSince);
 }
 
+// ---------- replay diff: where did the replay stop matching the original? ----------
+
+const VOLATILE_KEYS = new Set(['durationMs', 'duration_ms', 'elapsedMs', 'ts', 'at', 'timestamp', 'startedAt', 'time']);
+const stable = (v) => JSON.stringify(v, (k, x) => (VOLATILE_KEYS.has(k) ? undefined : x));
+const SLOW_FACTOR = 3;
+const SLOW_MIN_EXTRA_MS = 500;
+
+// steps: [{ index, type, original: { ok, error?, durationMs?, result? }, replay: { ok, error?, durationMs?, result? } }]
+// kind per step: same | same-failure | now-fails | now-works | different-failure | result-changed | slower.
+// firstDivergence is the first step that is none of same / same-failure - "same-failure" is the reproduction itself.
+export function buildReplayDiff(steps) {
+  const rows = (steps ?? []).map((s) => {
+    const o = s.original ?? {};
+    const r = s.replay ?? {};
+    const base = { index: s.index, type: s.type };
+    if (o.ok && !r.ok) return { ...base, kind: 'now-fails', errorClass: classifyError(r.error), error: String(r.error ?? '').slice(0, 160) };
+    if (!o.ok && r.ok) return { ...base, kind: 'now-works', wasError: String(o.error ?? '').slice(0, 160) };
+    if (!o.ok && !r.ok) {
+      const was = classifyError(o.error);
+      const now = classifyError(r.error);
+      return was === now ? { ...base, kind: 'same-failure', errorClass: now } : { ...base, kind: 'different-failure', was, now, error: String(r.error ?? '').slice(0, 160) };
+    }
+    if (o.result !== undefined && r.result !== undefined && stable(o.result) !== stable(r.result)) {
+      const keys = new Set([...Object.keys(o.result ?? {}), ...Object.keys(r.result ?? {})]);
+      const changed = [...keys].filter((k) => !VOLATILE_KEYS.has(k) && JSON.stringify(o.result?.[k]) !== JSON.stringify(r.result?.[k])).slice(0, 5);
+      return { ...base, kind: 'result-changed', changed };
+    }
+    const od = Number(o.durationMs) || 0;
+    const rd = Number(r.durationMs) || 0;
+    if (rd - od >= SLOW_MIN_EXTRA_MS && rd >= od * SLOW_FACTOR) return { ...base, kind: 'slower', originalMs: od, replayMs: rd };
+    return { ...base, kind: 'same' };
+  });
+  const firstDivergence = rows.find((x) => x.kind !== 'same' && x.kind !== 'same-failure') ?? null;
+  return { compared: rows.length, firstDivergence, steps: rows.filter((x) => x.kind !== 'same') };
+}
+
+// ---------- macro runs ----------
+
+export const MACRO_RUN_HISTORY_LIMIT = 20;
+
+// A "run" is a burst of consecutive same-macroId actions in the chronological log: the steps of one replay are logged
+// back to back, so a macroId change (or a non-macro action between them) is a real boundary. Per macro, the last
+// MACRO_RUN_HISTORY_LIMIT runs, newest last; a run records whether every logged step worked and, if not, the first
+// that failed (`step` counts the run's LOGGED steps - cache hits and no-op skips write no row).
+// afterFix(kind, id, at): false drops actions older than a declared "mark fixed" for that macro.
+export function buildMacroRuns(actions, { afterFix = () => true } = {}) {
+  const runs = new Map();
+  let current = null;
+  for (const a of actions ?? []) {
+    const macroId = a.params?.macroId;
+    if (macroId === undefined) { current = null; continue; }
+    if (!afterFix('macro', macroId, a.started_at)) continue;
+    // a replay stamps its own id (macroRun), so two runs in a row are two runs; rows from before that fall back to the burst
+    if (!current || current.macroId !== macroId || (a.params?.macroRun !== undefined && current.run !== undefined && current.run !== a.params.macroRun)) {
+      current = { macroId, run: a.params?.macroRun, ok: true, startedAt: a.started_at, sessionId: a.session_id, steps: 0, failedStep: null };
+      const list = runs.get(macroId) ?? [];
+      list.push(current);
+      if (list.length > MACRO_RUN_HISTORY_LIMIT) list.shift();
+      runs.set(macroId, list);
+    }
+    current.steps += 1;
+    if (!a.ok) {
+      current.ok = false;
+      current.failedStep ??= { step: current.steps, type: a.type, target: frictionTarget(a.type, a.params, a.origin)?.value ?? null, error: a.error ? String(a.error).slice(0, 160) : null };
+    }
+  }
+  return runs;
+}
+
+// One macro's runs as the line a list needs: how often it worked, and what the last run did.
+export function summarizeMacroRuns(runs) {
+  if (!runs?.length) return { runs: 0, passRate: null, lastRun: null, strip: [] };
+  const last = runs[runs.length - 1];
+  return {
+    runs: runs.length,
+    passRate: Math.round((runs.filter((r) => r.ok).length / runs.length) * 100) / 100,
+    lastRun: { ok: last.ok, at: last.startedAt, sessionId: last.sessionId, steps: last.steps, ...(last.failedStep ? { failedStep: last.failedStep } : {}) },
+    strip: runs.map((r) => r.ok),
+  };
+}
+
 // ---------- trend: is a target getting better or worse across sessions? ----------
 
 const SPARK = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];

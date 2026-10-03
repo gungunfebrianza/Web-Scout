@@ -48,6 +48,8 @@ export const SURFACES = [
   { id: 'friction-config', family: 'friction', http: ['GET /friction/config'], cli: ['friction config'], dashboard: ['GET /friction/config'] },
   { id: 'friction-targets', family: 'friction', http: ['GET /friction/targets'], cli: ['friction targets'], dashboard: ['GET /friction/targets'] },
   { id: 'friction-notices', family: 'friction', http: ['GET /friction/notices'], cli: ['friction notices', 'friction watch'], dashboard: ['GET /friction/notices'] },
+  { id: 'friction-next', family: 'friction', http: ['GET /friction/next', 'POST /friction/next'], cli: ['friction next'], dashboard: ['POST /friction/next'] },
+  { id: 'friction-trend', family: 'friction', http: ['GET /friction/trend'], cli: ['friction trend'], dashboard: ['GET /friction/trend'] },
   { id: 'friction-regressions', family: 'friction', http: ['GET /friction/regressions'], cli: ['friction regressions'], dashboard: ['GET /friction/regressions'] },
   { id: 'friction-prune', family: 'friction', http: ['POST /friction/prune'], cli: ['friction prune'], dashboard: ['POST /friction/prune'] },
   { id: 'known-issues', family: 'friction', http: ['POST /known-issues/promote', 'GET /known-issues', 'POST /known-issues/import'], cli: ['known-issues promote', 'known-issues export', 'known-issues import'], dashboard: ['POST /known-issues/promote', 'GET /known-issues', 'POST /known-issues/import'] },
