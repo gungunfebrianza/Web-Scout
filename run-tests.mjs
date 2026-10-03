@@ -17,7 +17,7 @@ import { testRunFile } from './host-health.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const realTmp = os.tmpdir();
 const root = fs.mkdtempSync(path.join(realTmp, 'webscout-testroot-'));
-const IGNORED = ['node-compile-cache', 'webscout-relays.jsonl', 'webscout-scratch-log.jsonl', 'webscout-scratch-ledger.jsonl', 'webscout-host-samples.jsonl', 'webscout-warn-cache-', 'msedge_', 'cv_debug.log']; // shared-by-design files
+const IGNORED = ['node-compile-cache', 'webscout-relays.jsonl', 'webscout-scratch-log.jsonl', 'webscout-scratch-ledger.jsonl', 'webscout-host-samples.jsonl', 'webscout-warn-cache-', 'msedge_', 'cv_debug.log', '__PSScriptPolicyTest_']; // shared-by-design files; __PSScriptPolicyTest_*: PowerShell's own policy probe (seen on the hosted runner), not ours
 const ours = (dir) => scratchStats({ baseDir: dir }).dirs; // our prefixes only: unrelated tools may create wl-* meanwhile
 const before = ours(realTmp);
 // Names, not just a count: "real temp gained 1 dir" is not enough to find which test made it.
