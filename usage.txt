@@ -953,6 +953,22 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    the same notices as they happen (tails GET /events), until Ctrl+C
   friction regressions [--fail]   targets declared fixed that have failed again since; --fail exits 1 if any
                                    (a CI / post-merge check)
+  friction snooze <type> <selector> [--for <span>] [--note "..."]
+                                   quiet the warning for a while WITHOUT saying it is fixed ("friction resolve" is
+                                   for that, and resets the history). --for is 30m | 12h | 2d | 1w or a date
+                                   (default 1d, at most 90 days). Counts, trends and "friction check" still see it.
+  friction unsnooze <type> <selector>
+                                   hear about it again
+  friction snoozes                the snoozes still in force, each with the step that ends it
+  friction check [--fail-on worsening,review,relapse]
+                                   the gate: ok:false (and exit 1) while a target is failing more often than before
+                                   (snoozed ones left out), a known issue is past its reviewBy, or a fix relapsed.
+                                   --fail-on picks which of the three count (default all). Run it in CI.
+  friction export [--out <file>]
+  friction import <file> [--confirm]
+                                   the decisions - "mark fixed" declarations and live snoozes - as one document, so a
+                                   team shares a baseline. Import adds what is missing and leaves what is there; a
+                                   dry run unless --confirm. Trends and rankings are derived and not exported.
   friction config                         the thresholds in effect (all WEBSCOUT_* env knobs)
   friction prune [--days N] [--notice-days N] [--read-days N] [--confirm]
                                    retention, dry run unless --confirm: sweeps orphaned warning state; --days (>= 7)
@@ -965,6 +981,12 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    merge an export in by id: existing ids are left alone, entries without a valid
                                    signature or without a remediation are refused with the reason; a dry run
                                    unless --confirm
+  known-issues review
+                                   the entries past their reviewBy (and those due within 14 days), each with the two
+                                   honest answers: renew (still true, look again later) or retire (no longer true)
+  known-issues renew <id> --review-by YYYY-MM-DD [--confirm]
+  known-issues retire <id> [--confirm]
+                                   write known-issues.json, so a dry run unless --confirm
   known-issues promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--review-by YYYY-MM-DD] [--confirm]
                                    turns an analytics knownIssueCandidates draft into a real
                                    known-issues.json entry. Needs the remediation (a draft cannot

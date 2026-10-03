@@ -1083,6 +1083,42 @@ async function main() {
       printResult(out);
       return;
     }
+    // snooze <type> <selector> [--for 1d] [--note "..."]: quiet until then, without saying it is fixed. unsnooze undoes it; snoozes lists the live ones.
+    if (sub === 'snoozes') { printResult(await request('GET', '/friction/snoozes')); return; }
+    if (sub === 'snooze' || sub === 'unsnooze') {
+      let forText;
+      ({ args: fargs, value: forText } = extractFlag(fargs, '--for'));
+      const [type, target] = fargs;
+      if (!type || !target) throw new Error(`friction ${sub} requires <type> <selector>, e.g. friction ${sub} dom.click "#submit"${sub === 'snooze' ? ' --for 1d' : ''} (for idb.* types the second argument is the store name)`);
+      const aim = type.startsWith('idb.') && type !== 'idb.list' ? { store: target } : { selector: target };
+      printResult(await request('POST', `/friction/${sub}`, { type, ...aim, ...(sub === 'snooze' ? { for: forText ?? '1d', note } : {}) }));
+      return;
+    }
+    // check [--fail-on worsening,review,relapse]: the CI gate. Exits 1 when anything it looks at is still wrong.
+    if (sub === 'check') {
+      let failOn;
+      ({ args: fargs, value: failOn } = extractFlag(fargs, '--fail-on'));
+      const out = await request('GET', `/friction/check${failOn !== undefined ? `?failOn=${encodeURIComponent(failOn)}` : ''}`);
+      for (const p of out.problems) console.error(`${p.kind.toUpperCase()}: ${p.message}`);
+      printResult(out);
+      if (!out.ok) process.exitCode = 1;
+      return;
+    }
+    // export [--out file] / import <file> [--confirm]: the decisions (fixed, snoozed) as a document a team can share.
+    if (sub === 'export') {
+      let out;
+      ({ args: fargs, value: out } = extractFlag(fargs, '--out'));
+      const state = await request('GET', '/friction/export');
+      if (out) { fs.writeFileSync(out, `${JSON.stringify(state, null, 2)}\n`); console.error(`wrote ${state.resolutions.length} resolution(s) and ${state.snoozes.length} snooze(s) to ${out}`); } else { printResult(state); }
+      return;
+    }
+    if (sub === 'import') {
+      let confirm;
+      ({ args: fargs, value: confirm } = extractBooleanFlag(fargs, '--confirm'));
+      if (!fargs[0]) throw new Error('friction import requires <file> (as "friction export --out" wrote it) - without --confirm it only reports what it would add');
+      printResult(await request('POST', '/friction/import', { state: JSON.parse(fs.readFileSync(fargs[0], 'utf8')), confirm: confirm === true }));
+      return;
+    }
     if (sub === 'watch') {
       let seconds; let count; let session;
       ({ args: fargs, value: seconds } = extractFlag(fargs, '--for'));
@@ -1161,7 +1197,18 @@ async function main() {
       printResult(await request('POST', '/known-issues/import', { entries, confirm: confirm === true }));
       return;
     }
-    if (rest[0] !== 'promote') throw new Error('known-issues supports: promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--review-by YYYY-MM-DD] [--confirm] | export [--out <file>] | import <file> [--confirm]');
+    // review: the entries past their reviewBy, each with renew / retire; renew / retire write, so a dry run unless --confirm.
+    if (rest[0] === 'review') { printResult(await request('GET', '/known-issues/review')); return; }
+    if (rest[0] === 'renew' || rest[0] === 'retire') {
+      let kargs = rest.slice(1);
+      let confirm; let reviewBy;
+      ({ args: kargs, value: reviewBy } = extractFlag(kargs, '--review-by'));
+      ({ args: kargs, value: confirm } = extractBooleanFlag(kargs, '--confirm'));
+      if (!kargs[0]) throw new Error(`known-issues ${rest[0]} requires <id> (see "known-issues review")${rest[0] === 'renew' ? ' and --review-by YYYY-MM-DD' : ''}`);
+      printResult(await request('POST', `/known-issues/${rest[0]}`, { id: kargs[0], ...(rest[0] === 'renew' ? { reviewBy } : {}), confirm: confirm === true }));
+      return;
+    }
+    if (rest[0] !== 'promote') throw new Error('known-issues supports: review | renew <id> --review-by YYYY-MM-DD [--confirm] | retire <id> [--confirm] | promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--review-by YYYY-MM-DD] [--confirm] | export [--out <file>] | import <file> [--confirm]');
     let kargs = rest.slice(1);
     let remediation; let description; let signature; let confirm; let reviewBy;
     ({ args: kargs, value: reviewBy } = extractFlag(kargs, '--review-by'));

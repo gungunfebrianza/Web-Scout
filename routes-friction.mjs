@@ -27,6 +27,18 @@ export function frictionRoutes(d) {
     const steps = (notice.next ?? []).map((c, i) => ({ n: i + 1, label: c.label, cli: c.cli, http: c.http, mutating: notices.parseHttpStep(c)?.mutating ?? null }));
     return { notice, steps };
   }
+  // The renew / retire writer: find the entry, apply `change` to the list, and only write on confirm:true.
+  function rewriteKnownIssues(body, change, verb) {
+    const current = readKnownIssuesRaw();
+    const entry = current.find((e) => e?.id === body.id);
+    if (!entry) throw new HttpError(404, `no known issue "${body.id}" in ${KNOWN_ISSUES_PATH} (list them with "known-issues export")`);
+    const after = change(current);
+    if (body.confirm !== true) return { written: false, wouldChange: verb === 'retired' ? { retire: entry } : { renew: { id: entry.id, from: entry.reviewBy ?? null, to: String(body.reviewBy) } }, file: KNOWN_ISSUES_PATH, note: 'dry run - repeat with confirm:true (CLI: --confirm) to write it' };
+    fs.writeFileSync(KNOWN_ISSUES_PATH, `${JSON.stringify(after, null, 2)}\n`);
+    d.dropAnalyticsCache();
+    broadcastUpdate('analytics', null);
+    return { written: true, [verb]: body.id, file: KNOWN_ISSUES_PATH };
+  }
   return [
   // ---- "Mark fixed": declare a selector's friction resolved as of now. Analytics then counts
   // only failures AFTER that instant (the selector's old history stops ranking and stops
@@ -91,12 +103,14 @@ export function frictionRoutes(d) {
           perOrigin: e.origins, recoveries: e.recoveries, knownIssues: e.knownIssues,
         } : null,
         thisSession: facts.live ? { ...facts.live } : null,
+        snoozedUntil: facts.snooze?.until ?? null,
         resolution: facts.resolution ? { resolvedAt: facts.resolution.resolved_at, note: facts.resolution.note } : null,
         failureContext: facts.context,
         trend: (() => { try { const t = friction.buildFrictionTrend(allActionsIncremental().actions, { key: facts.key, resolutions: resolutionMap() }); return t[0] ? { direction: t[0].direction, sparkline: t[0].sparkline, points: t[0].points } : null; } catch { return null; } })(),
         next: [
           ...(facts.resolution ? [] : [notices.fixedCommand(type, target.value)]),
           notices.trendCommand(type, target.value),
+          ...(facts.snooze ? [notices.unsnoozeCommand(type, target.value)] : [notices.snoozeCommand(type, target.value)]),
         ],
         cluster: (() => { try { return getAnalytics().frictionClusters.find((c) => c.targets.some((t) => t.key === facts.key)) ?? null; } catch { return null; } })(),
         config: friction.frictionConfig(),
@@ -203,6 +217,145 @@ export function frictionRoutes(d) {
       const res = await fetch(`http://${HOST}:${PORT}${parsed.path}`, { method: parsed.method, ...(parsed.method === 'GET' ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed.body) }) });
       const json = await res.json();
       return { ran: true, notice: { id: notice.id, kind: notice.kind, message: notice.message }, step, ok: json.ok === true, ...(json.ok ? { result: json.result } : { error: json.error }) };
+    },
+  },
+
+  // ---- Snooze: stop hearing about a target for a while WITHOUT claiming it is fixed ("mark fixed" is for that - it also
+  // resets the history). The warning goes quiet until the snooze ends; counts, trends and the check still see the target.
+  {
+    method: 'POST',
+    pattern: /^\/friction\/snooze$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      const { type, target, key } = frictionTargetFromBody(body, { allowScopes: false });
+      let until;
+      try { until = friction.parseSnoozeUntil(body.for ?? body.until ?? '1d'); } catch (err) { throw new HttpError(400, err.message); }
+      const snooze = dbApi.snoozeFriction({ key, type: friction.typeFamily(type), selector: String(target.value), note: typeof body.note === 'string' ? body.note : null, until });
+      broadcastUpdate('analytics', null);
+      return { ...snooze, next: [notices.unsnoozeCommand(friction.typeFamily(type), target.value), notices.fixedCommand(friction.typeFamily(type), target.value)] };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/friction\/unsnooze$/,
+    handler: async (req) => {
+      const { key } = frictionTargetFromBody(await readJsonBody(req), { allowScopes: false });
+      try { const result = dbApi.clearFrictionSnooze(key); broadcastUpdate('analytics', null); return result; } catch (err) { throw new HttpError(404, err.message); }
+    },
+  },
+  { method: 'GET', pattern: /^\/friction\/snoozes$/, handler: async () => { const snoozes = dbApi.listFrictionSnoozes(); return { count: snoozes.length, snoozes: snoozes.map((s) => ({ ...s, next: [notices.unsnoozeCommand(s.type, s.selector)] })) }; } },
+
+  // ---- Known-issue review queue. An entry with reviewBy is a bet the cause stays the same; this lists the bets that are due
+  // (and the ones coming up in the next 14 days) with the two honest answers: still true (renew) or no longer (retire).
+  // renew / retire write known-issues.json, so both are dry runs unless confirm:true.
+  {
+    method: 'GET',
+    pattern: /^\/known-issues\/review$/,
+    handler: async () => {
+      const soon = new Date(Date.now() + 14 * 86400e3).toISOString().slice(0, 10);
+      const renewTo = new Date(Date.now() + 90 * 86400e3).toISOString().slice(0, 10);
+      const dated = readKnownIssuesRaw().filter((e) => e && typeof e === 'object' && e.reviewBy).map(withReview);
+      const row = (e) => ({ id: e.id, description: e.description ?? null, remediation: e.remediation ?? null, reviewBy: e.reviewBy, reviewDue: e.reviewDue, next: [notices.renewCommand(e.id, renewTo), notices.retireCommand(e.id)] });
+      const due = dated.filter((e) => e.reviewDue).map(row);
+      const upcoming = dated.filter((e) => !e.reviewDue && String(e.reviewBy) <= soon).map(row);
+      return { today: today(), count: due.length, due, upcoming };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/known-issues\/renew$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      if (typeof body.id !== 'string' || !body.id) throw new HttpError(400, 'id is required: an entry id from "known-issues export"');
+      if (!body.reviewBy || !validReviewBy(body.reviewBy) || String(body.reviewBy) <= today()) throw new HttpError(400, 'reviewBy must be a date in the future like 2026-12-31 - when to look at this workaround again');
+      return rewriteKnownIssues(body, (list) => list.map((e) => (e?.id === body.id ? { ...e, reviewBy: String(body.reviewBy) } : e)), 'renewed');
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/known-issues\/retire$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      if (typeof body.id !== 'string' || !body.id) throw new HttpError(400, 'id is required: an entry id from "known-issues export"');
+      return rewriteKnownIssues(body, (list) => list.filter((e) => e?.id !== body.id), 'retired');
+    },
+  },
+
+  // ---- The gate: ok:false when something this project already knows is wrong is still wrong. Looks at three things -
+  // targets whose failure rate is getting worse (snoozed ones left out), known issues past reviewBy, and fixes that
+  // relapsed. ?failOn=worsening,review,relapse picks which count (default all). CI runs "friction check" and trusts its exit code.
+  {
+    method: 'GET',
+    pattern: /^\/friction\/check$/,
+    handler: async (req) => {
+      const q = new URL(req.url, `http://${HOST}`).searchParams;
+      const KINDS = ['worsening', 'review', 'relapse'];
+      const failOn = q.get('failOn') ? q.get('failOn').split(',').map((s) => s.trim()).filter(Boolean) : KINDS;
+      const bad = failOn.filter((k) => !KINDS.includes(k));
+      if (bad.length) throw new HttpError(400, `failOn must be a list of ${KINDS.join('|')} (got ${bad.join(', ')})`);
+      const { actions } = allActionsIncremental();
+      const snoozed = new Set(dbApi.listFrictionSnoozes().map((s) => s.key));
+      const problems = [];
+      if (failOn.includes('worsening')) {
+        for (const t of friction.buildFrictionTrend(actions, { resolutions: resolutionMap() })) {
+          if (t.direction !== 'worsening' || snoozed.has(t.key)) continue;
+          problems.push({ kind: 'worsening', key: t.key, message: `${t.type} ${t.selector} is failing more often: ${t.sparkline}`, next: [notices.trendCommand(t.type, t.selector), notices.whyCommand(t.type, t.selector), notices.snoozeCommand(t.type, t.selector)] });
+        }
+      }
+      if (failOn.includes('review')) {
+        for (const e of readKnownIssuesRaw().map(withReview)) {
+          if (e?.reviewDue) problems.push({ kind: 'review', key: e.id, message: `known issue "${e.id}" was due for review on ${e.reviewBy}`, next: [notices.reviewCommand()] });
+        }
+      }
+      if (failOn.includes('relapse')) {
+        for (const r of friction.buildRelapses(dbApi.listFrictionResolutions(), actions)) {
+          if (snoozed.has(r.key)) continue;
+          problems.push({ kind: 'relapse', key: r.key, message: r.summary, next: [notices.regressionsCommand()] });
+        }
+      }
+      const counts = Object.fromEntries(KINDS.map((k) => [k, problems.filter((p) => p.kind === k).length]));
+      return { ok: problems.length === 0, failOn, counts, problems, snoozed: snoozed.size };
+    },
+  },
+
+  // ---- The part of friction state that is a decision rather than a measurement - "mark fixed" declarations and live
+  // snoozes - as one document, so a team can share a baseline. Trends and rankings are derived from actions and are
+  // not exported. Import adds what is missing and leaves what is there alone; dry run unless confirm:true.
+  {
+    method: 'GET',
+    pattern: /^\/friction\/export$/,
+    handler: async () => ({ version: 1, exportedAt: new Date().toISOString(), resolutions: dbApi.listFrictionResolutions(), snoozes: dbApi.listFrictionSnoozes() }),
+  },
+  {
+    method: 'POST',
+    pattern: /^\/friction\/import$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      const state = body.state;
+      if (!state || typeof state !== 'object' || (!Array.isArray(state.resolutions) && !Array.isArray(state.snoozes))) throw new HttpError(400, 'state is required: the output of "friction export" ({ resolutions: [...], snoozes: [...] })');
+      const haveResolved = new Set(dbApi.listFrictionResolutions().map((x) => x.key));
+      const haveSnoozed = new Set(dbApi.listFrictionSnoozes({ includeExpired: true }).map((x) => x.key));
+      const now = new Date().toISOString();
+      const addResolutions = [];
+      const addSnoozes = [];
+      const skipped = [];
+      const ok = (x) => x && typeof x.key === 'string' && x.key && typeof x.type === 'string' && typeof x.selector === 'string';
+      for (const x of state.resolutions ?? []) {
+        if (!ok(x) || typeof x.resolved_at !== 'string' || Number.isNaN(Date.parse(x.resolved_at))) skipped.push({ key: x?.key ?? null, reason: 'a resolution needs key, type, selector and a resolved_at date' });
+        else if (haveResolved.has(x.key)) skipped.push({ key: x.key, reason: 'already declared fixed here (left unchanged)' });
+        else addResolutions.push({ key: x.key, type: x.type, selector: x.selector, note: x.note ?? null, resolvedAt: x.resolved_at });
+      }
+      for (const x of state.snoozes ?? []) {
+        if (!ok(x) || typeof x.until !== 'string' || Number.isNaN(Date.parse(x.until))) skipped.push({ key: x?.key ?? null, reason: 'a snooze needs key, type, selector and an until date' });
+        else if (x.until <= now) skipped.push({ key: x.key, reason: 'that snooze has already ended' });
+        else if (haveSnoozed.has(x.key)) skipped.push({ key: x.key, reason: 'already snoozed here (left unchanged)' });
+        else addSnoozes.push({ key: x.key, type: x.type, selector: x.selector, note: x.note ?? null, until: x.until });
+      }
+      if (body.confirm !== true) return { written: false, wouldAdd: { resolutions: addResolutions.length, snoozes: addSnoozes.length }, resolutions: addResolutions, snoozes: addSnoozes, skipped, note: 'dry run - repeat with confirm:true (CLI: --confirm) to add them' };
+      for (const x of addResolutions) dbApi.markFrictionResolved(x);
+      for (const x of addSnoozes) dbApi.snoozeFriction(x);
+      if (addResolutions.length || addSnoozes.length) { d.dropAnalyticsCache(); broadcastUpdate('analytics', null); }
+      return { written: addResolutions.length + addSnoozes.length > 0, added: { resolutions: addResolutions.length, snoozes: addSnoozes.length }, skipped };
     },
   },
 

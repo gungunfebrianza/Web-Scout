@@ -97,7 +97,7 @@ const TOOLS = [
       + '  describe {tool?, action?} - the full help for one action (or a whole tool): usage text and the flag-to-param mapping\n'
       + '  agents {} - connected multi-tab agent names\n'
       + '  analytics {} - Friction Analytics: recurring failure patterns across ALL sessions\n'
-      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?, days?, noticeDays?, readDays?, filter?, sort?, limit?, session?, since?, entries?, notice?, step?, sessions?, reviewBy?} - sub: explain (why it warns), resolve|unresolve (mark fixed; type may also be macro|verity|type|cluster, selector = its id/label/command), list, session, targets (ranked; filter text, sort cost|fails|wasted|tokens|recent|oldest), notices (what agents were told; since = last id seen), next (steps a notice offered; step runs one, a write needs confirm), trend (type+selector: its rate per session; none: worse/better project-wide), regressions (fixed, failing again), issues (known-issues.json; entries imports, confirm writes), config, prune (days: result bodies; noticeDays; readDays; confirm applies), promote (candidate id; reviewBy = a date to re-check it; confirm writes). Page commands (page.reload...): selector = origin or origin+path\n'
+      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?, days?, noticeDays?, readDays?, filter?, sort?, limit?, session?, since?, entries?, notice?, step?, sessions?, reviewBy?, for?, failOn?, state?} - sub: explain (why it warns), resolve|unresolve (mark fixed; type may also be macro|verity|type|cluster, selector = its id/label/command), list, session, targets (ranked; filter text, sort cost|fails|wasted|tokens|recent|oldest), notices (what agents were told; since = last id seen), next (steps a notice offered; step runs one, a write needs confirm), trend (type+selector: its rate per session; none: worse/better project-wide), regressions (fixed, failing again), issues (known-issues.json; entries imports, confirm writes), config, prune (days: result bodies; noticeDays; readDays; confirm applies), promote (candidate id; reviewBy = a date to re-check it; confirm writes), snooze|unsnooze|snoozes (quiet a target for 30m|12h|2d|1w, not fixed), check (CI gate: ok false if worsening|review|relapse; failOn picks), export|import (fixed+snoozed state; state = the export, confirm writes), review|renew|retire (known issues past reviewBy; id, reviewBy; confirm writes). Page commands (page.reload...): selector = origin or origin+path\n'
       + '  search {q} - full-text search across every session\'s actions\n'
       + '  db_version_check {agent?, dbJsPath?} - js/db.js\'s DB_VERSION vs the tab\'s LIVE IndexedDB version; on drift also probes whether opening at the source version is blocked\n'
       + '  dashboard_url {} - the realtime dashboard URL (does not open a browser)\n'
@@ -125,11 +125,20 @@ const TOOLS = [
         if (sub === 'trend' && !p.type) return request('GET', `/friction/trend?${new URLSearchParams({ ...(p.sessions ? { sessions: String(p.sessions) } : {}) })}`);
         if (sub === 'trend') return request('GET', `/friction/trend?${new URLSearchParams({ type: p.type, ...(p.selector ? { selector: p.selector } : {}), ...(p.store ? { store: p.store } : {}), ...(p.sessions ? { sessions: String(p.sessions) } : {}) })}`);
         if (sub === 'issues') return Array.isArray(p.entries) ? request('POST', '/known-issues/import', { entries: p.entries, confirm: p.confirm === true }) : request('GET', '/known-issues');
+        if (sub === 'snoozes') return request('GET', '/friction/snoozes');
+        if (sub === 'snooze') return request('POST', '/friction/snooze', { type: requireField(p, 'type'), selector: p.selector, store: p.store, for: p.for ?? '1d', note: p.note });
+        if (sub === 'unsnooze') return request('POST', '/friction/unsnooze', { type: requireField(p, 'type'), selector: p.selector, store: p.store });
+        if (sub === 'check') return request('GET', `/friction/check${p.failOn ? `?failOn=${encodeURIComponent(Array.isArray(p.failOn) ? p.failOn.join(',') : String(p.failOn))}` : ''}`);
+        if (sub === 'export') return request('GET', '/friction/export');
+        if (sub === 'import') return request('POST', '/friction/import', { state: requireField(p, 'state'), confirm: p.confirm === true });
+        if (sub === 'review') return request('GET', '/known-issues/review');
+        if (sub === 'renew') return request('POST', '/known-issues/renew', { id: requireField(p, 'id'), reviewBy: p.reviewBy, confirm: p.confirm === true });
+        if (sub === 'retire') return request('POST', '/known-issues/retire', { id: requireField(p, 'id'), confirm: p.confirm === true });
         if (sub === 'prune') return request('POST', '/friction/prune', { days: p.days, noticeDays: p.noticeDays, readDays: p.readDays, confirm: p.confirm === true });
         if (sub === 'promote') {
           return request('POST', '/known-issues/promote', { id: requireField(p, 'id'), remediation: p.remediation, description: p.description, signature: p.signature, reviewBy: p.reviewBy, confirm: p.confirm === true });
         }
-        if (sub !== 'explain' && sub !== 'resolve' && sub !== 'unresolve') throw new Error('params.sub must be explain|resolve|unresolve|list|session|targets|notices|next|trend|regressions|issues|config|prune|promote');
+        if (sub !== 'explain' && sub !== 'resolve' && sub !== 'unresolve') throw new Error('params.sub must be explain|resolve|unresolve|list|session|targets|notices|next|trend|regressions|issues|config|prune|promote|snooze|unsnooze|snoozes|check|export|import|review|renew|retire');
         const target = { type: requireField(p, 'type'), selector: p.selector, store: p.store };
         if (sub !== 'explain') return request('POST', `/friction/${sub}`, { ...target, note: p.note });
         const q = new URLSearchParams({ type: target.type });

@@ -148,6 +148,17 @@ CREATE TABLE IF NOT EXISTS friction_resolutions (
   resolved_at  TEXT NOT NULL
 );
 
+-- Operator-declared "stop telling me about this target until <until>": the warning goes quiet without claiming the
+-- cause is fixed (that is friction_resolutions). Expires by itself.
+CREATE TABLE IF NOT EXISTS friction_snoozes (
+  key         TEXT PRIMARY KEY,
+  type        TEXT NOT NULL,
+  selector    TEXT NOT NULL,
+  note        TEXT,
+  until       TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+
 -- The "already said" half of friction awareness, kept so a relay restart under a live session
 -- does not make it re-warn from scratch. kind 'warn': key is a friction key, at_live/count are the
 -- tracker's warnState. kind 'announce': a one-shot live note (key is "<sub-kind>|<key>").
@@ -2250,6 +2261,39 @@ export function clearFrictionResolved(key) {
 const stmtGetFrictionResolution = db.prepare('SELECT key, type, selector, note, resolved_at FROM friction_resolutions WHERE key = ?');
 export function getFrictionResolution(key) {
   return stmtGetFrictionResolution.get(key) ?? null;
+}
+
+// ---------- friction snoozes ----------
+
+const stmtUpsertFrictionSnooze = db.prepare(`
+  INSERT INTO friction_snoozes (key, type, selector, note, until, created_at) VALUES (?, ?, ?, ?, ?, ?)
+  ON CONFLICT(key) DO UPDATE SET type = excluded.type, selector = excluded.selector, note = excluded.note, until = excluded.until, created_at = excluded.created_at
+`);
+const stmtListFrictionSnoozes = db.prepare('SELECT key, type, selector, note, until, created_at FROM friction_snoozes ORDER BY until ASC');
+const stmtGetFrictionSnooze = db.prepare('SELECT key, type, selector, note, until, created_at FROM friction_snoozes WHERE key = ?');
+const stmtDeleteFrictionSnooze = db.prepare('DELETE FROM friction_snoozes WHERE key = ?');
+
+export function snoozeFriction({ key, type, selector, note, until }) {
+  const createdAt = new Date().toISOString();
+  stmtUpsertFrictionSnooze.run(key, type, selector, note ?? null, until, createdAt);
+  return { key, type, selector, note: note ?? null, until, created_at: createdAt };
+}
+
+// Only the snoozes still in force unless includeExpired.
+export function listFrictionSnoozes({ includeExpired = false } = {}) {
+  const now = new Date().toISOString();
+  return stmtListFrictionSnoozes.all().filter((s) => includeExpired || s.until > now);
+}
+
+export function getFrictionSnooze(key) {
+  const row = stmtGetFrictionSnooze.get(key);
+  return row && row.until > new Date().toISOString() ? row : null;
+}
+
+export function clearFrictionSnooze(key) {
+  const info = stmtDeleteFrictionSnooze.run(key);
+  if (info.changes === 0) throw new Error(`no such friction snooze: ${key}`);
+  return { cleared: true, key };
 }
 
 // ---------- friction lookups (indexed by actions.selector_key) ----------

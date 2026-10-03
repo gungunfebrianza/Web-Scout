@@ -688,7 +688,7 @@ function topClass(classes) {
 // { level: 'warn' | 'repeat' | 'escalated', message, errorClass, liveFailures, liveUnresolved };
 // reason says why in one line; facts carries the numbers it was judged on. No side effects, so
 // `friction explain` can call it without disturbing the once-per-session dedupe.
-export function evaluateSelectorRisk({ type, selector, targetKind = 'selector', entry, live, state, origin }) {
+export function evaluateSelectorRisk({ type, selector, targetKind = 'selector', entry, live, state, origin, snoozedUntil = null }) {
   const hist = historyForOrigin(entry, origin);
   const liveUnresolved = live?.unresolved ?? 0;
   const liveFails = live?.fails ?? 0;
@@ -700,6 +700,8 @@ export function evaluateSelectorRisk({ type, selector, targetKind = 'selector', 
     warnedAtLive: state?.atLive ?? null,
     thresholds: { unresolvedHistory: RISKY_SELECTOR_FAIL_THRESHOLD, liveFails: LIVE_FAIL_THRESHOLD, escalateAt: ESCALATE_AFTER_LIVE_FAILS },
   };
+  // Snoozed on purpose: quiet until the date, without claiming it is fixed.
+  if (snoozedUntil) return { assessment: null, reason: `quiet: snoozed until ${snoozedUntil} (friction unsnooze to hear about it again)`, facts };
   // It worked earlier in THIS session and has not failed since: whatever history says, it works now.
   if (live?.lastOkAt && liveUnresolved === 0) {
     return { assessment: null, reason: 'quiet: it succeeded earlier in this session and has not failed since, so older history is ignored', facts };
@@ -974,4 +976,23 @@ export function buildKnownIssueCandidates(actions, { matchKnownIssues = () => []
         },
       };
     });
+}
+
+// ---------- snooze ----------
+
+export const SNOOZE_MAX_DAYS = 90;
+const SNOOZE_UNIT_MS = { m: 60e3, h: 3600e3, d: 86400e3, w: 7 * 86400e3 };
+
+// "30m" | "12h" | "2d" | "1w", or an ISO date / datetime, to the instant the snooze ends (ISO string).
+// Throws a message that names the accepted forms; the cap keeps a snooze from becoming a silent mute.
+export function parseSnoozeUntil(text, now = Date.now()) {
+  const s = String(text ?? '').trim();
+  const rel = /^(\d+)\s*([mhdw])$/i.exec(s);
+  let at = null;
+  if (rel) at = now + Number(rel[1]) * SNOOZE_UNIT_MS[rel[2].toLowerCase()];
+  else if (/^\d{4}-\d{2}-\d{2}/.test(s) && !Number.isNaN(Date.parse(s))) at = Date.parse(s);
+  if (at === null) throw new Error('for must be a span like 30m, 12h, 2d, 1w - or a date like 2026-12-31');
+  if (at <= now) throw new Error('that time has already passed');
+  if (at - now > SNOOZE_MAX_DAYS * 86400e3) throw new Error(`a snooze is at most ${SNOOZE_MAX_DAYS} days - mark it fixed, or capture it as a known issue, if it is longer than that`);
+  return new Date(at).toISOString();
 }

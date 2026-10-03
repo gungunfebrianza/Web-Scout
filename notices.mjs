@@ -12,7 +12,7 @@
 const quote = (v) => `"${String(v).replace(/(["\\])/g, '\\$1')}"`;
 const enc = encodeURIComponent;
 
-export const NOTICE_KINDS = ['selector-risk', 'macro-match', 'friction-broadcast', 'recovered', 'nudge', 'regression', 'error'];
+export const NOTICE_KINDS = ['selector-risk', 'macro-match', 'friction-broadcast', 'recovered', 'nudge', 'regression', 'error', 'review-due'];
 
 // ---- the commands a notice can point at ----
 
@@ -70,6 +70,55 @@ export function promoteCommand(id) {
     mcp: { tool: 'webscout_meta', action: 'friction', params: { sub: 'promote', id, remediation: '<fix>' } },
     http: 'POST /known-issues/promote',
     body: { id },
+  };
+}
+
+export function snoozeCommand(type, value, forText = '1d') {
+  return {
+    label: `snooze ${forText}`,
+    cli: `friction snooze ${type} ${quote(value)} --for ${forText}`,
+    mcp: { tool: 'webscout_meta', action: 'friction', params: { sub: 'snooze', type, selector: value, for: forText } },
+    http: 'POST /friction/snooze',
+    body: { type, selector: value, for: forText },
+  };
+}
+
+export function unsnoozeCommand(type, value) {
+  return {
+    label: 'hear about it again',
+    cli: `friction unsnooze ${type} ${quote(value)}`,
+    mcp: { tool: 'webscout_meta', action: 'friction', params: { sub: 'unsnooze', type, selector: value } },
+    http: 'POST /friction/unsnooze',
+    body: { type, selector: value },
+  };
+}
+
+export function renewCommand(id, reviewBy) {
+  return {
+    label: `still true, look again ${reviewBy}`,
+    cli: `known-issues renew ${id} --review-by ${reviewBy}`,
+    mcp: { tool: 'webscout_meta', action: 'friction', params: { sub: 'renew', id, reviewBy } },
+    http: 'POST /known-issues/renew',
+    body: { id, reviewBy },
+  };
+}
+
+export function retireCommand(id) {
+  return {
+    label: 'no longer true, retire it',
+    cli: `known-issues retire ${id}`,
+    mcp: { tool: 'webscout_meta', action: 'friction', params: { sub: 'retire', id } },
+    http: 'POST /known-issues/retire',
+    body: { id },
+  };
+}
+
+export function reviewCommand() {
+  return {
+    label: 'review them',
+    cli: 'known-issues review',
+    mcp: { tool: 'webscout_meta', action: 'friction', params: { sub: 'review' } },
+    http: 'GET /known-issues/review',
   };
 }
 

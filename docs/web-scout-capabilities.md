@@ -40,6 +40,10 @@ A `-` in the CLI or Dashboard column carries a reason in `surfaces.mjs` (`cliWhy
 | friction-next _(friction)_ | `GET /friction/next`<br>`POST /friction/next` | `friction next` | `webscout_meta.friction` | `POST /friction/next` |
 | friction-trend _(friction)_ | `GET /friction/trend` | `friction trend` | `webscout_meta.friction` | `GET /friction/trend` |
 | friction-regressions _(friction)_ | `GET /friction/regressions` | `friction regressions` | `webscout_meta.friction` | `GET /friction/regressions` |
+| friction-snooze _(friction)_ | `POST /friction/snooze`<br>`POST /friction/unsnooze`<br>`GET /friction/snoozes` | `friction snooze`<br>`friction unsnooze`<br>`friction snoozes` | `webscout_meta.friction` | `GET /friction/snoozes` |
+| friction-check _(friction)_ | `GET /friction/check` | `friction check` | `webscout_meta.friction` | `GET /friction/check` |
+| friction-state _(friction)_ | `GET /friction/export`<br>`POST /friction/import` | `friction export`<br>`friction import` | `webscout_meta.friction` | `GET /friction/export`<br>`POST /friction/import` |
+| known-issues-review _(friction)_ | `GET /known-issues/review`<br>`POST /known-issues/renew`<br>`POST /known-issues/retire` | `known-issues review`<br>`known-issues renew`<br>`known-issues retire` | `webscout_meta.friction` | `GET /known-issues/review` |
 | friction-prune _(friction)_ | `POST /friction/prune` | `friction prune` | `webscout_meta.friction` | `POST /friction/prune` |
 | known-issues _(friction)_ | `POST /known-issues/promote`<br>`GET /known-issues`<br>`POST /known-issues/import` | `known-issues promote`<br>`known-issues export`<br>`known-issues import` | `webscout_meta.friction` | `POST /known-issues/promote`<br>`GET /known-issues`<br>`POST /known-issues/import` |
 

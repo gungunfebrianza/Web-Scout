@@ -957,9 +957,11 @@ function frictionFactsFor(sessionId, type, params, agentName, originOverride) {
   const entry = friction.buildSelectorFriction(rows, { matchKnownIssues: lazyKnownIssueMatcher(), resolutions, minFails: 1 }).find((e) => e.key === key) ?? null;
   const live = frictionTracker.get(sessionId, key);
   const state = frictionTracker.warnState(sessionId, key);
-  const evaluation = friction.evaluateSelectorRisk({ type, selector: target.value, targetKind: target.kind, entry, live, state, origin });
+  const snooze = (() => { try { return dbApi.getFrictionSnooze(key); } catch { return null; } })();
+  const snoozedUntil = snooze?.until ?? null;
+  const evaluation = friction.evaluateSelectorRisk({ type, selector: target.value, targetKind: target.kind, entry, live, state, origin, snoozedUntil });
   const context = friction.failureContext({ type, selector: target.value, targetKind: target.kind, entry, live, origin });
-  return { key, target, entry, live, state, origin, resolution, evaluation, context };
+  return { key, target, entry, live, state, origin, resolution, snooze, evaluation, context };
 }
 
 // --try-recovery: after a click/fill/wait fails, run it ONCE more on the alternative selector that has
@@ -1081,7 +1083,7 @@ function maybeRiskySelectorWarn(sessionId, type, params, res, agentName, ackRisk
     } else {
       frictionTracker.recordWarn(sessionId, key, assessment.liveUnresolved);
       keys.push(key);
-      notices_.push({ kind: 'selector-risk', level: assessment.level === 'escalated' ? 'escalated' : 'warn', message: assessment.message, key, next: [notices.whyCommand(friction.typeFamily(t.type), target.value), ...(facts.live?.unresolved ? [] : [notices.fixedCommand(friction.typeFamily(t.type), target.value)])] });
+      notices_.push({ kind: 'selector-risk', level: assessment.level === 'escalated' ? 'escalated' : 'warn', message: assessment.message, key, next: [notices.whyCommand(friction.typeFamily(t.type), target.value), ...(facts.live?.unresolved ? [] : [notices.fixedCommand(friction.typeFamily(t.type), target.value)]), notices.snoozeCommand(friction.typeFamily(t.type), target.value)] });
       messages.push(t.role === 'to' ? `drop target "${target.value}" - ${assessment.message}` : assessment.message);
       if (assessment.level === 'escalated' && stillEscalated) blockMessage = `${assessment.message} - refusing (WEBSCOUT_RISKY_BLOCK=1); pass ackRisk:true to run it anyway.`;
     }

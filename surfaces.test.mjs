@@ -117,3 +117,9 @@ test('docs/web-scout-capabilities.md is the current rendering of the map (regene
   const { renderCapabilitiesMarkdown, CAPABILITIES_DOC } = await import('./surfaces.mjs');
   assert.equal(fs.readFileSync(CAPABILITIES_DOC, 'utf8'), renderCapabilitiesMarkdown());
 });
+
+test('the README command reference is the current rendering of cli-spec.mjs (regenerate: node surfaces.mjs --write)', async () => {
+  const { readmeWithReference, README_PATH } = await import('./surfaces.mjs');
+  const readme = fs.readFileSync(README_PATH, 'utf8');
+  assert.equal(readme, readmeWithReference(readme));
+});

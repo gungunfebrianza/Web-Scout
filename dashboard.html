@@ -362,6 +362,13 @@
   .friction-act { font-size: 10px; padding: 1px 6px; cursor: pointer; }
   #frictionControls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 11px; margin-top: 8px; }
 #frictionControls input, #frictionControls select { font-size: 11px; }
+#errorToast { position: fixed; right: 12px; bottom: 12px; max-width: 420px; z-index: 50; font-size: 12px; padding: 8px 10px; border: 1px solid currentColor; border-radius: 6px; background: var(--bg, #fff); }
+#frictionCheck, #frictionReview, #frictionSnoozes { font-size: 12px; margin-top: 6px; }
+.friction-check-ok { color: #2a7; }
+.friction-check-bad { color: #c33; }
+.replay-diff { font-size: 11px; border-collapse: collapse; }
+.replay-diff td, .replay-diff th { border: 1px solid #8884; padding: 2px 6px; text-align: left; vertical-align: top; max-width: 260px; overflow-wrap: anywhere; }
+.replay-diff tr.diverged td { background: #c331; }
 #frictionToast { font-size: 11px; margin-top: 6px; padding: 4px 8px; border: 1px solid currentColor; border-radius: 4px; }
 .friction-pre { font-size: 10px; max-height: 220px; overflow: auto; white-space: pre-wrap; margin: 4px 0; padding: 4px 6px; border: 1px solid currentColor; border-radius: 4px; }
 #frictionNotices, #frictionRegressions, #frictionTrends, #frictionTools { font-size: 11px; margin-top: 8px; }
@@ -716,6 +723,7 @@
   <div class="hud-scroll-body" id="selectorGraphContainer"></div>
   <div id="selectorGraphEmpty" class="empty" hidden>No repeated selector failures yet.</div>
   <div id="frictionToast" hidden></div>
+  <div id="errorToast" role="alert" hidden></div>
   <div id="frictionControls">
     <input id="frictionFilter" type="search" placeholder="filter: target, type, origin, error class" aria-label="filter friction table">
     <select id="frictionSort" aria-label="sort friction table">
@@ -725,10 +733,13 @@
     <span id="frictionCount" class="muted"></span>
   </div>
   <div id="frictionExplainOut" class="friction-explain" hidden></div>
+  <div id="frictionCheck"></div>
   <div id="frictionNotices"></div>
+  <div id="frictionReview"></div>
   <div id="frictionRegressions"></div>
   <div id="frictionTrends"></div>
   <div id="frictionLive"></div>
+  <div id="frictionSnoozes"></div>
   <div id="frictionDetail"></div>
   <details id="frictionTools"><summary>Tools: thresholds, retention, known issues, replay</summary>
     <div class="friction-tool"><h3>Thresholds in effect</h3><button class="friction-act" data-friction-act="show-config">show</button><pre id="frictionConfigOut" class="friction-pre" hidden></pre></div>
@@ -736,6 +747,8 @@
       <button class="friction-act" data-friction-act="prune-preview">preview</button> <button class="friction-act" data-friction-act="prune-apply">apply</button><pre id="pruneOut" class="friction-pre" hidden></pre></div>
     <div class="friction-tool"><h3>Known issues</h3><button class="friction-act" data-friction-act="issues-export">export</button>
       <input id="issuesFile" type="file" accept=".json,application/json"> <button class="friction-act" data-friction-act="issues-import-preview">preview import</button> <button class="friction-act" data-friction-act="issues-import-apply">import</button><pre id="issuesOut" class="friction-pre" hidden></pre></div>
+    <div class="friction-tool"><h3>Fixed and snoozed (share a baseline)</h3><button class="friction-act" data-friction-act="state-export">export</button>
+      <input id="stateFile" type="file" accept=".json,application/json"> <button class="friction-act" data-friction-act="state-import-preview">preview import</button> <button class="friction-act" data-friction-act="state-import-apply">import</button><pre id="stateOut" class="friction-pre" hidden></pre></div>
     <div class="friction-tool"><h3>Replay a session</h3><label>session # <input id="replayId" type="number" min="1"></label>
       <button class="friction-act" data-friction-act="replay-plan">plan</button> <button class="friction-act" data-friction-act="replay-run">reproduce</button><small> (reproduce writes to the page, in the active session)</small><pre id="replayOut" class="friction-pre" hidden></pre></div>
   </details>
@@ -1421,8 +1434,24 @@ async function api(method, path, body) {
   if (body !== undefined) { opts.headers = { 'Content-Type': 'application/json' }; opts.body = JSON.stringify(body); }
   const res = await fetch(BASE + path, opts);
   const json = await res.json();
-  if (!json.ok) throw new Error(json.error || ('request failed: ' + path));
+  if (!json.ok) {
+    const err = new Error(json.error || ('request failed: ' + path));
+    if (json.notice) { err.notice = json.notice; showErrorNotice(json.notice); }
+    throw err;
+  }
   return json.result;
+}
+
+// A refusal says what to do next (the relay attaches a notice): show it with the same step buttons a warning gets.
+let errorToastTimer = null;
+function showErrorNotice(notice) {
+  const box = document.getElementById('errorToast');
+  if (!box) return;
+  const steps = (notice.next || []).map((c) => `<button class="friction-act" data-friction-act="step-run" data-http="${esc(c.http)}" data-body="${esc(JSON.stringify(c.body || {}))}" title="${esc(c.cli)}">${esc(c.label)}</button>`).join(' ');
+  box.hidden = false;
+  box.innerHTML = `${esc(notice.message)} ${steps} <button class="friction-act" data-friction-act="toast-close">x</button>`;
+  clearTimeout(errorToastTimer);
+  errorToastTimer = setTimeout(() => { box.hidden = true; }, 20000);
 }
 
 function el(id) { return document.getElementById(id); }
@@ -4123,6 +4152,9 @@ async function renderFrictionDetail(a, { force = false } = {}) {
   renderFrictionNotices();
   renderFrictionRegressions();
   renderFrictionTrends();
+  renderFrictionCheck();
+  renderFrictionReview();
+  renderFrictionSnoozes();
   if (!force && frictionFormOpen()) return;
   const seq = (frictionRenderSeq += 1);
   const q = new URLSearchParams({ sort: el('frictionSort')?.value || 'cost', limit: '30' });
@@ -4231,6 +4263,42 @@ async function renderFrictionTrends() {
   } catch { /* best-effort */ }
 }
 
+// The gate, as a badge: the same answer "friction check" gives CI (GET /friction/check), with a step per problem.
+async function renderFrictionCheck() {
+  const box = el('frictionCheck');
+  if (!box) return;
+  try {
+    const out = await api('GET', '/friction/check');
+    const stepsOf = (p) => (p.next || []).map((c) => ` <button class="friction-act" data-friction-act="step-run" data-http="${esc(c.http)}" data-body="${esc(JSON.stringify(c.body || {}))}" title="${esc(c.cli)}">${esc(c.label)}</button>`).join('');
+    box.innerHTML = out.ok
+      ? `<span class="friction-check-ok" title="friction check: nothing worsening, no review overdue, no relapse">check: ok</span>`
+      : `<h3 class="friction-check-bad">check: ${out.problems.length} problem(s) <small>(worsening ${out.counts.worsening}, review ${out.counts.review}, relapse ${out.counts.relapse})</small></h3><ul>${out.problems.slice(0, 8).map((p) => `<li><b>${esc(p.kind)}</b> ${esc(p.message)}${stepsOf(p)}</li>`).join('')}</ul>`;
+  } catch { /* best-effort */ }
+}
+
+// Known issues past reviewBy: still true (renew) or no longer (retire).
+async function renderFrictionReview() {
+  const box = el('frictionReview');
+  if (!box) return;
+  try {
+    const out = await api('GET', '/known-issues/review');
+    if (!out.due.length && !out.upcoming.length) { box.innerHTML = ''; return; }
+    const row = (e, late) => `<li><b>${esc(e.id)}</b> ${late ? 'was due' : 'due'} ${esc(e.reviewBy)} <small>${esc(e.description || '')}</small>${(e.next || []).map((c) => ` <button class="friction-act" data-friction-act="step-run" data-http="${esc(c.http)}" data-body="${esc(JSON.stringify(c.body || {}))}" title="${esc(c.cli)}">${esc(c.label)}</button>`).join('')}</li>`;
+    box.innerHTML = `<h3>Known issues to re-check (${out.due.length} due)</h3><ul>${out.due.map((e) => row(e, true)).join('')}${out.upcoming.map((e) => row(e, false)).join('')}</ul>`;
+  } catch { /* best-effort */ }
+}
+
+// Snoozed on purpose: quiet, not fixed.
+async function renderFrictionSnoozes() {
+  const box = el('frictionSnoozes');
+  if (!box) return;
+  try {
+    const out = await api('GET', '/friction/snoozes');
+    if (!out.count) { box.innerHTML = ''; return; }
+    box.innerHTML = `<h3>Snoozed (${out.count})</h3><ul>${out.snoozes.map((s) => `<li>${esc(s.type)} ${esc(s.selector)} until ${esc(s.until.slice(0, 16).replace('T', ' '))}${(s.next || []).map((c) => ` <button class="friction-act" data-friction-act="step-run" data-http="${esc(c.http)}" data-body="${esc(JSON.stringify(c.body || {}))}" title="${esc(c.cli)}">${esc(c.label)}</button>`).join('')}</li>`).join('')}</ul>`;
+  } catch { /* best-effort */ }
+}
+
 async function renderFrictionRegressions() {
   const box = el('frictionRegressions');
   if (!box) return;
@@ -4259,6 +4327,18 @@ function showStepResult(result) {
   if (result && result.decision && result.failureContext !== undefined) { showExplain(result); return; }
   if (out) { out.hidden = false; out.innerHTML = `<pre class="friction-pre">${esc(JSON.stringify(result, null, 2))}</pre>`; }
 }
+// The original run and the replay next to each other, one row per step, the first divergence marked.
+function renderReplayDiff(diff) {
+  const box = el('replayOut');
+  if (!box || !diff?.steps?.length) return;
+  const f = (v) => 'failed: ' + esc(String(v ?? '').slice(0, 80));
+  const sides = (s) => (s.kind === 'now-fails' ? ['ok', f(s.error)] : s.kind === 'now-works' ? [f(s.wasError), 'ok'] : s.kind === 'different-failure' ? [esc(s.was), esc(s.now) + ': ' + esc(String(s.error ?? '').slice(0, 80))] : s.kind === 'same-failure' ? [esc(s.errorClass), esc(s.errorClass)] : s.kind === 'slower' ? [s.originalMs + 'ms', s.replayMs + 'ms'] : s.kind === 'result-changed' ? ['result', 'changed: ' + esc((s.changed || []).join(', '))] : ['-', '-']);
+  const first = diff.firstDivergence?.index;
+  const rows = diff.steps.map((s) => { const [was, now] = sides(s); return '<tr class="' + (s.index === first ? 'diverged' : '') + '"><td>' + (s.index + 1) + '</td><td>' + esc(s.type) + '</td><td>' + was + '</td><td>' + now + '</td><td>' + esc(s.kind) + '</td></tr>'; }).join('');
+  let table = el('replayDiffTable');
+  if (!table) { table = document.createElement('div'); table.id = 'replayDiffTable'; box.parentNode.insertBefore(table, box); }
+  table.innerHTML = `<table class="replay-diff"><thead><tr><th>#</th><th>type</th><th>original</th><th>replay</th><th>kind</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
 const showPre = (id, text) => { const out = el(id); if (out) { out.hidden = false; out.textContent = text; } };
 async function frictionToolAction(btn) {
   const act = btn.dataset.frictionAct;
@@ -4269,9 +4349,23 @@ async function frictionToolAction(btn) {
     await refreshFriction({ force: true });
   } else if (act === 'step-run') {
     const [method, route] = btn.dataset.http.split(' ');
-    const out = await api(method, route, method === 'GET' ? undefined : JSON.parse(btn.dataset.body || '{}'));
+    const out = await api(method, route, method === 'GET' ? undefined : { ...JSON.parse(btn.dataset.body || '{}'), confirm: true });
     showStepResult(out);
     await refreshFriction({ force: true });
+  } else if (act === 'toast-close') {
+    el('errorToast').hidden = true;
+  } else if (act === 'state-export') {
+    const state = await api('GET', '/friction/export');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }));
+    a.download = 'friction-state.export.json';
+    a.click();
+    showPre('stateOut', `exported ${state.resolutions.length} resolution(s) and ${state.snoozes.length} snooze(s)`);
+  } else if (act === 'state-import-preview' || act === 'state-import-apply') {
+    const file = el('stateFile').files[0];
+    if (!file) throw new Error('choose a friction export file first');
+    showPre('stateOut', JSON.stringify(await api('POST', '/friction/import', { state: JSON.parse(await file.text()), confirm: act === 'state-import-apply' }), null, 2));
+    if (act === 'state-import-apply') await refreshFriction({ force: true });
   } else if (act === 'show-config') {
     showPre('frictionConfigOut', JSON.stringify(await api('GET', '/friction/config'), null, 2));
   } else if (act === 'prune-preview' || act === 'prune-apply') {
@@ -4297,6 +4391,7 @@ async function frictionToolAction(btn) {
     const out = await api('POST', `/sessions/${id}/replay`, { confirm: act === 'replay-run' });
     const first = out.diff?.firstDivergence;
     showPre('replayOut', `${out.verdict ? out.verdict + '\n' : ''}${first ? `diverged at step ${first.index + 1} (${first.type}): ${first.kind}\n` : ''}${JSON.stringify(out, null, 2)}`);
+    renderReplayDiff(out.diff);
   }
 }
 // A failed row in the action log hands its session to the Tools drawer's replay form and plans it (a dry run).
@@ -4309,7 +4404,7 @@ async function openReplayFor(sessionId) {
   try { await frictionToolAction({ dataset: { frictionAct: 'replay-plan' } }); } catch (err) { window.alert('friction: ' + err.message); }
 }
 
-for (const id of ['frictionTools', 'frictionNotices', 'frictionRegressions', 'frictionTrends']) {
+for (const id of ['frictionTools', 'frictionNotices', 'frictionRegressions', 'frictionTrends', 'frictionExplainOut', 'frictionCheck', 'frictionReview', 'frictionSnoozes', 'errorToast']) {
   el(id)?.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-friction-act]');
     if (!btn) return;
@@ -4965,7 +5060,8 @@ const KIND_REFRESH = {
   verity: async () => { await refreshVerityRuns(); renderTimeline(); },
   'repair-config': refreshRepairStatus,
   host: () => refreshHost({ slow: true, fresh: true }),
-  notice: () => { renderFrictionNotices(); },
+  notice: () => { renderFrictionNotices(); renderFrictionCheck(); renderFrictionTrends(); renderFrictionRegressions(); },
+  analytics: () => { renderFrictionCheck(); renderFrictionReview(); renderFrictionSnoozes(); renderFrictionTrends(); renderFrictionRegressions(); },
 };
 
 function connectEvents() {
