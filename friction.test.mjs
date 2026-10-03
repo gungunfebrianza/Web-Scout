@@ -332,3 +332,35 @@ test('frictionConfig reports the thresholds in effect', () => {
   assert.equal(typeof c.resolveSuggest.minOks, 'number');
   assert.equal(typeof c.block, 'boolean');
 });
+
+// ---------- round 4 ----------
+
+import { buildFrictionClusters, normalizeErrorText, STRICT_CRV_FAIL_WEIGHT } from './friction.mjs';
+
+test('buildFrictionClusters: many selectors, one error -> one cause; distinct errors and small groups are not clusters', () => {
+  const rows = [];
+  for (const sel of ['.btn-a', '.btn-b', '.btn-c', '.btn-d']) {
+    rows.push(row({ session: 1, selector: sel, error: 'Element not found: #row-1' }), row({ session: 2, selector: sel, error: 'Element not found: #row-2' }));
+  }
+  rows.push(row({ session: 1, selector: '#lonely', error: 'Navigation failed (net::ERR_ABORTED)' }), row({ session: 2, selector: '#lonely', error: 'Navigation failed (net::ERR_ABORTED)' }));
+  const clusters = buildFrictionClusters(buildSelectorFriction(rows));
+  assert.equal(clusters.length, 1);
+  assert.equal(clusters[0].targetCount, 4);
+  assert.equal(clusters[0].failCount, 8);
+  assert.equal(clusters[0].errorClass, 'not-found');
+  assert.equal(clusters[0].signature, 'Element not found: *');
+  assert.match(clusters[0].summary, /one cause behind 4 targets \(8 failures\)/);
+  assert.equal(buildFrictionClusters(buildSelectorFriction(rows), { minTargets: 5 }).length, 0);
+  assert.equal(normalizeErrorText('Timed out after 15000ms waiting for "#x"\nstack'), 'Timed out after *ms waiting for *');
+});
+
+test('buildSelectorFriction: a failure in a weighted (strict-CRV) session costs proportionally more, and weight 1 changes nothing', () => {
+  const rows = [row({ session: 1, selector: '#a', ms: 0 }), row({ session: 1, selector: '#a', ms: 0 }), row({ session: 2, selector: '#b', ms: 0 }), row({ session: 2, selector: '#b', ms: 0 })];
+  const plain = buildSelectorFriction(rows);
+  assert.equal(plain[0].score, plain[1].score, 'equal cost without weights');
+  const weighted = buildSelectorFriction(rows, { sessionWeights: new Map([[2, 1.5]]) });
+  assert.equal(weighted[0].selector, '#b');
+  assert.equal(weighted.find((e) => e.selector === '#b').score, 3.5, '1.5 + 1.5 weighted failures + half a point for the retry');
+  assert.equal(weighted.find((e) => e.selector === '#a').score, 2.5);
+  assert.equal(typeof STRICT_CRV_FAIL_WEIGHT, 'number');
+});

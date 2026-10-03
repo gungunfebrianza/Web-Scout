@@ -3015,6 +3015,68 @@ No new detector - the same facts, said from one place.
 Tests: `friction.test.mjs` (pure), `friction-round3.test.mjs` (relay, incl. a real restart),
 `friction-contract.test.mjs`.
 
+## V42 - friction awareness, round 4: closing the seams (implemented)
+
+Round 3 made the selector warning one coherent system; this round applied the same discipline to what was
+still computed twice, frozen, or reachable only by hand. Most of it is the "same fact, one place" rule
+extended; the rest is making the information usable before and after the moment it matters.
+
+**Reliability first (the suite had stopped being a gate).** 14 tests were red on a clean checkout:
+`RELAY_SOURCE_FILES` did not list `friction.mjs`, `self-repair.mjs`, `host-health.mjs`, `scratch.mjs`, so the
+relay copied into a temp dir crashed on import (and an edit to those files never showed as stale);
+`relay-source-files.test.mjs` now walks the relay's import graph and fails if the list falls behind. The
+stale-warning cooldown file is keyed by relay port in the private temp root under tests (a 5-minute cooldown
+from a previous run had been swallowing the warning being asserted). The committed token calibration is
+partial (no text sample), so its freshness test is opt-in; the peek test no longer assumes the calibrated band
+brackets the chars/4 figure. Not fixed: 1-4 `webscout-browser-profile-*` dirs left in the private root on a
+full run under load - not reproducible in isolation, the dirs are removable seconds later, consistent with a
+Windows file lock (AV scan) outliving the 7s of retries; the run-tests report still names them.
+
+**New targets and scopes.**
+- **Page-level commands are targets.** `page.reload`, `page.hardReload`, `page.epoch`, `dom.settle`,
+  `dom.screenshot`, `console.wait`, `net.wait`, `react.tree`, `idb.list` have no selector to key on; they key on
+  the origin the agent reported (origin granularity - the agent reports no path). A reload that keeps timing out
+  on one site now warns, ranks, explains and resolves like a selector. `actions.selector_key` is re-derived once
+  for existing rows of those types.
+- **One "mark fixed" for every scope.** `friction resolve type <command>`, `macro <id>`, `verity <label>` use the
+  same table and the same rule (only what happens AFTER counts): a command type's failure rate, a macro that never
+  once succeeded and a verity label still failing all stop ranking, and a relapse shows from zero. The digest
+  says which command clears each item.
+
+**Said before it happens.**
+- `crv preflight --plan '[{type,params},...]'` returns `planRisk`: the steps that would draw a warning, built from
+  `frictionFactsFor` (ignoring the once-per-session dedupe; side-effect free). `crv run` previously bypassed the
+  pre-action warning altogether; it now gets the header, `--ack-risk`, and is refused before its baseline snapshot
+  when blocked.
+- `--try-recovery` (MCP `tryRecovery:true`): a failed click/fill/wait runs once on the alternative selector that
+  worked after that failure in >= 80% of >= 3 recorded trials. Opt-in, `nth` dropped, both attempts logged,
+  `x-webscout-recovered` says which selector ran.
+
+**Said after, with less typing.**
+- `session end --apply-suggestions` resolves the "probably fixed" targets in the same call; `appliedResolutions`
+  lists them with the undo command.
+- A known-issue candidate carries `suggestedRemediation` (the recovery that worked most, else the class advice).
+  `promote` previews it but still requires a human-supplied remediation to write.
+- `frictionClusters`: targets that fail with one message (the failing selector masked out of it) are grouped as one
+  cause; `friction explain` names the cluster. The score weights a failure inside a strict-CRV session by
+  `WEBSCOUT_STRICT_CRV_FAIL_WEIGHT` (1.5) because the auto snapshot pair around it was wasted too.
+
+**Less state.** The macro nudge no longer reads a per-session snapshot frozen at session start; candidates come from
+`macroCandidates()` (cached a minute, dropped on any macro/analytics change), so a macro recorded, run or declared
+fixed mid-session is seen by the next command. `topFailedSelectors` (an alias since V41) is gone.
+
+**Dashboard.** "This session" block (`GET /friction/session`, from the live tracker: what the agent was told, incl.
+"warned x2 (escalated)"), a one-cause list, and the promote flow is an inline form (prefilled fix, preview, then
+write) instead of `window.prompt`; an open form is not rebuilt by the next refresh. Driven in a real headless
+browser by `friction-dashboard.test.mjs` - the first time the round-3 panel was exercised with data.
+
+Not done: path-level page targets (needs the agent to report a path); a `friction session` CLI/MCP command (the
+MCP tool list is at its byte cap, so the live view is dashboard-only for now); the `computeAnalytics` full scan
+still runs per analytics request.
+
+Tests: `friction-round4.test.mjs`, `friction-dashboard.test.mjs`, `selector-key-migration.test.mjs`,
+`relay-source-files.test.mjs`, and additions to `friction.test.mjs` / `friction-contract.test.mjs`.
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

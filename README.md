@@ -181,7 +181,13 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   dashboard, history read on demand instead of frozen at session start, stores and macro steps
   covered, `friction explain <type> <selector>` to see why it did or did not warn,
   `friction config` for the thresholds in effect, `known-issues promote <candidateId>` to turn a draft
-  into a registry entry, and a "mark fixed?" suggestion at `session end`;)
+  into a registry entry, and a "mark fixed?" suggestion at `session end`;
+  round 4 - roadmap V42 - closed the remaining seams: page-level commands (reload, settle, screenshot)
+  are targets keyed by origin, `crv preflight --plan` checks a plan before it runs, `session end
+  --apply-suggestions` applies the "mark fixed?" list, a candidate arrives with a suggested remediation,
+  `friction resolve` also takes `type <command>`, `macro <id>` and `verity <label>`, targets that fail with
+  one message are grouped as a single cause (`frictionClusters`), failures in strict-CRV sessions weigh more,
+  and `--try-recovery` retries a failed click/fill/wait once on the selector that reliably worked after it;)
   `friction unresolve <type> <selector>` undoes it and `friction list` shows every declaration)
   and `session end` reports `emergentFriction` - a type/selector failing for the first
   time ever, flagged before it has accumulated enough history to rank in the global

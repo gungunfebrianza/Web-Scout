@@ -37,6 +37,11 @@ export const RESOLVE_SUGGEST_MIN_FAILS = envNumber('WEBSCOUT_RESOLVE_SUGGEST_MIN
 export const RESOLVE_SUGGEST_MIN_OKS = envNumber('WEBSCOUT_RESOLVE_SUGGEST_MIN_OKS', 3);
 export const RESOLVE_SUGGEST_MIN_SESSIONS = envNumber('WEBSCOUT_RESOLVE_SUGGEST_MIN_SESSIONS', 2);
 export const SELECTOR_FRICTION_LIMIT = 100;
+// A failure inside a strict-CRV session also threw away that session's auto before/after snapshot
+// pair around the action (the snapshots are taken regardless of how the action ends), so the same
+// failure costs more there. The weight multiplies that failure's share of the ranking score; 1 turns
+// it off.
+export const STRICT_CRV_FAIL_WEIGHT = envNumber('WEBSCOUT_STRICT_CRV_FAIL_WEIGHT', 1.5);
 
 // The knobs in effect, for `friction explain` and the health surface - an operator can see what
 // the warn is being judged against without reading the environment.
@@ -51,6 +56,8 @@ export function frictionConfig() {
     candidateMinFails: CANDIDATE_MIN_FAILS,
     resolveSuggest: { minFails: RESOLVE_SUGGEST_MIN_FAILS, minOks: RESOLVE_SUGGEST_MIN_OKS, minSessions: RESOLVE_SUGGEST_MIN_SESSIONS },
     block: process.env.WEBSCOUT_RISKY_BLOCK === '1',
+    strictCrvFailWeight: STRICT_CRV_FAIL_WEIGHT,
+    clusterMinTargets: CLUSTER_MIN_TARGETS,
   };
 }
 
@@ -101,6 +108,15 @@ function targetKey(type, target) {
   return `${typeFamily(type)}::${part}`;
 }
 
+// "Mark fixed" is one idea with several scopes. A target (selector / store / page) is keyed by
+// frictionKeyFor; the scopes below are keyed here, so one table, one command and one rule ("only what
+// happened AFTER the declared instant counts") cover them all.
+//   type  - a command type's failure rate        (friction resolve type dom.wait)
+//   macro - a macro that never once succeeds      (friction resolve macro 3)
+//   verity - a verity label still failing         (friction resolve verity checkout)
+export const SCOPE_KINDS = new Set(['type', 'macro', 'verity']);
+export const scopeKey = (kind, id) => `${kind}::${String(id).trim()}`;
+
 export function frictionKey(type, selector) {
   return targetKey(type, { kind: 'selector', value: selector });
 }
@@ -148,7 +164,7 @@ function emptyBucket() {
 // `origin` / `error_class` columns). `resolutions`: Map<frictionKey, resolvedAtISO> - failures
 // at or before that instant are an operator-declared "fixed" and are ignored. `minFails` is 2 for
 // "recurring" lists and 1 when the caller wants the entry for ONE key whatever its count.
-export function buildSelectorFriction(actions, { matchKnownIssues = () => [], resolutions = new Map(), limit = SELECTOR_FRICTION_LIMIT, minFails = 2 } = {}) {
+export function buildSelectorFriction(actions, { matchKnownIssues = () => [], resolutions = new Map(), limit = SELECTOR_FRICTION_LIMIT, minFails = 2, sessionWeights = new Map() } = {}) {
   const entries = new Map();
   const isResolved = (key, at) => {
     const cutoff = resolutions.get(key);
@@ -172,12 +188,13 @@ export function buildSelectorFriction(actions, { matchKnownIssues = () => [], re
     if (isResolved(key, a.started_at)) continue;
     const entry = entries.get(key) ?? {
       key, type: typeFamily(a.type), targetKind: target.kind, selector: target.value, failCount: 0, sessionIds: new Set(), lastFailedAt: null, lastSuccessAt: null,
-      origins: {}, errorClasses: {}, lastError: null, wastedMs: 0, retries: 0, knownIssues: [], recMap: new Map(), recoveryTrials: 0,
+      origins: {}, errorClasses: {}, lastError: null, wastedMs: 0, retries: 0, knownIssues: [], recMap: new Map(), recoveryTrials: 0, weightedCost: 0,
     };
     entries.set(key, entry);
     entry.failCount += 1;
     entry.sessionIds.add(a.session_id);
     entry.wastedMs += Number(a.duration_ms) || 0;
+    entry.weightedCost += (sessionWeights.get(a.session_id) ?? 1) * (1 + (Number(a.duration_ms) || 0) / 1000);
     const klass = a.error_class || classifyError(a.error);
     entry.errorClasses[klass] = (entry.errorClasses[klass] ?? 0) + 1;
     if (!entry.lastFailedAt || a.started_at >= entry.lastFailedAt) {
@@ -239,14 +256,14 @@ export function buildSelectorFriction(actions, { matchKnownIssues = () => [], re
 
   return [...entries.values()]
     .filter((e) => e.failCount >= minFails)
-    .map(({ sessionIds, recMap, recoveryTrials, knownIssues, ...rest }) => {
+    .map(({ sessionIds, recMap, recoveryTrials, knownIssues, weightedCost, ...rest }) => {
       const recoveries = [...recMap.values()]
         .map((r) => ({ ...r, of: recoveryTrials }))
         .sort((a, b) => b.worked - a.worked || (b.at > a.at ? 1 : -1))
         .slice(0, 3);
       // Ranking cost: failures, plus a second per second spent failing, plus half a point per
       // retry. A selector that "works on the 3rd try" bleeds time with few outright failures.
-      const score = Math.round((rest.failCount + rest.wastedMs / 1000 + rest.retries * RETRY_WEIGHT) * 10) / 10;
+      const score = Math.round((weightedCost + rest.retries * RETRY_WEIGHT) * 10) / 10;
       return { ...rest, ...(knownIssues.length ? { knownIssues } : {}), sessionCount: sessionIds.size, score, recoveries, recovery: recoveries[0] ?? null };
     })
     .sort((a, b) => b.score - a.score || (b.lastFailedAt > a.lastFailedAt ? 1 : -1))
@@ -290,10 +307,11 @@ export function createFrictionTracker({ persist = null } = {}) {
     // Called from the one place every action is logged. Returns the updated live entry when the
     // action carried a target (null otherwise) so callers can react to a failure immediately.
     note(sessionId, { type, params, origin, ok, error, durationMs, at }) {
-      const key = frictionKeyFor(type, params, origin);
-      if (!key) return null;
+      const target = frictionTarget(type, params, origin);
+      if (!target) return null;
+      const key = targetKey(type, target);
       const entries = sessionMap(live, sessionId);
-      const entry = entries.get(key) ?? { fails: 0, unresolved: 0, lastOkAt: null, lastFailedAt: null, lastError: null, errorClass: null, classes: {}, wastedMs: 0 };
+      const entry = entries.get(key) ?? { target: { kind: target.kind, value: target.value, type: typeFamily(type) }, fails: 0, unresolved: 0, lastOkAt: null, lastFailedAt: null, lastError: null, errorClass: null, classes: {}, wastedMs: 0 };
       entries.set(key, entry);
       if (ok) {
         entry.unresolved = 0;
@@ -518,6 +536,56 @@ export function findResolveSuggestions(rows, { resolutions = new Map(), onlyKeys
   return out;
 }
 
+// ---------- root-cause clusters ----------
+
+// Same failure, many names: `.btn-primary` failing on five pages, or ten rows failing with the same
+// "Element not found" - each is its own entry in the per-target list, but it is ONE cause. Entries
+// that share an error class and a placeholder-normalized error message are grouped, and a group is a
+// cluster once it spans CLUSTER_MIN_TARGETS different targets. Pure over buildSelectorFriction's rows.
+export const CLUSTER_MIN_TARGETS = envNumber('WEBSCOUT_CLUSTER_MIN_TARGETS', 3);
+
+export function normalizeErrorText(text) {
+  const firstLine = String(text ?? '').split('\n')[0];
+  return firstLine.replace(/"[^"]*"|'[^']*'|#[\w-]+|\b0x[0-9a-f]+\b|\d+/gi, '*').replace(/\s+/g, ' ').trim();
+}
+
+export function buildFrictionClusters(entries, { minTargets = CLUSTER_MIN_TARGETS, limit = 5 } = {}) {
+  const groups = new Map();
+  for (const e of entries) {
+    if (!e.lastError) continue;
+    const errorClass = topClass(e.errorClasses) ?? 'other';
+    // The message usually quotes the very selector that failed, which would make every target look unique.
+    const signature = normalizeErrorText(e.selector ? e.lastError.split(e.selector).join('*') : e.lastError);
+    if (!signature) continue;
+    const id = `${errorClass}|${signature}`;
+    const g = groups.get(id) ?? { errorClass, signature, sample: e.lastError, targets: [], failCount: 0, wastedMs: 0, score: 0, origins: new Set(), types: new Set() };
+    g.targets.push({ key: e.key, selector: e.selector, targetKind: e.targetKind, failCount: e.failCount });
+    g.failCount += e.failCount;
+    g.wastedMs += e.wastedMs;
+    g.score += e.score;
+    g.types.add(e.type);
+    for (const o of Object.keys(e.origins ?? {})) if (o) g.origins.add(o);
+    groups.set(id, g);
+  }
+  return [...groups.values()]
+    .filter((g) => g.targets.length >= minTargets)
+    .map((g) => ({
+      errorClass: g.errorClass,
+      signature: g.signature,
+      sample: g.sample.slice(0, 200),
+      targetCount: g.targets.length,
+      failCount: g.failCount,
+      wastedMs: g.wastedMs,
+      score: Math.round(g.score * 10) / 10,
+      types: [...g.types],
+      origins: [...g.origins],
+      targets: g.targets.sort((a, b) => b.failCount - a.failCount).slice(0, 8),
+      summary: `one cause behind ${g.targets.length} targets (${g.failCount} failures): ${g.sample.slice(0, 100)}`,
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
 // ---------- known-issue candidates ----------
 
 // A starting point for the one field a draft cannot know. Prefer what actually worked after these
@@ -556,7 +624,7 @@ export function buildKnownIssueCandidates(actions, { matchKnownIssues = () => []
     if (a.ok || !a.error) continue;
     if (matchKnownIssues(a.error).length) continue;
     const firstLine = String(a.error).split('\n')[0];
-    const normalized = firstLine.replace(/"[^"]*"|'[^']*'|#[\w-]+|\b0x[0-9a-f]+\b|\d+/gi, '*').replace(/\s+/g, ' ').trim();
+    const normalized = normalizeErrorText(firstLine);
     if (!normalized) continue;
     const g = groups.get(normalized) ?? { normalized, sample: firstLine, count: 0, sessionIds: new Set(), types: new Set(), selectors: new Map() };
     g.count += 1;

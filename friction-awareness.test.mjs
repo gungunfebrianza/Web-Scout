@@ -12,9 +12,9 @@
 //      before it has accumulated enough history to rank in the global digest.
 //   5. "crv preflight" carries knownFriction (the same topFrictionItems digest) so a pass can
 //      front-load the riskiest known-bad selectors/types before starting.
-// #2 and #3 are read from a per-session snapshot frozen at session start (see
-// buildSessionFrictionSnapshot's own comment) specifically so they never touch - and never
-// poison - the shared 5s analytics cache other callers (GET /analytics) rely on being fresh.
+// #2 reads the indexed per-target history and #3 the macro candidates on demand (macroCandidates()),
+// each through its own short-lived path, so neither poisons the shared analytics cache other
+// callers (GET /analytics) rely on being fresh.
 // Real relay, real fake-agent tab, no browser. Each test gets its own relay.
 
 import { test } from 'node:test';
@@ -176,7 +176,7 @@ test('a macro recorded mid-session is immediately nudge-eligible for that same s
     assert.equal(macro.steps.length, 2);
 
     // SAME still-active session, one more action of the matching type - previously impossible
-    // to nudge for at all (sessionFrictionSnapshot froze before this macro existed), so this
+    // to nudge for at all (the old per-session snapshot froze before this macro existed), so this
     // session would never have been nudged for its own just-recorded macro. The macro's own
     // two recording actions already count as the tail of the match (maybeMacroMatchNudge reads
     // the session's whole action history, not only actions after the macro existed), so the

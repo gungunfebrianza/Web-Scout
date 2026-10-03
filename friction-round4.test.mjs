@@ -212,7 +212,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnClean } from './test-relay.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const cliFor = (relay) => (...args) => spawnClean([path.join(here, 'cli.mjs'), ...args], { env: { WEBSCOUT_PORT: String(relay.port), WEBSCOUT_NO_AUTORESTART: '1' }, cwd: here, timeout: 60000 });
+const cliFor = (relay) => (...args) => spawnClean([path.join(here, 'cli.mjs'), ...args], { env: { WEBSCOUT_PORT: String(relay.port), WEBSCOUT_NO_AUTORESTART: '1', WEBSCOUT_NO_AUTOSTART: '1' /* a slow health check must never spawn a stray relay */ }, cwd: here, timeout: 60000 });
 
 test('CLI: crv preflight --plan prints planRisk; session end --apply-suggestions says what it marked fixed', async () => {
   let broken = true;
@@ -255,6 +255,143 @@ test('MCP and CLI documents the new params (plan, applySuggestions) and the page
   const mcp = fs.readFileSync(path.join(here, 'mcp-server.mjs'), 'utf8');
   assert.match(mcp, /crv_preflight \{stores\?, selector\?, plan\?\}/);
   assert.match(mcp, /end \{id\?, trace\?, applySuggestions\?\}/);
-  assert.match(mcp, /pass the origin as selector/);
+  assert.match(mcp, /selector = origin/);
+  assert.match(mcp, /type may also be macro|verity|type/);
   assert.match(mcp, /ackRisk: p\?\.ackRisk === true/, 'crv_run forwards ackRisk like any other command');
+});
+
+// ---------- one "mark fixed" for every scope ----------
+
+test('friction resolve works on a command type, a macro and a verity label - and only what happens AFTER counts', async () => {
+  let breakWait = true;
+  let breakMacro = false;
+  const handlers = {
+    'dom.wait': () => { if (breakWait) throw new Error('command timed out after 15000ms'); return { found: true }; },
+    'dom.click': () => { if (breakMacro) throw new Error('Element not found: #m'); return { clicked: true, mutated: false }; },
+  };
+  await withRelay(async ({ api, apiRaw, start, run }) => {
+    // --- a command type
+    const s1 = await start('scopes');
+    for (let i = 0; i < 3; i += 1) await run('dom.wait', { selector: `#w${i}0` });
+    let rate = (await api('GET', '/analytics')).failureRateByType.find((t) => t.type === 'dom.wait');
+    assert.equal(rate.failed, 3);
+    assert.match((await api('GET', '/analytics')).topFrictionItems.find((i) => i.kind === 'failureRateByType').summary, /friction resolve type dom\.wait/);
+    await api('POST', '/friction/resolve', { type: 'type', selector: 'dom.wait', note: 'proxy timeout raised' });
+    assert.equal((await api('GET', '/analytics')).failureRateByType.find((t) => t.type === 'dom.wait'), undefined, 'the old failures stop counting');
+    await run('dom.wait', { selector: '#w99' });
+    rate = (await api('GET', '/analytics')).failureRateByType.find((t) => t.type === 'dom.wait');
+    assert.equal(rate.failed, 1, 'a relapse after the fix is visible, from zero');
+    assert.equal(rate.total, 1);
+
+    // --- a macro that never once succeeds
+    await run('dom.click', { selector: '#a' }); await run('dom.click', { selector: '#b' });
+    const macro = await api('POST', '/macros', { name: 'two clicks', sessionId: s1.id });
+    breakMacro = true;
+    await api('POST', `/macros/${macro.id}/run`, { continueOnError: true, confirm: true });
+    assert.ok((await api('GET', '/analytics')).macrosNeverSucceeding.some((m) => m.id === macro.id));
+    assert.match((await api('GET', '/analytics')).topFrictionItems.map((i) => i.summary).join('\n'), new RegExp(`friction resolve macro ${macro.id}`));
+    await api('POST', '/friction/resolve', { type: 'macro', selector: String(macro.id) });
+    assert.ok(!(await api('GET', '/analytics')).macrosNeverSucceeding.some((m) => m.id === macro.id), 'declared fixed');
+    await api('POST', `/macros/${macro.id}/run`, { continueOnError: true, confirm: true });
+    assert.ok((await api('GET', '/analytics')).macrosNeverSucceeding.some((m) => m.id === macro.id), 'it fails again after the fix, so it is back');
+
+    // --- a verity label still failing
+    await api('POST', '/verity/import', { sessionId: s1.id, label: 'checkout', result: { passed: false, steps: [{ passed: false }] } });
+    assert.equal((await api('GET', '/analytics')).verityLabelsStillFailing.length, 1);
+    await api('POST', '/friction/resolve', { type: 'verity', selector: 'checkout' });
+    assert.equal((await api('GET', '/analytics')).verityLabelsStillFailing.length, 0);
+    await api('POST', '/verity/import', { sessionId: s1.id, label: 'checkout', result: { passed: false, steps: [{ passed: false }] } });
+    assert.equal((await api('GET', '/analytics')).verityLabelsStillFailing.length, 1, 'a fresh failing import after the fix shows again');
+
+    // --- one table, one list, one undo
+    const kinds = (await api('GET', '/friction/resolutions')).map((r) => r.type).sort();
+    assert.deepEqual(kinds, ['macro', 'type', 'verity']);
+    await api('POST', '/friction/unresolve', { type: 'type', selector: 'dom.wait' });
+    assert.equal((await api('GET', '/analytics')).failureRateByType.find((t) => t.type === 'dom.wait').failed, 4, 'undo restores the history');
+
+    // --- guard rails
+    const noId = await apiRaw('POST', '/friction/resolve', { type: 'macro' });
+    assert.equal(noId.res.status, 400);
+    assert.match(noId.json.error, /a macro id is required/);
+    const explainScope = await apiRaw('GET', '/friction/explain?type=macro&selector=1');
+    assert.equal(explainScope.res.status, 400);
+    assert.match(explainScope.json.error, /whole-scope target/);
+  }, { handlers });
+});
+
+// ---------- the macro nudge reads macros on demand ----------
+
+test('a macro recorded and run mid-session is nudged with its CURRENT record, not the one frozen at session start', async () => {
+  const handlers = { 'dom.click': () => ({ clicked: true, mutated: false }) };
+  await withRelay(async ({ api, apiRaw, start, run }) => {
+    const s = await start('macro nudge');
+    await run('dom.click', { selector: '#one' }); await run('dom.click', { selector: '#two' });
+    const macro = await api('POST', '/macros', { name: 'pair', sessionId: s.id });
+    await api('POST', `/macros/${macro.id}/run`, { confirm: true }); // its first-ever run, mid-session
+    await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#x' } }); // tail still contains a replayed step
+    const nudged = await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#y' } });
+    const header = nudged.res.headers.get('x-webscout-macro-match') ?? '';
+    assert.match(header, /macro "pair"/);
+    assert.match(header, /1\/1 recent run\(s\) passed/, 'the run made a moment ago is in the record the nudge quotes');
+    assert.doesNotMatch(header, /never run/);
+  }, { handlers });
+});
+
+// ---------- root-cause clusters ----------
+
+test('analytics groups targets that fail with one message into a single cause, and explain says which cluster a target is in', async () => {
+  await withRelay(async ({ api, start, run }) => {
+    await start('clusters');
+    for (const sel of ['.a1x', '.b1x', '.c1x']) { await run('dom.click', { selector: sel }); await run('dom.click', { selector: sel }); }
+    const analytics = await api('GET', '/analytics');
+    assert.equal(analytics.frictionClusters.length, 1);
+    assert.equal(analytics.frictionClusters[0].targetCount, 3);
+    assert.equal(analytics.frictionClusters[0].failCount, 6);
+    const explain = await api('GET', `/friction/explain?type=dom.click&selector=${encodeURIComponent('.a1x')}`);
+    assert.equal(explain.cluster.targetCount, 3);
+    assert.match(explain.cluster.summary, /one cause behind 3 targets/);
+    assert.equal((await api('GET', '/friction/config')).strictCrvFailWeight, 1.5);
+  }, { handlers: { 'dom.click': (p) => { throw new Error(`Element not found: ${p.selector}`); } } });
+});
+
+// ---------- --try-recovery ----------
+
+for (const evidence of [2, 3]) test(`tryRecovery with ${evidence} recorded trials: ${evidence < 3 ? 'too little evidence to act on another element' : 'runs the alternative that reliably worked, once, opt-in, and says so'}`, async () => {
+  const seen = [];
+  const handlers = { 'dom.click': (p) => { seen.push(p.selector); if (p.selector === '#primary') throw new Error('Element not found: #primary'); return { clicked: true, mutated: false, selector: p.selector }; } };
+  await withRelay(async ({ api, apiRaw, start, run }) => {
+    const seed = async (n) => {
+      for (let i = 0; i < n; i += 1) {
+        const s = await start(`seed ${i}`);
+        await run('dom.click', { selector: '#primary' });
+        await run('dom.click', { selector: '#fallback' });
+        await api('POST', `/sessions/${s.id}/end`);
+      }
+    };
+    if (evidence < 3) {
+      await seed(evidence);
+      await start('too little evidence');
+      seen.length = 0;
+      const early = await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#primary' }, tryRecovery: true });
+      assert.equal(early.json.ok, false, `${evidence} trials are not enough to act on another element`);
+      assert.deepEqual(seen, ['#primary']);
+      return;
+    }
+    await seed(evidence); // three recorded trials, all of which worked
+    await start('enough evidence');
+    seen.length = 0;
+    const off = await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#primary' } });
+    assert.equal(off.json.ok, false, 'not requested, not done');
+    assert.deepEqual(seen, ['#primary']);
+
+    seen.length = 0;
+    const on = await apiRaw('POST', '/command', { type: 'dom.click', params: { selector: '#primary', nth: 2 }, tryRecovery: true });
+    assert.equal(on.json.ok, true, JSON.stringify(on.json));
+    assert.equal(on.json.result.selector, '#fallback');
+    assert.deepEqual(seen, ['#primary', '#fallback'], 'exactly one extra attempt');
+    assert.match(on.res.headers.get('x-webscout-recovered') ?? '', /^"#primary" \(dom\.click\) failed; ran "#fallback" instead \(it worked 3 of 3 times/);
+    const actions = (await api('GET', `/sessions/${(await api('GET', '/health')).active_session.id}/actions?full=1`)).reverse(); // newest-first from the API
+    assert.deepEqual(actions.filter((a) => a.type === 'dom.click').map((a) => [a.params.selector, a.ok]).slice(-2), [['#primary', 0], ['#fallback', 1]], 'both attempts are in the evidence trail');
+    assert.equal(actions.filter((a) => a.type === 'dom.click').at(-1).params.nth, undefined, 'the original selector\'s nth is not carried over');
+  }, { handlers });
 });

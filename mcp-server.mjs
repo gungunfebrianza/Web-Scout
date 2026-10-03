@@ -94,12 +94,12 @@ const TOOLS = [
       + '  status {} - relay health, agents, active session, DB_VERSION drift\n'
       + '  agents {} - connected multi-tab agent names\n'
       + '  analytics {} - Friction Analytics: recurring failure patterns across ALL sessions\n'
-      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?} - sub: explain (why it warns), resolve|unresolve (mark fixed), list, config, promote (candidate id -> known-issues.json; confirm writes). For page.reload/dom.settle/... pass the origin as selector\n'
+      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?} - sub: explain (why it warns), resolve|unresolve (mark fixed), list, config, promote (candidate id -> known-issues.json; confirm writes). type may also be macro|verity|type (selector = id/label/command); page.reload/dom.settle/...: selector = origin\n'
       + '  search {q} - full-text search across every session\'s actions\n'
       + '  db_version_check {agent?, dbJsPath?} - js/db.js\'s DB_VERSION vs the tab\'s LIVE IndexedDB version; on drift also probes whether opening at the source version is blocked\n'
       + '  dashboard_url {} - the realtime dashboard URL (does not open a browser)\n'
-      + '  ping {agent?} - fast liveness probe (no DOM/IndexedDB work) -> {alive, ...}\n'
-      + '  token_report {sessionId?} - estimated tokens per command type (+ byTarget/byIntent/loops/redundantCalls/byMacro with sessionId); without it the ALL-TIME report incl. savings ledgers\n'
+      + '  ping {agent?} - fast liveness probe (no DOM/IDB work) -> {alive, ...}\n'
+      + '  token_report {sessionId?} - est. tokens per command type (+ byTarget/byIntent/loops/redundantCalls/byMacro with sessionId); without it the ALL-TIME report\n'
       + '  debug_state {agent?} - the in-page runtime\'s live state (WebSocket, queues, reconnect backoff)',
     actions: {
       status: () => request('GET', '/health', undefined, { autostart: false }),
@@ -133,7 +133,7 @@ const TOOLS = [
     name: 'webscout_session',
     description: 'Session lifecycle and evidence. A goal MUST be declared (start) before any dom/idb/net/console/eval/page action is accepted; exactly one session is active at a time.\n'
       + 'Actions:\n'
-      + '  start {goal, context?, strictCrv?, strictCrvStores?, crvCompact?, tags?, tokenBudget?, noBriefing?, lean?, allowRemote?, ifStaleMin?} - declare a session; becomes the active one. ifStaleMin: ends a conflicting active session at least that old (minutes) first; younger still refuses. strictCrvStores scopes strictCrv auto-snapshots (omitted on a real-size db it WILL time out). crvCompact adds a change preview to each strictCrv reply. tokenBudget arms a read guard: past 60% reads over ~3000 tokens return their shape (noGuard overrides), past 85% ~1000. lean makes shaping the DEFAULT (tables; pointer/delta for repeats; the shape of bodies over ~4000 tokens). The reply carries a `briefing` (stores + counts, DB version, tab freshness) unless noBriefing. Pinned to its origin: a later write/eval refuses if that changed or is non-local, unless allowRemote\n'
+      + '  start {goal, context?, strictCrv?, strictCrvStores?, crvCompact?, tags?, tokenBudget?, noBriefing?, lean?, allowRemote?, ifStaleMin?} - declare a session; becomes the active one. ifStaleMin: ends a conflicting active session at least that old (minutes) first; younger still refuses. strictCrvStores scopes strictCrv auto-snapshots (omitted on a real-size db it WILL time out). crvCompact adds a change preview to each strictCrv reply. tokenBudget arms a read guard (past 60% reads over ~3000 tokens return their shape, past 85% ~1000; noGuard overrides). lean makes shaping the DEFAULT (tables; pointer/delta for repeats; shape of bodies over ~4000 tokens). The reply carries a `briefing` (stores + counts, DB version, tab freshness) unless noBriefing. Pinned to its origin: a later write/eval refuses if that changed or is non-local, unless allowRemote\n'
       + '  end {id?, trace?, applySuggestions?} - end a session (default: the active one); trace also exports it (anonymised) to grow the trace.mjs replay corpus; applySuggestions marks the "probably fixed" friction targets fixed\n'
       + '  current {} - the active session, or {active:false}\n'
       + '  list {} - every session, newest first\n'
@@ -237,7 +237,7 @@ const TOOLS = [
       + '  pick {timeoutMs?} - BLOCKS until a HUMAN clicks something in the tab; returns its selector\n'
       + '  settle {selector?, quietMs?, timeoutMs?} - wait until the DOM under selector (default body) has no mutations for quietMs (default 300)\n'
       + '  screenshot {selector?, outPath?} - best-effort DOM rasterization; outPath saves a PNG, else dimensions only\n'
-      + 'Every action takes optional `agent` (multi-tab target name).\n'
+      + 'Every action takes optional `agent` (multi-tab target name); click/fill/wait also take tryRecovery:true (retry once on the selector that reliably worked after this failure) and ackRisk:true.\n'
       + '+shape (every read action of dom/react/idb/net/console) = table?, ifChanged?, delta?, peek?, noGuard?: table: rows as {columns, rows:[[...]]}; ifChanged: {unchanged, sameAs} instead of an unchanged body; delta: that, or only what changed; peek: shape, size and a sample (full result stays cached); noGuard: bypass the token-budget guard and a lean session. ifChanged/delta only while the earlier result is still in your context.',
     actions: {
       query: (p) => sendCmd('dom.query', { selector: requireField(p, 'selector'), full: !!p?.full, meta: !!p?.meta, pick: p?.pick }, p?.agent, readOpts(p)),
@@ -286,16 +286,16 @@ const TOOLS = [
       + '  dump {store, where?, fields?, limit?, countOnly?, +shape} - rows + real keyPath. where (exact-equality map), fields, limit filter IN THE PAGE - use on any large store; countOnly: counts, no rows\n'
       + '  get {store, key, fields?, +shape} - single-key lookup (store.get), not a scan; fields: keep only those keys\n'
       + '  snapshot {stores?, golden?, where?, since?} - capture + PERSIST -> {id, counts}; golden names it a regression baseline; where scopes every store to matching rows (partial by construction). since: a baseline id - fresh snapshot of that baseline\'s stores returning ONLY what changed\n'
-      + '  verify {baseline?, stores?, expect?, allowExtra?, samples?, verbose?} - the verify step of baseline -> action -> verify in ONE call: re-snapshots the baseline\'s stores, diffs, checks expect, replies pass/fail + rows only for failures. expect: "notes:+1,tags:same" (+N added, +N+ at least N, -N removed, ~N changed, same) or a JSON array; a changed store not named is "unexpected" and fails unless allowExtra; no expect = nothing may change. baseline: snapshot id, golden name, or omitted for the session\'s newest snapshot\n'
+      + '  verify {baseline?, stores?, expect?, allowExtra?, samples?, verbose?} - the verify step of baseline -> action -> verify in ONE call: re-snapshots the baseline\'s stores, diffs, checks expect, replies pass/fail + rows only for failures. expect: "notes:+1,tags:same" (+N added, +N+ at least N, -N removed, ~N changed, same) or a JSON array; an unnamed changed store is "unexpected" and fails unless allowExtra; no expect = nothing may change. baseline: snapshot id, golden name, or omitted for the session\'s newest snapshot\n'
       + '  crv_run {stores, type, params?, expect?, allowExtra?, samples?, verbose?} - snapshot, dispatch {type,params} (not idb.snapshot), verify (above) in one call; action failure fails the call\n'
       + '  crv_preflight {stores?, selector?, plan?} - pre-CRV check: origin/staleness, DB drift, stores/selector exist, console errors (+ knownIssueMatches), agents[] with tabCollision; plan [{type,params}] -> planRisk: steps that will draw a friction warning\n'
-      + '  crv_seed {store, rows, manifest?} - put_many + records stored keys into a manifest (default: dotfile in CWD) for crv_cleanup\n'
-      + '  crv_cleanup {manifest?} - delete_many every id crv_seed recorded, clears the manifest\n'
+      + '  crv_seed {store, rows, manifest?} - put_many + records stored keys in a manifest (default: dotfile in CWD) for crv_cleanup\n'
+      + '  crv_cleanup {manifest?} - delete_many every id crv_seed recorded; clears the manifest\n'
       + '  diff {idA, idB} - persisted diff of two snapshots\n'
       + '  diff_golden {name, idB} - diff a named golden snapshot (any session) against idB\n'
       + '  restore {snapshotId?, golden?} - PUT a snapshot\'s rows back (never deletes)\n'
-      + '  put {store, row, dryRun?} - write one row by the store\'s keyPath, returns the stored row; dryRun validates the shape without writing -> {valid, problems}\n'
-      + '  put_many {store, rows, dryRun?} - batch write in ONE transaction; a failed row (e.g. unique-index conflict) lands in `failed`, no abort; dryRun validates every row\n'
+      + '  put {store, row, dryRun?} - write one row by the store\'s keyPath, returns the stored row; dryRun validates without writing -> {valid, problems}\n'
+      + '  put_many {store, rows, dryRun?} - batch write in ONE transaction; a failed row (e.g. unique-index conflict) lands in `failed`; dryRun validates every row\n'
       + '  patch {store, key, patch} - shallow-merge onto the EXISTING row; errors if none (never inserts)\n'
       + '  delete {store, key} - delete one row\n'
       + '  delete_many {store, keys} - one transaction; returns deletedKeys/failedKeys\n'
@@ -360,7 +360,7 @@ const TOOLS = [
     name: 'webscout_net',
     description: 'Captured network traffic.\n'
       + 'Actions:\n'
-      + '  log {limit?, urlContains?, failed?, fields?, +shape} - LIVE in-page ring buffer since last clear, capped at 500 entries, evicted by background traffic within minutes. urlContains, failed (errors and 4xx/5xx only), fields (keys to keep per entry) and limit (N most recent) all filter IN THE PAGE (an unfiltered log is ~55KB)\n'
+      + '  log {limit?, urlContains?, failed?, fields?, +shape} - LIVE in-page ring buffer since last clear, capped at 500 entries (background traffic evicts within minutes). urlContains, failed (errors and 4xx/5xx only), fields (keys to keep per entry) and limit (N most recent) filter IN THE PAGE (unfiltered ~55KB)\n'
       + '  wait {urlPattern, timeoutMs?, graceMs?} - attach-and-wait for a request whose URL contains urlPattern\n'
       + '  history {sessionId?, filter?, minDuration?, sort?: "duration", limit?} - the DURABLE, already-persisted net_entries table (defaults to the active session)\n'
       + '  clear {} - clear the live ring buffer\n'
@@ -452,13 +452,13 @@ const TOOLS = [
   },
   {
     name: 'webscout_repair',
-    description: 'Self-repair loop: source-write + confirm-fix, scoped to the example app under self-repair.mjs\'s scope dir ONLY (see webscout2.md). Disabled by default (fail-closed) - enable/disable is a server-side flag, not a display preference.\n'
+    description: 'Self-repair loop: source-write + confirm-fix, scoped to the example app under self-repair.mjs\'s scope dir ONLY (see webscout2.md). Disabled by default (fail-closed); enable/disable is a server-side flag.\n'
       + 'Actions:\n'
       + '  status {} - enabled/scopeDir + recent enable/disable history\n'
       + '  enable {by?} - flip the kill-switch on (logged with who flipped it)\n'
       + '  disable {by?} - flip it off\n'
-      + '  patch {file, find, replace, fixesActionId?} - literal find/replace, ONE file, inside scope only; refuses an ambiguous/missing match or an out-of-scope path. fixesActionId -> a RECORDED (not inferred) causal edge\n'
-      + '  verify {stores, type, params?, expect?, patchActionId?, allowExtra?, samples?, verbose?} - same shape as webscout_idb.crv_run, replayed against the patched app; patchActionId -> another RECORDED edge. {pass:false,...} is a normal result, not a thrown error\n'
+      + '  patch {file, find, replace, fixesActionId?} - literal find/replace, ONE file, in scope only; refuses an ambiguous/missing match or out-of-scope path. fixesActionId -> a RECORDED (not inferred) causal edge\n'
+      + '  verify {stores, type, params?, expect?, patchActionId?, allowExtra?, samples?, verbose?} - same shape as webscout_idb.crv_run, replayed against the patched app; patchActionId -> another RECORDED edge. {pass:false,...} is a normal result, not an error\n'
       + '  causal_diff {sessionA, sessionB} - two sessions\' causality trees diffed, plus each session\'s RECORDED fixed_by/confirmed_by edges - see webscout2.md\'s "recorded vs inferred" gap',
     actions: {
       status: () => request('GET', '/repair/config'),
@@ -515,8 +515,9 @@ function readOpts(p) {
 function sendCmd(type, params, agent, opts) {
   // `ackRisk:true` in an action's params acknowledges an ESCALATED selector-risk warning on a
   // relay running with WEBSCOUT_RISKY_BLOCK=1; it is a relay-level flag, never forwarded to the page.
-  const { ackRisk, ...pageParams } = params ?? {};
-  return request('POST', '/command', { type, params: params === undefined ? undefined : pageParams, agent, opts, ...(ackRisk === true ? { ackRisk: true } : {}) });
+  // `tryRecovery:true` likewise: after a click/fill/wait fails, run once on the alternative selector that has repeatedly worked.
+  const { ackRisk, tryRecovery, ...pageParams } = params ?? {};
+  return request('POST', '/command', { type, params: params === undefined ? undefined : pageParams, agent, opts, ...(ackRisk === true ? { ackRisk: true } : {}), ...(tryRecovery === true ? { tryRecovery: true } : {}) });
 }
 
 function toolInputSchema(tool) {

@@ -203,7 +203,7 @@ export const CLI_SPEC = [
 // Output formatting (--pretty), accepted by every command and never sent to the relay; and
 // --ack-risk, which acknowledges an escalated selector-risk warning on a relay running with
 // WEBSCOUT_RISKY_BLOCK=1 (sent as a request-level flag, never as a page param).
-export const UNIVERSAL_BOOL = new Set(['--pretty', '--ack-risk']);
+export const UNIVERSAL_BOOL = new Set(['--pretty', '--ack-risk', '--try-recovery']);
 
 const BY_CMD = new Map(CLI_SPEC.map((s) => [s.cmd, s]));
 

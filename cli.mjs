@@ -32,6 +32,7 @@ import { rankAutoTraces } from './trace.mjs';
 // body (never nested inside `params`) - see tools/web-scout/relay.mjs.
 let agentFlag;
 let ackRiskFlag = false;
+let tryRecoveryFlag = false;
 // Reply shaping for cacheable reads (--table / --if-changed / --delta / --peek / --no-guard),
 // set once in main() and sent as the request's `opts` - see relay-side read-pipeline.mjs.
 let shapeOpts;
@@ -41,7 +42,7 @@ let prettyFlag = false;
 const wantPretty = () => prettyFlag || process.env.WEBSCOUT_PRETTY === '1' || (process.stdout.isTTY === true && process.env.WEBSCOUT_COMPACT !== '1');
 
 function send(type, params) {
-  return request('POST', '/command', { type, params, agent: agentFlag, opts: shapeOpts, ...(ackRiskFlag ? { ackRisk: true } : {}) });
+  return request('POST', '/command', { type, params, agent: agentFlag, opts: shapeOpts, ...(ackRiskFlag ? { ackRisk: true } : {}), ...(tryRecoveryFlag ? { tryRecovery: true } : {}) });
 }
 
 // chars/4 - same rough estimate as db.mjs's getActionCostReport, applied
@@ -1006,6 +1007,9 @@ async function main() {
   // lets the call through (see relay.mjs's maybeRiskySelectorWarn). No effect on a relay that
   // does not block.
   ({ args, value: ackRiskFlag } = extractBooleanFlag(args, '--ack-risk'));
+  // `--try-recovery`: if a click/fill/wait fails and one alternative selector has repeatedly been what
+  // worked after that failure, run it once (relay.mjs's recoveryRetryFor). The reply header says what ran.
+  ({ args, value: tryRecoveryFlag } = extractBooleanFlag(args, '--try-recovery'));
   {
     const shape = {};
     for (const [flag, key] of [['--table', 'table'], ['--if-changed', 'ifChanged'], ['--delta', 'delta'], ['--peek', 'peek'], ['--no-guard', 'noGuard']]) {
