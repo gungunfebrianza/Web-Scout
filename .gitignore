@@ -12,3 +12,4 @@ webscout.db-wal
 known-issues.json
 traces/auto/
 .claude/worktrees/
+.sweep/

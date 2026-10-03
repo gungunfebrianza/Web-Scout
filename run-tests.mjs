@@ -59,5 +59,13 @@ try {
     orphansKilled: orphans.length, rootWiped: ok, realTempGained: grew, failed: grew > 0 || orphans.length > 0 || left > 0 || (r.status ?? 1) !== 0,
   }));
 } catch { /* dashboard convenience only */ }
-if (grew > 0 || orphans.length || left > 0) { console.error('run-tests: FAIL - the run leaked (' + (left ? 'entries left in its private root' : 'outside its private root or left a browser running') + ').'); process.exit(1); }
+if (grew > 0 || orphans.length || left > 0) {
+  // Forensics: a leak-only failure has no failing test to point at, so keep the list (flaky-sweep.mjs reads it too).
+  try {
+    fs.mkdirSync(path.join(here, '.sweep'), { recursive: true });
+    fs.writeFileSync(path.join(here, '.sweep', 'last-leaks.json'), JSON.stringify({ at: new Date().toISOString(), leakedEntries: leakedNames, orphansKilled: orphans.length, realTempGained: grew, helpersStopped: reaped, testExitStatus: r.status ?? null }, null, 2));
+  } catch { /* forensics only */ }
+  console.error('run-tests: FAIL - the run leaked (' + (left ? 'entries left in its private root' : 'outside its private root or left a browser running') + ').');
+  process.exit(1);
+}
 process.exit(r.status ?? 1);
