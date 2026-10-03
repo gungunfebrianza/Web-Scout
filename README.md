@@ -163,7 +163,7 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   `knownIssueMatches` from an optional, untracked `known-issues.json` you maintain per
   checkout (`known-issues.example.json` is the template; see CONTRIBUTING.md), and
   `knownFriction` - the same ranked `topFrictionItems` digest `analytics` returns, so a
-  pass can front-load the riskiest known-bad selectors/types before it starts. Never
+  pass can front-load the riskiest known-bad selectors/types before it starts; `--plan '<json>'` checks the steps you are about to run against the same friction facts (`planRisk`). Never
   requires an active session
 - Friction analytics is not just something you go read - it reaches an agent live, at the
   moment it matters: a failed command whose error matches `known-issues.json` gets a
@@ -353,6 +353,7 @@ session start "<goal>" ["<context>"] [--strict-crv] [--stores a,b,c] [--tags a,b
                                # --no-briefing skips the warm-start briefing in the reply
 session end [id]              # defaults to the active session; nudges "macro record" if the
                                # session logged 5+ replayable actions and never saved one
+                               # --apply-suggestions marks the "probably fixed" friction targets fixed
 session current
 session list
 session show <id>             # everything for one session

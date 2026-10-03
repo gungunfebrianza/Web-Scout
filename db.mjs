@@ -14,7 +14,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { frictionKeyFor } from './friction.mjs';
+import { frictionKeyFor, PAGE_TYPES } from './friction.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // WEBSCOUT_DB_PATH overrides the default location - lets a real deployment
@@ -1053,7 +1053,7 @@ export function logAction({ sessionId, type, params, result, ok, error, startedA
     agentName ?? 'default',
     origin ?? null,
     errorClass ?? null,
-    frictionKeyFor(type, params) ?? '',
+    frictionKeyFor(type, params, origin) ?? '',
   );
   return Number(info.lastInsertRowid);
 }
@@ -2150,7 +2150,10 @@ export function getFrictionResolution(key) {
 // Rows written before the column existed have selector_key NULL; compute theirs once. '' means
 // "no friction target", so a row is never examined twice. Runs at load, inside one transaction.
 function backfillSelectorKeys() {
-  const pending = db.prepare('SELECT id, type, params_json, params_hash FROM actions WHERE selector_key IS NULL').all();
+  // NULL = never examined. A '' row of a page-level type that has an origin predates page targets (the
+  // key is now derivable), so it is examined once more - after that it carries a real key.
+  const pageTypes = [...PAGE_TYPES].map((t) => `'${t}'`).join(',');
+  const pending = db.prepare(`SELECT id, type, params_json, params_hash, origin FROM actions WHERE selector_key IS NULL OR (selector_key = '' AND type IN (${pageTypes}) AND origin IS NOT NULL AND origin != '')`).all();
   if (!pending.length) return;
   const update = db.prepare('UPDATE actions SET selector_key = ? WHERE id = ?');
   db.exec('BEGIN');
@@ -2159,7 +2162,7 @@ function backfillSelectorKeys() {
       let key = '';
       try {
         const json = resolveParamsJson(r.params_json, r.params_hash);
-        key = (json ? frictionKeyFor(r.type, JSON.parse(json)) : null) ?? '';
+        key = frictionKeyFor(r.type, json ? JSON.parse(json) : null, r.origin) ?? '';
       } catch { /* malformed params - treated as having no target, same as listAllActions skips them */ }
       update.run(key, r.id);
     }

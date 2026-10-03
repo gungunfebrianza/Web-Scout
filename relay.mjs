@@ -698,12 +698,12 @@ async function withLoggedAction(sessionId, type, params, fn, agentName = DEFAULT
     const result = await fn();
     const endedAt = new Date().toISOString();
     const actionId = dbApi.logAction({ sessionId, type, params, result, ok: true, error: null, startedAt, endedAt, agentName, origin });
-    frictionTracker.note(sessionId, { type, params, ok: true, durationMs: Date.parse(endedAt) - Date.parse(startedAt), at: startedAt });
+    frictionTracker.note(sessionId, { type, params, origin, ok: true, durationMs: Date.parse(endedAt) - Date.parse(startedAt), at: startedAt });
     return { result, actionId };
   } catch (err) {
     const endedAt = new Date().toISOString();
     dbApi.logAction({ sessionId, type, params, result: null, ok: false, error: err.message, startedAt, endedAt, agentName, origin, errorClass: friction.classifyError(err.message) });
-    frictionTracker.note(sessionId, { type, params, ok: false, error: err.message, durationMs: Date.parse(endedAt) - Date.parse(startedAt), at: startedAt });
+    frictionTracker.note(sessionId, { type, params, origin, ok: false, error: err.message, durationMs: Date.parse(endedAt) - Date.parse(startedAt), at: startedAt });
     throw err;
   }
 }
@@ -900,11 +900,12 @@ function lazyKnownIssueMatcher() {
 // persisted "already said" state and the operator's resolution. The pre-action header, the
 // failure's own error body, the macro runner and `friction explain` all read this object, so they
 // cannot disagree about a selector.
-function frictionFactsFor(sessionId, type, params, agentName) {
-  const target = friction.frictionTarget(type, params);
+function frictionFactsFor(sessionId, type, params, agentName, originOverride) {
+  const origin = originOverride ?? agents.get(agentName)?.origin ?? null;
+  const target = friction.frictionTarget(type, params, origin);
   if (!target) return null;
   ensureFrictionSession(sessionId);
-  const key = friction.frictionKeyFor(type, params);
+  const key = friction.frictionKeyFor(type, params, origin);
   const resolutions = new Map();
   const resolution = dbApi.getFrictionResolution(key);
   if (resolution) resolutions.set(key, resolution.resolved_at);
@@ -912,10 +913,29 @@ function frictionFactsFor(sessionId, type, params, agentName) {
   const entry = friction.buildSelectorFriction(rows, { matchKnownIssues: lazyKnownIssueMatcher(), resolutions, minFails: 1 }).find((e) => e.key === key) ?? null;
   const live = frictionTracker.get(sessionId, key);
   const state = frictionTracker.warnState(sessionId, key);
-  const origin = agents.get(agentName)?.origin ?? null;
   const evaluation = friction.evaluateSelectorRisk({ type, selector: target.value, targetKind: target.kind, entry, live, state, origin });
   const context = friction.failureContext({ type, selector: target.value, targetKind: target.kind, entry, live, origin });
   return { key, target, entry, live, state, origin, resolution, evaluation, context };
+}
+
+// "Which steps of this plan will draw a warning?" - answered BEFORE any of them runs, from the same
+// facts the pre-action header uses (so the two cannot disagree), but ignoring the once-per-session
+// dedupe: a plan check should list every risky step, not only the ones not yet announced. Side-effect
+// free. Judged against the active session if there is one, else history alone.
+function planFrictionReport(plan, agentName) {
+  const sessionId = dbApi.getCurrentSession()?.id ?? -1;
+  const risky = [];
+  let checked = 0;
+  plan.slice(0, 50).forEach((step, index) => {
+    if (!step || typeof step.type !== 'string') return;
+    let facts = null;
+    try { facts = frictionFactsFor(sessionId, step.type, step.params ?? {}, agentName); } catch { /* one unreadable step must not hide the rest */ }
+    if (!facts) return;
+    checked += 1;
+    const { assessment } = friction.evaluateSelectorRisk({ type: step.type, selector: facts.target.value, targetKind: facts.target.kind, entry: facts.entry, live: facts.live, state: null, origin: facts.origin });
+    if (assessment) risky.push({ step: index + 1, type: step.type, target: facts.target, key: facts.key, level: assessment.level, message: assessment.message });
+  });
+  return { checked, risky };
 }
 
 function buildSessionFrictionSnapshot(sessionId, analytics) {
@@ -1336,7 +1356,7 @@ function computeAnalytics() {
   // Known-issues cross-reference (the operator-maintained known-issues.json registry, see
   // "Known-issues registry" above) previously only matched against live boot-console-errors
   // at "crv preflight" time - a failed action's own error text was never checked against it,
-  // so a failure this engine already flags as recurring (failureRateByType, topFailedSelectors)
+  // so a failure this engine already flags as recurring (failureRateByType, selectorFriction)
   // looked identical whether it was a brand-new mystery or a bug someone already root-caused
   // months ago. Loaded once per call and reused below. Best-effort: any load/parse problem
   // must not break the rest of analytics (same discipline as matchKnownIssues above).
@@ -1431,16 +1451,14 @@ function computeAnalytics() {
   // is the single source - selector-normalized and type-family-merged, scoped per origin,
   // success-aware (failures since the last success = "unresolved"), cost-ranked (failures + time
   // wasted + retries) and annotated with error classes and the recoveries that worked. Stores are
-  // targets too (idb writes fail by store). topFailedSelectors stays on the payload as an alias of
-  // the same array for existing readers.
+  // targets too (idb writes fail by store). The old `topFailedSelectors` alias is retired.
   const selectorFriction = friction.buildSelectorFriction(actions, { matchKnownIssues: matchKnownIssuesFor, resolutions });
-  const topFailedSelectors = selectorFriction;
   // Failed a lot, then worked repeatedly across sessions: probably fixed, never declared.
   const resolveSuggestions = friction.findResolveSuggestions(actions, { resolutions });
 
   // 2c. Known-issue candidates - the same error text failing repeatedly with no
   // known-issues.json match is the entry nobody has written yet; draft only, never auto-written.
-  const knownIssueCandidates = friction.buildKnownIssueCandidates(actions, { matchKnownIssues: matchKnownIssuesFor });
+  const knownIssueCandidates = friction.buildKnownIssueCandidates(actions, { matchKnownIssues: matchKnownIssuesFor, frictionEntries: selectorFriction });
 
   // 3. Macros recorded but never actually replayed, and macros that HAVE
   // been replayed but never once succeeded on any step (recorded,
@@ -1664,7 +1682,6 @@ function computeAnalytics() {
     totals: { sessions: sessions.length, actions: actions.length, macros: macros.length, verityRuns: verityRuns.length },
     malformedActionsSkipped,
     failureRateByType,
-    topFailedSelectors,
     selectorFriction,
     knownIssueCandidates,
     resolveSuggestions,
@@ -1740,9 +1757,9 @@ function emergentFrictionForSession(sessionId) {
 
   const failCountByTarget = new Map();
   for (const a of sessionFails) {
-    const target = friction.frictionTarget(a.type, a.params);
+    const target = friction.frictionTarget(a.type, a.params, a.origin);
     if (!target) continue;
-    const key = friction.frictionKeyFor(a.type, a.params);
+    const key = friction.frictionKeyFor(a.type, a.params, a.origin);
     const g = failCountByTarget.get(key) ?? { count: 0, target };
     g.count += 1;
     failCountByTarget.set(key, g);
@@ -1768,14 +1785,28 @@ function emergentFrictionForSession(sessionId) {
 // scan), ask whether it failed repeatedly in the past and has now worked several times running
 // across sessions. A human would have to notice that and run `friction resolve`; this says so.
 // type + (selector | store) from a JSON body or query, normalized to friction.mjs's key.
+// Declares a target fixed as of now. The one place that writes a resolution, so the route, session end's
+// apply path and any future caller store exactly the same row.
+function declareFrictionResolved(type, value, kind, note) {
+  const params = kind === 'page' ? {} : kind === 'store' ? { store: value } : { selector: value };
+  const origin = kind === 'page' ? value : null;
+  const target = friction.frictionTarget(type, params, origin);
+  if (!target) throw new HttpError(400, `"${type}" cannot be tracked as a ${kind}`);
+  return dbApi.markFrictionResolved({ key: friction.frictionKeyFor(type, params, origin), type: friction.typeFamily(type), selector: target.value, note: typeof note === 'string' ? note : null });
+}
+
+// A page-level type (page.reload, dom.settle, ...) is keyed by origin, which callers pass in the
+// same `selector` slot: `friction explain page.reload http://localhost:3000`.
 function frictionTargetFromBody(body) {
   if (typeof body.type !== 'string' || !body.type) throw new HttpError(400, 'type is required (e.g. "dom.click")');
-  const params = typeof body.selector === 'string' && body.selector ? { selector: body.selector }
-    : typeof body.store === 'string' && body.store ? { store: body.store } : null;
-  if (!params) throw new HttpError(400, 'selector (or store, for idb.* types) is required');
-  const target = friction.frictionTarget(body.type, params);
+  const pageLevel = friction.PAGE_TYPES.has(body.type);
+  const value = typeof body.selector === 'string' && body.selector ? body.selector : typeof body.store === 'string' && body.store ? body.store : '';
+  if (!value) throw new HttpError(400, pageLevel ? `an origin is required for "${body.type}" (e.g. http://localhost:3000)` : 'selector (or store, for idb.* types) is required');
+  const params = pageLevel ? {} : typeof body.selector === 'string' && body.selector ? { selector: body.selector } : { store: body.store };
+  const origin = pageLevel ? value : null;
+  const target = friction.frictionTarget(body.type, params, origin);
   if (!target) throw new HttpError(400, `"${body.type}" cannot be tracked by ${Object.keys(params)[0]} (a store only applies to idb.* types)`);
-  return { type: body.type, target, key: friction.frictionKeyFor(body.type, params) };
+  return { type: body.type, target, key: friction.frictionKeyFor(body.type, params, origin), params, origin };
 }
 
 function resolveSuggestionsForSession(sessionId) {
@@ -2085,8 +2116,9 @@ const routes = [
   {
     method: 'POST',
     pattern: /^\/sessions\/(\d+)\/end$/,
-    handler: async (_req, m) => {
+    handler: async (req, m) => {
       const sessionId = Number(m[1]);
+      const endBody = await readJsonBody(req);
       // Surfaced so the CLI can nudge "consider macro record" for a session
       // that did real, replayable work and never got saved as one -
       // confirmed real: a seed/verify/cleanup shape hand-rolled once in a
@@ -2097,6 +2129,15 @@ const routes = [
       // session too, but this reads naturally as "one last look at what this session did".
       const emergentFriction = emergentFrictionForSession(sessionId);
       const resolveSuggestions = resolveSuggestionsForSession(sessionId);
+      // applySuggestions: the caller already decided "yes, those are fixed" - declare each one resolved
+      // through the same call `friction resolve` makes, and report them as applied instead of suggested.
+      const appliedResolutions = [];
+      if (endBody.applySuggestions === true) {
+        for (const s of resolveSuggestions.splice(0)) {
+          try { appliedResolutions.push(declareFrictionResolved(s.type, s.selector, s.targetKind, `auto: session #${sessionId} end --apply-suggestions (${s.failures} failures, then ${s.okStreak} successes)`)); } catch { resolveSuggestions.push(s); }
+        }
+        if (appliedResolutions.length) { analyticsCache = null; broadcastUpdate('analytics', null); }
+      }
       const session = dbApi.endSession(sessionId);
       const deliveredEstTokens = sessionRunningTokens(sessionId); // what the caller actually received, after shaping
       // Nothing under an ended session can change again - an unbounded relay
@@ -2107,7 +2148,7 @@ const routes = [
       const savingsReceipt = { ...(sessionSavingsTally.get(sessionId) ?? { scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0, shapedCalls: 0, shapedBytes: 0 }), deliveredEstTokens };
       sessionSavingsTally.delete(sessionId);
       broadcastUpdate('session', null);
-      return { ...session, replayableActionCount, savingsReceipt, ...(emergentFriction.length ? { emergentFriction } : {}), ...(resolveSuggestions.length ? { resolveSuggestions } : {}) };
+      return { ...session, replayableActionCount, savingsReceipt, ...(emergentFriction.length ? { emergentFriction } : {}), ...(resolveSuggestions.length ? { resolveSuggestions } : {}), ...(appliedResolutions.length ? { appliedResolutions } : {}) };
     },
   },
   { method: 'GET', pattern: /^\/sessions$/, handler: async () => dbApi.listSessions() },
@@ -2987,6 +3028,7 @@ const routes = [
       const agentName = body.agent || DEFAULT_AGENT;
       const stores = Array.isArray(body.stores) ? body.stores : [];
       const selector = typeof body.selector === 'string' && body.selector.trim() ? body.selector.trim() : null;
+      const plan = Array.isArray(body.plan) ? body.plan : null;
 
       const agentEntry = agents.get(agentName);
       const connected = !!(agentEntry?.socket && !agentEntry.socket.destroyed);
@@ -3043,6 +3085,9 @@ const routes = [
       // riskiest known-bad selectors/types/macros into the pass it's about to run instead
       // of discovering them one at a time as each one fails live.
       try { report.knownFriction = getAnalytics().topFrictionItems; } catch { /* best-effort - never blocks preflight */ }
+      // The caller's own plan, checked step by step against the facts the pre-action warn will use.
+      // Advisory: a risky step is something to reorder or guard, not a reason to call the page unfit.
+      if (plan) report.planRisk = planFrictionReport(plan, agentName);
       // Host resources: warns (never fails the preflight) when the disk is low or browsers/profiles have leaked.
       try { report.host = hostHealth.preflightHostReport(); } catch { /* best-effort */ }
 
@@ -3089,7 +3134,7 @@ const routes = [
     // postTimeoutVerification, ...) applies exactly as it already does to a bare action.
     method: 'POST',
     pattern: /^\/crv\/run$/,
-    handler: async (req) => {
+    handler: async (req, _m, res) => {
       const body = await readJsonBody(req);
       const agentName = body.agent || DEFAULT_AGENT;
       const session = requireActiveSession();
@@ -3099,6 +3144,7 @@ const routes = [
       if (!type) throw new HttpError(400, 'type is required (the action to run between the two snapshots, e.g. "dom.click")');
       if (type === 'idb.snapshot') throw new HttpError(400, 'use "idb snapshot" for the baseline - "crv run" takes its own');
       const params = body.params ?? {};
+      maybeRiskySelectorWarn(session.id, type, params, res, agentName, body.ackRisk); // before the baseline is taken: a refusal must not leave a snapshot behind
       const before = await withLoggedAction(session.id, 'idb.snapshot', { stores, for: 'crv.run', phase: 'before' }, () => dispatchCommand('idb.snapshot', { stores }, SNAPSHOT_TIMEOUT_MS, agentName), agentName);
       const savedBaseline = dbApi.saveSnapshot({ sessionId: session.id, actionId: before.actionId, stores: before.result.stores, agentName });
       // saveSnapshot's own return value is a SUMMARY (id/counts/byteSize, no store content - see
@@ -3415,11 +3461,8 @@ const routes = [
     pattern: /^\/friction\/resolve$/,
     handler: async (req) => {
       const body = await readJsonBody(req);
-      const { type, target, key } = frictionTargetFromBody(body);
-      const resolution = dbApi.markFrictionResolved({
-        key, type: friction.typeFamily(type), selector: target.value,
-        note: typeof body.note === 'string' ? body.note : null,
-      });
+      const { type, target } = frictionTargetFromBody(body);
+      const resolution = declareFrictionResolved(type, target.value, target.kind, body.note);
       analyticsCache = null;
       broadcastUpdate('analytics', null);
       return resolution;
@@ -3449,9 +3492,9 @@ const routes = [
     handler: async (req) => {
       const q = new URL(req.url, `http://${HOST}`).searchParams;
       const { type, target } = frictionTargetFromBody({ type: q.get('type'), selector: q.get('selector') ?? undefined, store: q.get('store') ?? undefined });
-      const params = target.kind === 'store' ? { store: target.value } : { selector: target.value };
+      const params = target.kind === 'page' ? {} : target.kind === 'store' ? { store: target.value } : { selector: target.value };
       const sessionId = Number(q.get('session')) || dbApi.getCurrentSession()?.id || -1;
-      const facts = frictionFactsFor(sessionId, type, params, q.get('agent') || DEFAULT_AGENT);
+      const facts = frictionFactsFor(sessionId, type, params, q.get('agent') || DEFAULT_AGENT, target.kind === 'page' ? target.value : undefined);
       const e = facts.entry;
       return {
         type: friction.typeFamily(type),
@@ -3496,7 +3539,13 @@ const routes = [
         description: text(body.description, candidate.draft.description),
         remediation: text(body.remediation, ''),
       };
-      if (!entry.remediation) throw new HttpError(400, `remediation is required - a candidate does not know the fix. Review it, then promote with e.g. --remediation "..." (draft: ${JSON.stringify(entry)})`);
+      if (!entry.remediation) {
+        const suggested = candidate.suggestedRemediation;
+        if (suggested && body.confirm !== true) {
+          return { written: false, needsRemediation: true, wouldWrite: { ...entry, remediation: suggested }, suggestedFrom: candidate.suggestedFrom, file: KNOWN_ISSUES_PATH, note: 'dry run - the remediation is a SUGGESTION drawn from this project\'s own history; confirm it by repeating with --remediation "<text>" --confirm' };
+        }
+        throw new HttpError(400, `remediation is required - a candidate does not know the fix. Review it, then promote with e.g. --remediation "..." (draft: ${JSON.stringify(entry)}${suggested ? `, suggested: ${JSON.stringify(suggested)}` : ''})`);
+      }
       if (/^TODO/i.test(entry.description)) throw new HttpError(400, `description still starts with TODO - say what the root cause is (--description "...")`);
       let existing = [];
       try { existing = loadKnownIssues()?.issues ?? []; } catch (err) { throw new HttpError(409, `known-issues.json is unreadable, refusing to touch it: ${err.message}`); }

@@ -224,9 +224,9 @@ check: (1) a failed `/command` whose own error text matches a signature gets `ex
 folded straight into that command's error reply (`cli.mjs` prints it as `Known issue: ...`, and the
 MCP server's `isError:true` tool result carries the same text - a failure looks identical whether
 you're driving it through the CLI or through MCP); (2) `computeAnalytics()`'s
-`failureRateByType`/`topFailedSelectors`/`topFrictionItems` entries carry `knownIssues` when a past
+`failureRateByType`/`selectorFriction`/`topFrictionItems` entries carry `knownIssues` when a past
 failure of that type/selector matched; (3) a selector that has failed 3+ times before
-(`topFailedSelectors`) gets an `x-webscout-selector-risk` warning header on the NEXT `/command`
+(`selectorFriction`) gets an `x-webscout-selector-risk` warning header on the NEXT `/command`
 against it, before it fails again, with the matched known issue folded into the warning text when
 there is one; (4) a session's own saved/exported report (`GET /sessions/:id/report`, both `md` and
 `json`) carries a "Known issues matched" section/`knownIssues` array for that session's own failed

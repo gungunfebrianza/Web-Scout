@@ -44,7 +44,7 @@ test('header, error body, explain and analytics agree about one target', async (
     const row = analytics.selectorFriction.find((f) => f.selector === '#contract');
     assert.equal(row.failCount, (explain.history?.failCount ?? 0) + explain.thisSession.fails, 'analytics counts what explain splits into history + this session');
     assert.equal(row.key, explain.key);
-    assert.deepEqual(analytics.topFailedSelectors, analytics.selectorFriction, 'the legacy list is the same array, not a second computation');
+    assert.equal(analytics.topFailedSelectors, undefined, 'the legacy alias is retired: one name for one list');
   } finally {
     await tab.close();
     await relay.stop();

@@ -94,7 +94,7 @@ const TOOLS = [
       + '  status {} - relay health, agents, active session, DB_VERSION drift\n'
       + '  agents {} - connected multi-tab agent names\n'
       + '  analytics {} - Friction Analytics: recurring failure patterns across ALL sessions\n'
-      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?} - sub: explain (why it warns), resolve|unresolve (mark fixed), list, config, promote (candidate id -> known-issues.json; confirm writes)\n'
+      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?} - sub: explain (why it warns), resolve|unresolve (mark fixed), list, config, promote (candidate id -> known-issues.json; confirm writes). For page.reload/dom.settle/... pass the origin as selector\n'
       + '  search {q} - full-text search across every session\'s actions\n'
       + '  db_version_check {agent?, dbJsPath?} - js/db.js\'s DB_VERSION vs the tab\'s LIVE IndexedDB version; on drift also probes whether opening at the source version is blocked\n'
       + '  dashboard_url {} - the realtime dashboard URL (does not open a browser)\n'
@@ -133,8 +133,8 @@ const TOOLS = [
     name: 'webscout_session',
     description: 'Session lifecycle and evidence. A goal MUST be declared (start) before any dom/idb/net/console/eval/page action is accepted; exactly one session is active at a time.\n'
       + 'Actions:\n'
-      + '  start {goal, context?, strictCrv?, strictCrvStores?, crvCompact?, tags?, tokenBudget?, noBriefing?, lean?, allowRemote?, ifStaleMin?} - declare a session; becomes the active one. ifStaleMin: a conflicting active session at least that many minutes old is ended first (younger still refuses). strictCrvStores scopes strictCrv auto-snapshots (omitted on a real-size db it WILL time out). crvCompact adds a change preview to each strictCrv reply. tokenBudget arms a read guard: past 60% reads over ~3000 tokens return their shape (noGuard overrides), past 85% ~1000. lean makes shaping the DEFAULT (tables; pointer/delta for a repeat; the shape of a body over ~4000 tokens; noGuard gives the body). The reply carries a `briefing` (stores + counts, DB version, tab freshness) unless noBriefing. Pinned to its origin: a later write/eval refuses if that changed, or is non-local, unless allowRemote\n'
-      + '  end {id?, trace?} - end a session (default: the active one); trace also exports it (anonymised) to grow the trace.mjs replay corpus, result.trace: {file, events, reads}\n'
+      + '  start {goal, context?, strictCrv?, strictCrvStores?, crvCompact?, tags?, tokenBudget?, noBriefing?, lean?, allowRemote?, ifStaleMin?} - declare a session; becomes the active one. ifStaleMin: ends a conflicting active session at least that old (minutes) first; younger still refuses. strictCrvStores scopes strictCrv auto-snapshots (omitted on a real-size db it WILL time out). crvCompact adds a change preview to each strictCrv reply. tokenBudget arms a read guard: past 60% reads over ~3000 tokens return their shape (noGuard overrides), past 85% ~1000. lean makes shaping the DEFAULT (tables; pointer/delta for repeats; the shape of bodies over ~4000 tokens). The reply carries a `briefing` (stores + counts, DB version, tab freshness) unless noBriefing. Pinned to its origin: a later write/eval refuses if that changed or is non-local, unless allowRemote\n'
+      + '  end {id?, trace?, applySuggestions?} - end a session (default: the active one); trace also exports it (anonymised) to grow the trace.mjs replay corpus; applySuggestions marks the "probably fixed" friction targets fixed\n'
       + '  current {} - the active session, or {active:false}\n'
       + '  list {} - every session, newest first\n'
       + '  show {id} - full detail: actions, snapshots, diffs, qa, console, net\n'
@@ -172,7 +172,7 @@ const TOOLS = [
           if (!health.active_session) throw new Error('no active session to end - pass params.id');
           id = health.active_session.id;
         }
-        const ended = await request('POST', `/sessions/${id}/end`);
+        const ended = await request('POST', `/sessions/${id}/end`, p?.applySuggestions ? { applySuggestions: true } : undefined);
         if (p?.trace) {
           try { ended.trace = await request('POST', `/sessions/${ended.id}/trace`); } catch (err) { ended.trace = { error: err.message }; }
         }
@@ -225,20 +225,20 @@ const TOOLS = [
     name: 'webscout_dom',
     description: 'DOM read/write against the active session\'s connected tab.\n'
       + 'Actions:\n'
-      + '  query {selector, full?, meta?, pick?, +shape} - outerHTML + basic attrs of the first match, truncated by default (full lifts that); meta: only tag/id/class/matchCount; pick: array of tag|id|class|text|html|value|attr:<name> returns just those parts; a whole-page selector (body/html/#app/#root/main/*) returns a depth-limited outline unless full\n'
+      + '  query {selector, full?, meta?, pick?, +shape} - outerHTML + basic attrs of the first match, truncated (full lifts that); meta: only tag/id/class/matchCount; pick: array of tag|id|class|text|html|value|attr:<name> returns just those; a whole-page selector (body/html/#app/#root/main/*) returns a depth-limited outline unless full\n'
       + '  click {selector, nth?} - dispatch a real click (native .click())\n'
       + '  fill {selector, value, nth?} - set a form field + dispatch input/change\n'
       + '  rect {selector, +shape} - getBoundingClientRect\n'
       + '  style {selector, properties?, +shape} - computed style (curated defaults, or a given array of property names)\n'
       + '  wait {selector, text?, timeoutMs?, changed?, stable?, stableCount?} - poll until selector matches (and, if text given, contains it), '
-      + 'or - with changed:true - until its textContent differs from what it was at call time (for a placeholder swapped '
-      + 'for a real result, instead of predicting its text); stable:true waits until the match count holds for stableCount consecutive polls\n'
-      + '  click_wait {selector, nth?, waitSelector?, text?, timeoutMs?, changed?, stable?, stableCount?} - click, then wait for a (possibly different) waitSelector to reach a state, in ONE round trip\n'
-      + '  pick {timeoutMs?} - BLOCKS until a HUMAN clicks something in the real tab; returns a selector for it. No programmatic target.\n'
-      + '  settle {selector?, quietMs?, timeoutMs?} - wait until the DOM under selector (default document.body) has had no mutations for quietMs (default 300)\n'
-      + '  screenshot {selector?, outPath?} - best-effort DOM rasterization; outPath saves a PNG locally, else returns dimensions only\n'
+      + 'or - with changed:true - until its textContent differs from what it was at call time (a placeholder swapped '
+      + 'for a real result); stable:true waits until the match count holds for stableCount polls\n'
+      + '  click_wait {selector, nth?, waitSelector?, text?, timeoutMs?, changed?, stable?, stableCount?} - click, then wait for a (possibly different) waitSelector, in ONE round trip\n'
+      + '  pick {timeoutMs?} - BLOCKS until a HUMAN clicks something in the tab; returns its selector\n'
+      + '  settle {selector?, quietMs?, timeoutMs?} - wait until the DOM under selector (default body) has no mutations for quietMs (default 300)\n'
+      + '  screenshot {selector?, outPath?} - best-effort DOM rasterization; outPath saves a PNG, else dimensions only\n'
       + 'Every action takes optional `agent` (multi-tab target name).\n'
-      + '+shape (every read action of dom/react/idb/net/console) = table?, ifChanged?, delta?, peek?, noGuard?: table: rows as {columns, rows:[[...]]}; ifChanged: {unchanged, sameAs} instead of an unchanged body; delta: that, or only what changed; peek: shape, size and a sample (full result stays cached); noGuard: bypass the token-budget guard and a lean session. Use ifChanged/delta only while the earlier result is still in your context.',
+      + '+shape (every read action of dom/react/idb/net/console) = table?, ifChanged?, delta?, peek?, noGuard?: table: rows as {columns, rows:[[...]]}; ifChanged: {unchanged, sameAs} instead of an unchanged body; delta: that, or only what changed; peek: shape, size and a sample (full result stays cached); noGuard: bypass the token-budget guard and a lean session. ifChanged/delta only while the earlier result is still in your context.',
     actions: {
       query: (p) => sendCmd('dom.query', { selector: requireField(p, 'selector'), full: !!p?.full, meta: !!p?.meta, pick: p?.pick }, p?.agent, readOpts(p)),
       click: (p) => sendCmd('dom.click', { selector: requireField(p, 'selector'), nth: numOrUndef(p?.nth) }, p?.agent),
@@ -282,20 +282,20 @@ const TOOLS = [
     name: 'webscout_idb',
     description: 'IndexedDB read/write plus persisted snapshot/diff/verify/restore, against the active session\'s tab. Every action takes optional agent.\n'
       + 'Actions:\n'
-      + '  list {stores?, nonEmpty?, +shape} - store names + cheap row counts (store.count(), not a dump) - check before an unscoped snapshot; stores: only those (unknown ones come back as missing), nonEmpty: skip empty stores\n'
+      + '  list {stores?, nonEmpty?, +shape} - store names + cheap row counts (not a dump) - check before an unscoped snapshot; stores: only those (unknown ones come back as missing), nonEmpty: skip empty stores\n'
       + '  dump {store, where?, fields?, limit?, countOnly?, +shape} - rows + real keyPath. where (exact-equality map), fields, limit filter IN THE PAGE - use on any large store; countOnly: counts, no rows\n'
       + '  get {store, key, fields?, +shape} - single-key lookup (store.get), not a scan; fields: keep only those keys\n'
       + '  snapshot {stores?, golden?, where?, since?} - capture + PERSIST -> {id, counts}; golden names it a regression baseline; where scopes every store to matching rows (partial by construction). since: a baseline id - fresh snapshot of that baseline\'s stores returning ONLY what changed\n'
-      + '  verify {baseline?, stores?, expect?, allowExtra?, samples?, verbose?} - the verify step of baseline -> action -> verify in ONE call: re-snapshots the baseline\'s stores, diffs, checks expect, replies pass/fail plus rows only for what failed. expect: "notes:+1,tags:same" (+N added, +N+ at least N, -N removed, ~N changed, same) or a JSON array; a changed store not named is "unexpected" and fails unless allowExtra; no expect = nothing may change. baseline: snapshot id, golden name, or omitted for the session\'s newest snapshot\n'
+      + '  verify {baseline?, stores?, expect?, allowExtra?, samples?, verbose?} - the verify step of baseline -> action -> verify in ONE call: re-snapshots the baseline\'s stores, diffs, checks expect, replies pass/fail + rows only for failures. expect: "notes:+1,tags:same" (+N added, +N+ at least N, -N removed, ~N changed, same) or a JSON array; a changed store not named is "unexpected" and fails unless allowExtra; no expect = nothing may change. baseline: snapshot id, golden name, or omitted for the session\'s newest snapshot\n'
       + '  crv_run {stores, type, params?, expect?, allowExtra?, samples?, verbose?} - snapshot, dispatch {type,params} (not idb.snapshot), verify (above) in one call; action failure fails the call\n'
-      + '  crv_preflight {stores?, selector?} - pre-CRV check: origin/staleness, DB drift, stores/selector exist, console errors (+ knownIssueMatches from an optional local registry), agents[] with tabCollision\n'
+      + '  crv_preflight {stores?, selector?, plan?} - pre-CRV check: origin/staleness, DB drift, stores/selector exist, console errors (+ knownIssueMatches), agents[] with tabCollision; plan [{type,params}] -> planRisk: steps that will draw a friction warning\n'
       + '  crv_seed {store, rows, manifest?} - put_many + records stored keys into a manifest (default: dotfile in CWD) for crv_cleanup\n'
       + '  crv_cleanup {manifest?} - delete_many every id crv_seed recorded, clears the manifest\n'
       + '  diff {idA, idB} - persisted diff of two snapshots\n'
       + '  diff_golden {name, idB} - diff a named golden snapshot (any session) against idB\n'
       + '  restore {snapshotId?, golden?} - PUT a snapshot\'s rows back (never deletes)\n'
       + '  put {store, row, dryRun?} - write one row by the store\'s keyPath, returns the stored row; dryRun validates the shape without writing -> {valid, problems}\n'
-      + '  put_many {store, rows, dryRun?} - batch write in ONE transaction; a failed row (e.g. unique-index conflict) lands in `failed`, not an abort; dryRun validates every row\n'
+      + '  put_many {store, rows, dryRun?} - batch write in ONE transaction; a failed row (e.g. unique-index conflict) lands in `failed`, no abort; dryRun validates every row\n'
       + '  patch {store, key, patch} - shallow-merge onto the EXISTING row; errors if none (never inserts)\n'
       + '  delete {store, key} - delete one row\n'
       + '  delete_many {store, keys} - one transaction; returns deletedKeys/failedKeys\n'
@@ -316,8 +316,9 @@ const TOOLS = [
       crv_run: (p) => request('POST', '/crv/run', {
         agent: p?.agent, stores: requireField(p, 'stores'), type: requireField(p, 'type'), params: p?.params ?? {},
         expect: p?.expect, allowExtra: p?.allowExtra || undefined, verbose: p?.verbose || undefined, samples: numOrUndef(p?.samples),
+        ackRisk: p?.ackRisk === true || undefined,
       }),
-      crv_preflight: (p) => request('POST', '/crv/preflight', { agent: p?.agent, stores: p?.stores, selector: p?.selector }),
+      crv_preflight: (p) => request('POST', '/crv/preflight', { agent: p?.agent, stores: p?.stores, selector: p?.selector, plan: typeof p?.plan === 'string' ? JSON.parse(p.plan) : p?.plan }),
       crv_seed: async (p) => {
         const store = requireField(p, 'store');
         const result = await sendCmd('idb.putMany', { store, rows: requireField(p, 'rows') }, p?.agent);

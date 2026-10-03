@@ -136,7 +136,8 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    already wrote it down. No --transcript = every transcript written since the session
                                    started. Re-running is safe. Actions with no matching narration keep an inferred why,
                                    shown in the dashboard as inferred, never as the agent's words.
-  session end [id] [--trace]        end the given session, or the active one if omitted -
+  session end [id] [--trace] [--apply-suggestions]
+                                   end the given session, or the active one if omitted -
                                    prints a one-line token-cost receipt (calls, estTokens, top
                                    offender type; also a --token-budget warning if declared and
                                    exceeded), a savings line (scoped reads and cache hits this
@@ -152,6 +153,9 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    (or, for a selector, fail more than once) - flagged the moment
                                    it happens instead of only after it quietly repeats enough to
                                    rank in "analytics"' own topFrictionItems digest.
+                                   A target that failed 3+ times and has now worked 3+ times in a row
+                                   across 2+ sessions is listed as "mark fixed?"; --apply-suggestions
+                                   declares those fixed right away (undo: friction unresolve).
                                    --trace also exports the session (anonymised, same as
                                    "trace.mjs export") into traces/auto/ (gitignored) - grows the
                                    replay benchmark's corpus of real sessions past the four
@@ -399,7 +403,7 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    exactly "idb verify"'s own (see above). If the ACTION itself
                                    fails the whole call fails - no baseline was consumed by a
                                    verify that then couldn't mean anything.
-  crv preflight [--stores a,b,c] [<selector>] [--agent <name>]
+  crv preflight [--stores a,b,c] [<selector>] [--plan '<json>'] [--agent <name>]
                                    one read-only call replacing the four hand-run before a CRV
                                    pass (status + db version-check + dom query + idb list): agent
                                    connectivity/origin/staleness, DB version drift, whether --stores
@@ -411,6 +415,9 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    "analytics" returns (worst failing type/selector, a macro that never
                                    once succeeds, ...) - front-load the riskiest known-bad selectors
                                    into the pass about to run instead of hitting each one live first.
+                                   --plan '[{"type":"dom.click","params":{"selector":"#save"}}]' also checks each
+                                   planned step against the same friction facts the pre-action warning
+                                   uses; result.planRisk lists the steps that would warn (advisory).
                                    Never requires an active session, never mutates anything.
   crv seed <store> <rows-json> [--manifest <path>] [--agent <name>]
                                    "idb put-many", plus records every stored row's real key into a

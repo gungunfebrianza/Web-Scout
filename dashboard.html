@@ -3829,7 +3829,7 @@ function renderHeatmap(a) {
 // ---------- Recurring-selector failure graph (bipartite: type <-> selector) ----------
 function renderSelectorGraph(a) {
   const container = el('selectorGraphContainer');
-  const items = (a.selectorFriction || a.topFailedSelectors || []).slice(0, 12);
+  const items = (a.selectorFriction || []).slice(0, 12);
   if (!items.length) { container.innerHTML = ''; el('selectorGraphEmpty').hidden = false; return; }
   el('selectorGraphEmpty').hidden = true;
   const types = [...new Set(items.map((i) => i.type))];

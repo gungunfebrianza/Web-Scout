@@ -224,13 +224,15 @@ async function handleSession(sub, rawArgs) {
     let args = rawArgs;
     let traceFlag;
     ({ args, value: traceFlag } = extractBooleanFlag(args, '--trace'));
+    let applySuggestionsFlag;
+    ({ args, value: applySuggestionsFlag } = extractBooleanFlag(args, '--apply-suggestions'));
     let id = args[0];
     if (!id) {
       const health = await request('GET', '/health');
       if (!health.active_session) throw new Error('no active session to end');
       id = health.active_session.id;
     }
-    const ended = await request('POST', `/sessions/${id}/end`);
+    const ended = await request('POST', `/sessions/${id}/end`, applySuggestionsFlag ? { applySuggestions: true } : undefined);
     if (traceFlag) {
       try {
         const trace = await request('POST', `/sessions/${ended.id}/trace`);
@@ -256,7 +258,8 @@ async function handleSession(sub, rawArgs) {
     if (ended.emergentFriction?.length) {
       for (const line of ended.emergentFriction) console.error(`NOTE: emergent friction - ${line}`);
     }
-    for (const suggestion of ended.resolveSuggestions ?? []) console.error(`NOTE: mark fixed? ${suggestion.hint}`);
+    for (const suggestion of ended.resolveSuggestions ?? []) console.error(`NOTE: mark fixed? ${suggestion.hint} (or end with --apply-suggestions)`);
+    for (const applied of ended.appliedResolutions ?? []) console.error(`NOTE: marked fixed: ${applied.type} ${JSON.stringify(applied.selector)} (undo: friction unresolve ${applied.type} ${JSON.stringify(applied.selector)})`);
     // One-line cost receipt at the natural end-of-session checkpoint -
     // catches waste the same day it happened instead of only on a later,
     // on-demand "token-report" call nobody remembered to run.
@@ -1093,8 +1096,10 @@ async function main() {
   // "crv run": the action between the two snapshots, given the same way /command takes it.
   let typeValue;
   let paramsValue;
+  let planValue;
   ({ args, value: typeValue } = extractFlag(args, '--type'));
   ({ args, value: paramsValue } = extractFlag(args, '--params'));
+  ({ args, value: planValue } = extractFlag(args, '--plan'));
   // "crv seed"/"crv cleanup": the manifest file that tracks synthetic row ids across
   // separate CLI invocations - see the crv.seed/crv.cleanup entries below.
   let manifestValue;
@@ -1357,12 +1362,15 @@ async function main() {
         agent: agentFlag, stores: csv(storesValue), type: typeValue, params: paramsValue ? JSON.parse(paramsValue) : {},
         expect: expectFileValue ? fs.readFileSync(expectFileValue, 'utf8') : expectValue,
         allowExtra: allowExtraValue || undefined, verbose: verboseValue || undefined, samples: samplesValue !== undefined ? Number(samplesValue) : undefined,
+        ...(ackRiskFlag ? { ackRisk: true } : {}),
       }),
       // One call replacing the four hand-run before every CRV pass ("status" +
       // "db version-check" + "dom query" + "idb list") - see relay.mjs's own
       // POST /crv/preflight comment. Optional trailing selector, same
       // positional convention as every dom.* command (domSelector above).
-      preflight: () => request('POST', '/crv/preflight', { agent: agentFlag, stores: csv(storesValue), selector: domSelector || undefined }),
+      // --plan '[{"type":"dom.click","params":{"selector":"#save"}}, ...]' also checks each step against what
+      // friction awareness already knows, before any of them runs (result.planRisk).
+      preflight: () => request('POST', '/crv/preflight', { agent: agentFlag, stores: csv(storesValue), selector: domSelector || undefined, plan: planValue ? JSON.parse(planValue) : undefined }),
       // Wraps "idb put-many" (same store/rows shape) but also records every
       // stored row's real key into the manifest (see manifestPath above) -
       // replaces hand-tracking ids across a session's separate "idb put"

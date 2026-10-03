@@ -81,16 +81,24 @@ export function normalizeSelector(selector) {
 // What an action is aimed AT. dom.* commands aim at a selector; idb.* writes aim at a store (they
 // fail by store, never by selector, so a selector-only model was blind to them). Key shape is
 // `family::target`; a store target is prefixed so it can never collide with a selector.
-export function frictionTarget(type, params) {
+// Commands that aim at the PAGE rather than an element or a store (a reload, a settle, a screenshot, a
+// wait on the console/network). They have no selector to key on, so they fall back to the origin the
+// agent was connected from: "page.reload keeps timing out on this site" is as real as a bad selector.
+// Origin granularity, not path - the agent reports an origin only.
+export const PAGE_TYPES = new Set(['page.reload', 'page.hardReload', 'page.epoch', 'dom.settle', 'dom.screenshot', 'console.wait', 'net.wait', 'react.tree', 'idb.list']);
+
+export function frictionTarget(type, params, origin = null) {
   const selector = params?.selector;
   if (typeof selector === 'string' && selector) return { kind: 'selector', value: selector };
   const store = params?.store;
   if (typeof store === 'string' && store && /^idb\./.test(type)) return { kind: 'store', value: store };
+  if (typeof origin === 'string' && origin && PAGE_TYPES.has(type)) return { kind: 'page', value: origin };
   return null;
 }
 
 function targetKey(type, target) {
-  return `${typeFamily(type)}::${target.kind === 'store' ? `store:${target.value.trim()}` : normalizeSelector(target.value)}`;
+  const part = target.kind === 'store' ? `store:${target.value.trim()}` : target.kind === 'page' ? `page:${target.value.trim()}` : normalizeSelector(target.value);
+  return `${typeFamily(type)}::${part}`;
 }
 
 export function frictionKey(type, selector) {
@@ -98,12 +106,12 @@ export function frictionKey(type, selector) {
 }
 
 // null when the action has no friction target.
-export function frictionKeyFor(type, params) {
-  const target = frictionTarget(type, params);
+export function frictionKeyFor(type, params, origin = null) {
+  const target = frictionTarget(type, params, origin);
   return target ? targetKey(type, target) : null;
 }
 
-const targetLabel = (kind) => (kind === 'store' ? 'store' : 'selector');
+const targetLabel = (kind) => (kind === 'store' ? 'store' : kind === 'page' ? 'page' : 'selector');
 
 // ---------- error classification ----------
 
@@ -148,7 +156,7 @@ export function buildSelectorFriction(actions, { matchKnownIssues = () => [], re
   };
 
   for (const a of actions) {
-    const target = frictionTarget(a.type, a.params);
+    const target = frictionTarget(a.type, a.params, a.origin);
     if (!target) continue;
     const key = targetKey(a.type, target);
     const origin = a.origin || '';
@@ -196,7 +204,7 @@ export function buildSelectorFriction(actions, { matchKnownIssues = () => [], re
     for (let i = 0; i < rows.length; i += 1) {
       const fail = rows[i];
       if (fail.ok) continue;
-      const failTarget = frictionTarget(fail.type, fail.params);
+      const failTarget = frictionTarget(fail.type, fail.params, fail.origin);
       if (!failTarget) continue;
       const key = targetKey(fail.type, failTarget);
       const entry = entries.get(key);
@@ -206,7 +214,7 @@ export function buildSelectorFriction(actions, { matchKnownIssues = () => [], re
       let retried = false;
       for (let j = i + 1; j < rows.length && j <= i + RECOVERY_LOOKAHEAD; j += 1) {
         const next = rows[j];
-        const nextTarget = frictionTarget(next.type, next.params);
+        const nextTarget = frictionTarget(next.type, next.params, next.origin);
         if (!retried && nextTarget && targetKey(next.type, nextTarget) === key) {
           retried = true;
           entry.retries += 1;
@@ -281,8 +289,8 @@ export function createFrictionTracker({ persist = null } = {}) {
   const tracker = {
     // Called from the one place every action is logged. Returns the updated live entry when the
     // action carried a target (null otherwise) so callers can react to a failure immediately.
-    note(sessionId, { type, params, ok, error, durationMs, at }) {
-      const key = frictionKeyFor(type, params);
+    note(sessionId, { type, params, origin, ok, error, durationMs, at }) {
+      const key = frictionKeyFor(type, params, origin);
       if (!key) return null;
       const entries = sessionMap(live, sessionId);
       const entry = entries.get(key) ?? { fails: 0, unresolved: 0, lastOkAt: null, lastFailedAt: null, lastError: null, errorClass: null, classes: {}, wastedMs: 0 };
@@ -335,7 +343,7 @@ export function createFrictionTracker({ persist = null } = {}) {
     // Safe to call once per session per process: used when a relay restarts under a live session.
     restore(sessionId, rows, { warns = [], announces = [] } = {}) {
       for (const a of rows) {
-        tracker.note(sessionId, { type: a.type, params: a.params, ok: Boolean(a.ok), error: a.error, durationMs: a.duration_ms, at: a.started_at });
+        tracker.note(sessionId, { type: a.type, params: a.params, origin: a.origin, ok: Boolean(a.ok), error: a.error, durationMs: a.duration_ms, at: a.started_at });
       }
       const map = sessionMap(warned, sessionId);
       for (const w of warns) map.set(w.key, { atLive: w.at_live, count: w.count });
@@ -482,7 +490,7 @@ export function findRateSpikes(sessionActions, totalsByType) {
 export function findResolveSuggestions(rows, { resolutions = new Map(), onlyKeys = null } = {}) {
   const byKey = new Map();
   for (const a of rows) {
-    const target = frictionTarget(a.type, a.params);
+    const target = frictionTarget(a.type, a.params, a.origin);
     if (!target) continue;
     const key = targetKey(a.type, target);
     if (onlyKeys && !onlyKeys.has(key)) continue;
@@ -512,12 +520,37 @@ export function findResolveSuggestions(rows, { resolutions = new Map(), onlyKeys
 
 // ---------- known-issue candidates ----------
 
+// A starting point for the one field a draft cannot know. Prefer what actually worked after these
+// selectors failed (the most common recovery across their friction entries); otherwise the generic
+// advice for the error class. Always a suggestion: promote still wants a human-supplied remediation.
+function suggestRemediation(selectors, errorClass, entries) {
+  const wanted = new Set(selectors.map((s) => normalizeSelector(s)));
+  const tally = new Map();
+  for (const e of entries) {
+    if (e.targetKind !== 'selector' || !wanted.has(normalizeSelector(e.selector))) continue;
+    for (const r of e.recoveries ?? []) {
+      const sig = `${r.kind}|${r.type}|${r.selector ?? ''}`;
+      const t = tally.get(sig) ?? { recovery: r, worked: 0, of: 0 };
+      t.worked += r.worked;
+      t.of += r.of;
+      tally.set(sig, t);
+    }
+  }
+  const best = [...tally.values()].sort((a, b) => b.worked - a.worked)[0];
+  if (best && best.worked >= 2) {
+    const r = best.recovery;
+    const what = r.kind === 'alt-selector' ? `use "${r.selector}" (${r.type}) instead` : `${r.type}${r.selector ? ` on "${r.selector}"` : ''} first`;
+    return { text: `${what} - it worked ${best.worked} of ${best.of} times after this failure`, from: 'recovery' };
+  }
+  return CLASS_ADVICE[errorClass] ? { text: CLASS_ADVICE[errorClass].replace(/\.$/, ''), from: 'advice' } : null;
+}
+
 // Failing the same way repeatedly with no known-issues.json match is exactly the entry an
 // operator has not written yet. Groups failed actions by a placeholder-normalized message and
 // proposes a draft entry (signature = the stable literal prefix, so it works as a plain
 // substring match). Draft only - nothing is written to the registry unless `known-issues
 // promote --confirm` is run on it.
-export function buildKnownIssueCandidates(actions, { matchKnownIssues = () => [], limit = 5 } = {}) {
+export function buildKnownIssueCandidates(actions, { matchKnownIssues = () => [], limit = 5, frictionEntries = [] } = {}) {
   const groups = new Map();
   for (const a of actions) {
     if (a.ok || !a.error) continue;
@@ -540,8 +573,11 @@ export function buildKnownIssueCandidates(actions, { matchKnownIssues = () => []
       const prefix = g.normalized.split('*')[0].trim().replace(/[:\-(,]+$/, '').trim();
       const signature = prefix.length >= 8 ? prefix : g.sample.slice(0, 80);
       const topSelectors = [...g.selectors.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([s]) => s);
+      const errorClass = classifyError(g.sample);
+      const suggestion = suggestRemediation(topSelectors, errorClass, frictionEntries);
       return {
-        errorClass: classifyError(g.sample),
+        errorClass,
+        ...(suggestion ? { suggestedRemediation: suggestion.text, suggestedFrom: suggestion.from } : {}),
         sample: g.sample.slice(0, 200),
         count: g.count,
         sessionCount: g.sessionIds.size,

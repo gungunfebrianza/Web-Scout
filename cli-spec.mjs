@@ -62,7 +62,7 @@ export const CLI_SPEC = [
     params: { '--strict-crv': 'strictCrv', '--stores': 'strictCrvStores', '--tags': 'tags', '--token-budget': 'tokenBudget', '--if-stale-min': 'ifStaleMin', '--no-briefing': 'noBriefing', '--lean': 'lean', '--crv-compact': 'crvCompact', '--allow-remote': 'allowRemote' },
     cliOnly: { '--auto-snapshot': 'convenience wrapper - an MCP caller takes an explicit webscout_idb snapshot action' },
   },
-  { cmd: 'session end', pos: [0, 1], bool: ['--trace'], mcp: 'webscout_session.end', params: { '--trace': 'trace' } },
+  { cmd: 'session end', pos: [0, 1], bool: ['--trace', '--apply-suggestions'], mcp: 'webscout_session.end', params: { '--trace': 'trace', '--apply-suggestions': 'applySuggestions' } },
   { cmd: 'session current', pos: [0, 0], mcp: 'webscout_session.current' },
   { cmd: 'session list', pos: [0, 0], mcp: 'webscout_session.list' },
   { cmd: 'session show', pos: [1, 1], mcp: 'webscout_session.show' },
@@ -129,8 +129,8 @@ export const CLI_SPEC = [
     // selector - CLI convention (domSelector, same as every dom.* command);
     // MCP takes it as the named param `selector` instead (no flag/param
     // mapping needed for a bare positional).
-    cmd: 'crv preflight', pos: [0, 1], val: ['--stores', '--agent'], mcp: 'webscout_idb.crv_preflight',
-    params: { '--stores': 'stores' },
+    cmd: 'crv preflight', pos: [0, 1], val: ['--stores', '--agent', '--plan'], mcp: 'webscout_idb.crv_preflight',
+    params: { '--stores': 'stores', '--plan': 'plan' },
   },
   {
     cmd: 'crv seed', pos: [2, 2], val: ['--manifest', '--agent'], mcp: 'webscout_idb.crv_seed',

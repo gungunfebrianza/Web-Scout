@@ -191,12 +191,12 @@ test('"friction resolve" makes a selector\'s old history stop warning and stop r
     const a = await start('seed');
     await failN(3, '#was-broken');
     await api('POST', `/sessions/${a.id}/end`);
-    assert.ok((await api('GET', '/analytics')).topFailedSelectors.some((s) => s.selector === '#was-broken'));
+    assert.ok((await api('GET', '/analytics')).selectorFriction.some((s) => s.selector === '#was-broken'));
 
     await api('POST', '/friction/resolve', { type: 'dom.click', selector: '#was-broken', note: 'fixed in commit abc' });
     assert.equal((await api('GET', '/friction/resolutions')).length, 1);
     const analytics = await api('GET', '/analytics');
-    assert.ok(!analytics.topFailedSelectors.some((s) => s.selector === '#was-broken'));
+    assert.ok(!analytics.selectorFriction.some((s) => s.selector === '#was-broken'));
     assert.ok(!analytics.selectorFriction.some((s) => s.selector === '#was-broken'));
 
     const b = await start('after the fix');
@@ -207,7 +207,7 @@ test('"friction resolve" makes a selector\'s old history stop warning and stop r
     await start('relapse');
     await failN(2, '#was-broken');
     const relapsed = await api('GET', '/analytics');
-    assert.equal(relapsed.topFailedSelectors.find((s) => s.selector === '#was-broken')?.failCount, 3);
+    assert.equal(relapsed.selectorFriction.find((s) => s.selector === '#was-broken')?.failCount, 3);
 
     await api('POST', '/friction/unresolve', { type: 'dom.click', selector: '#was-broken' });
     assert.equal((await api('GET', '/friction/resolutions')).length, 0);
@@ -231,7 +231,7 @@ test('failure time feeds the friction ranking: a slow failing type is worth more
     await click('#a'); await click('#a');
     const analytics = await api('GET', '/analytics');
     assert.equal(typeof analytics.failureRateByType.find((t) => t.type === 'dom.click').wastedMs, 'number');
-    assert.equal(typeof analytics.topFailedSelectors[0]?.wastedMs ?? 0, 'number');
+    assert.equal(typeof analytics.selectorFriction[0]?.wastedMs ?? 0, 'number');
   }, { handlers: alwaysFail });
 });
 

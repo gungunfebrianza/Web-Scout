@@ -1,6 +1,6 @@
 // "friction analytics awareness" round: analytics used to be something an agent had to
 // separately go read ("analytics" / GET /analytics) - these five pieces put the SAME data
-// (topFailedSelectors, macrosNeverRun, known-issues.json, topFrictionItems) in front of the
+// (selectorFriction, macrosNeverRun, known-issues.json, topFrictionItems) in front of the
 // agent at the moment it matters, instead of only on request:
 //   1. A failed /command's OWN error carries a matched known-issues.json remediation inline
 //      (relay.mjs's matchKnownIssueForError, wired into dispatchTracked's catch).
