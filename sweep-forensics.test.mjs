@@ -3,6 +3,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { summarizeRun } from './flaky-sweep.mjs';
+import { isIgnoredLeak, formatLeakNames } from './leak-ignore.mjs';
+
+test('isIgnoredLeak is per-platform: PowerShell probe ignored on win32 only', () => {
+  assert.equal(isIgnoredLeak('__PSScriptPolicyTest_abc.ps1', 'win32'), true);
+  assert.equal(isIgnoredLeak('__PSScriptPolicyTest_abc.ps1', 'linux'), false);
+  assert.equal(isIgnoredLeak('msedge_x', 'linux'), false);
+  assert.equal(isIgnoredLeak('node-compile-cache', 'linux'), true);
+  assert.equal(isIgnoredLeak('wl-abc', 'win32'), false);
+});
+
+test('formatLeakNames caps at 20 and reports the rest', () => {
+  const names = Array.from({ length: 23 }, (_, i) => 'n' + i);
+  const s = formatLeakNames(names);
+  assert.ok(s.endsWith('+3 more') && s.includes('n19') && !s.includes('n20'));
+  assert.equal(formatLeakNames(['a', 'b']), 'a, b');
+});
 
 test('summarizeRun extracts failing test names and leak report lines', () => {
   const out = [

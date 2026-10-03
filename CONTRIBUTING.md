@@ -391,6 +391,8 @@ proportional gain in what it catches, so state up front which checks are which.
 
 ## PR expectations
 
+After pushing, `node ci-status.mjs` prints the CI runs for HEAD (exit 0 success, 1 failure, 2 in progress/none); `--wait` polls up to 20 min. Needs the `gh` CLI.
+
 - Update the README and/or `docs/web-scout-roadmap.md` alongside the code
   change, in the same PR - not "docs to follow." A behavior change with no
   roadmap entry is much harder for the next person (agent or human) to

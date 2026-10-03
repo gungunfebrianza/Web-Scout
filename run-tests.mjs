@@ -13,11 +13,11 @@ import { fileURLToPath } from 'node:url';
 import { reapLeakedRelays } from './relay-control.mjs';
 import { removeDirSync, PREFIXES, scratchStats, killTree, listBrowserProcesses } from './scratch.mjs';
 import { testRunFile } from './host-health.mjs';
+import { isIgnoredLeak, formatLeakNames } from './leak-ignore.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const realTmp = os.tmpdir();
 const root = fs.mkdtempSync(path.join(realTmp, 'webscout-testroot-'));
-const IGNORED = ['node-compile-cache', 'webscout-relays.jsonl', 'webscout-scratch-log.jsonl', 'webscout-scratch-ledger.jsonl', 'webscout-host-samples.jsonl', 'webscout-warn-cache-', 'msedge_', 'cv_debug.log', '__PSScriptPolicyTest_']; // shared-by-design files; __PSScriptPolicyTest_*: PowerShell's own policy probe (seen on the hosted runner), not ours
 const ours = (dir) => scratchStats({ baseDir: dir }).dirs; // our prefixes only: unrelated tools may create wl-* meanwhile
 const before = ours(realTmp);
 // Names, not just a count: "real temp gained 1 dir" is not enough to find which test made it.
@@ -45,13 +45,13 @@ if (reaped) { console.error(`run-tests: stopped ${reaped} detached helper proces
 for (const n of fs.readdirSync(root).filter((f) => PREFIXES.some((p) => f.startsWith(p)))) removeDirSync(path.join(root, n), { attempts: 25, quiet: true });
 // <guid>.tmp: scratch files a Chromium/Edge process writes into TEMP itself when it is killed mid-write - not ours.
 const BROWSER_TMP = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}.tmp$/i;
-const isLeak = (n) => !IGNORED.some((p) => n.startsWith(p)) && !BROWSER_TMP.test(n);
+const isLeak = (n) => !isIgnoredLeak(n, process.platform) && !BROWSER_TMP.test(n);
 const leakedNames = fs.readdirSync(root).filter(isLeak);
 const left = leakedNames.length;
 // Browsers still pointing into the private root are leaks too: kill, then wipe.
 const orphans = listBrowserProcesses().filter((p) => p.commandLine.toLowerCase().includes(root.toLowerCase()));
 for (const p of orphans) killTree(p.pid);
-if (left) console.error(`run-tests: leaked: ${fs.readdirSync(root).filter(isLeak).join(', ')}`);
+if (left) console.error(`run-tests: leaked: ${formatLeakNames(leakedNames)}`);
 const ok = removeDirSync(root);
 const grew = ours(realTmp) - before;
 const gainedNames = [...namesIn(realTmp)].filter((n) => !namesBefore.has(n));
