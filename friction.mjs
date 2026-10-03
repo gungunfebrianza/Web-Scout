@@ -403,6 +403,65 @@ export function buildRelapses(resolutions, actions) {
   }).sort((a, b) => b.failuresSince - a.failuresSince);
 }
 
+// ---------- trend: is a target getting better or worse across sessions? ----------
+
+const SPARK = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+export const TREND_SESSIONS = 8;
+const TREND_DELTA = 0.15; // a change of this much in the failure rate is a trend; less is noise
+
+export function sparkline(rates) {
+  return rates.map((r) => SPARK[Math.min(SPARK.length - 1, Math.max(0, Math.round(r * (SPARK.length - 1))))]).join('');
+}
+
+// Per target, per session: how many calls failed and how many worked. `direction` compares the newest session's
+// failure rate with the mean of up to three before it. `fixedAt` (from friction_resolutions) marks the sessions that
+// began after the declared fix, so a fix that held reads as a drop that stays down, a relapse as a climb.
+//   actions: chronological rows; resolutions: Map<key, ISO>; key: one target (else every target with 2+ sessions)
+export function buildFrictionTrend(actions, { resolutions = new Map(), key = null, sessions = TREND_SESSIONS } = {}) {
+  const perKey = new Map(); // key -> { target info, bySession: Map<sessionId, { fails, oks, firstAt }> }
+  for (const a of (actions ?? []).flatMap(expandDragTargets)) {
+    const target = frictionTarget(a.type, a.params, a.origin);
+    if (!target) continue;
+    const k = targetKey(a.type, target);
+    if (key && k !== key) continue;
+    const e = perKey.get(k) ?? { key: k, type: typeFamily(a.type), targetKind: target.kind, selector: target.value, bySession: new Map() };
+    const s = e.bySession.get(a.session_id) ?? { sessionId: a.session_id, fails: 0, oks: 0, firstAt: a.started_at };
+    if (a.ok) s.oks += 1; else { s.fails += 1; e.selector = target.value; }
+    if (a.started_at && (!s.firstAt || a.started_at < s.firstAt)) s.firstAt = a.started_at;
+    e.bySession.set(a.session_id, s);
+    perKey.set(k, e);
+  }
+  const rows = [];
+  for (const e of perKey.values()) {
+    const fixedAt = resolutions.get(e.key) ?? null;
+    const points = [...e.bySession.values()].sort((x, y) => x.sessionId - y.sessionId).slice(-Math.max(2, sessions)).map((s) => ({
+      sessionId: s.sessionId, fails: s.fails, oks: s.oks, rate: Math.round((s.fails / Math.max(1, s.fails + s.oks)) * 100) / 100, ...(fixedAt && s.firstAt && s.firstAt > fixedAt ? { afterFix: true } : {}),
+    }));
+    if (!key && (points.length < 2 || !points.some((p) => p.fails > 0))) continue;
+    let direction = 'new';
+    let delta = 0;
+    if (points.length >= 2) {
+      const last = points[points.length - 1].rate;
+      const before = points.slice(-4, -1);
+      const prev = before.reduce((sum, p) => sum + p.rate, 0) / before.length;
+      delta = Math.round((last - prev) * 100) / 100;
+      direction = delta >= TREND_DELTA ? 'worsening' : delta <= -TREND_DELTA ? 'improving' : 'steady';
+    }
+    rows.push({ key: e.key, type: e.type, targetKind: e.targetKind, selector: e.selector, direction, delta, sparkline: sparkline(points.map((p) => p.rate)), fixedAt, points });
+  }
+  return rows.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+}
+
+// The two lists a person scans: what is getting worse (act on these) and what is getting better (the fix held).
+export function summarizeTrends(rows, { limit = 5 } = {}) {
+  const lean = (r) => ({ key: r.key, type: r.type, selector: r.selector, delta: r.delta, sparkline: r.sparkline, sessions: r.points.length, lastRate: r.points[r.points.length - 1].rate });
+  return {
+    worsening: rows.filter((r) => r.direction === 'worsening').slice(0, limit).map(lean),
+    improving: rows.filter((r) => r.direction === 'improving').slice(0, limit).map(lean),
+    tracked: rows.length,
+  };
+}
+
 // ---------- session-start briefing ----------
 
 const GOAL_STOPWORDS = new Set(['with', 'from', 'that', 'this', 'into', 'then', 'test', 'tests', 'page', 'check', 'make', 'when', 'have', 'does', 'only', 'about', 'after', 'before']);

@@ -4274,7 +4274,7 @@ const routes = [
 
   // Friction routes live in routes-friction.mjs (mark fixed, explain, targets, notices, regressions, prune, known-issues).
   ...frictionRoutes({
-    allActionsIncremental, allFrictionTargets, broadcastUpdate, COMMAND_TYPES, commitsBetween, compileSignature, computeAnalytics, dbApi, declareFrictionResolved, DEFAULT_AGENT, ensureFrictionSession, frictionFactsFor, frictionTargetFromBody, frictionTracker, getAnalytics, HOST, HttpError, KNOWN_ISSUES_PATH, loadKnownIssues, readJsonBody, readKnownIssuesRaw, readSharedKnownIssues, resolveFrictionCluster,
+    allActionsIncremental, allFrictionTargets, broadcastUpdate, COMMAND_TYPES, commitsBetween, compileSignature, computeAnalytics, dbApi, declareFrictionResolved, DEFAULT_AGENT, ensureFrictionSession, frictionFactsFor, frictionTargetFromBody, frictionTracker, getAnalytics, HOST, HttpError, KNOWN_ISSUES_PATH, loadKnownIssues, PORT, readJsonBody, readKnownIssuesRaw, readSharedKnownIssues, resolveFrictionCluster,
     dropAnalyticsCache: () => { analyticsCache = null; },
     dropActionsMemo: () => { actionsMemo = null; },
   }),
@@ -4389,7 +4389,9 @@ const server = http.createServer(async (req, res) => {
     // missing row - translated to 404 here rather than teaching the
     // persistence layer about HTTP status codes.
     const status = err instanceof HttpError ? err.status : (err.message?.startsWith('no such ') ? 404 : 500);
-    sendJson(res, status, { ok: false, error: err.message, extra: err.extra });
+    let notice = null;
+    try { notice = notices.errorNotice({ status, message: err.message }); } catch { /* best-effort */ }
+    sendJson(res, status, { ok: false, error: err.message, extra: err.extra, ...(notice ? { notice } : {}) });
   }
 });
 

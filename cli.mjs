@@ -1051,6 +1051,34 @@ async function main() {
       printResult(await request('GET', `/friction/notices?${q}`));
       return;
     }
+    // next: list the steps a notice offered (default: the newest that has any); --step n runs one (a write needs --confirm).
+    if (sub === 'next') {
+      let notice; let step; let confirm;
+      ({ args: fargs, value: notice } = extractFlag(fargs, '--notice'));
+      ({ args: fargs, value: step } = extractFlag(fargs, '--step'));
+      ({ args: fargs, value: confirm } = extractBooleanFlag(fargs, '--confirm'));
+      printResult(step === undefined
+        ? await request('GET', `/friction/next${notice !== undefined ? `?notice=${encodeURIComponent(notice)}` : ''}`)
+        : await request('POST', '/friction/next', { notice, step: Number(step), confirm: confirm === true }));
+      return;
+    }
+    // trend [<type> <selector|store>] [--sessions n]: better or worse across sessions, for one target or project-wide.
+    if (sub === 'trend') {
+      let sessions;
+      ({ args: fargs, value: sessions } = extractFlag(fargs, '--sessions'));
+      const q = new URLSearchParams();
+      if (sessions !== undefined) q.set('sessions', sessions);
+      if (fargs.length) {
+        const [type, target] = fargs;
+        if (!type || !target) throw new Error('friction trend takes both <type> <selector> (for idb.* types the second argument is the store name), or neither for the project-wide view');
+        q.set('type', type);
+        q.set(type.startsWith('idb.') && type !== 'idb.list' ? 'store' : 'selector', target);
+      }
+      const out = await request('GET', `/friction/trend?${q}`);
+      if (out.sparkline) console.error(`${out.direction}  ${out.sparkline}  ${out.type} ${out.selector}`);
+      printResult(out);
+      return;
+    }
     if (sub === 'watch') {
       let seconds; let count; let session;
       ({ args: fargs, value: seconds } = extractFlag(fargs, '--for'));
@@ -1099,7 +1127,7 @@ async function main() {
       }
       return;
     }
-    throw new Error('friction requires a subcommand: explain <type> <selector> | resolve <type> <selector> [--note "..."] | resolve cluster <id> | unresolve <type> <selector> | list | session | targets [--filter t] [--sort s] [--limit n] | notices [--session id|all] [--since n] | watch [--for s] [--count n] | regressions [--fail] | config | prune [--days N] [--confirm]');
+    throw new Error('friction requires a subcommand: explain <type> <selector> | resolve <type> <selector> [--note "..."] | resolve cluster <id> | unresolve <type> <selector> | list | session | targets [--filter t] [--sort s] [--limit n] | notices [--session id|all] [--since n] | next [--notice id] [--step n] [--confirm] | trend [<type> <selector>] [--sessions n] | watch [--for s] [--count n] | regressions [--fail] | config | prune [--days N] [--confirm]');
   }
 
   // known-issues promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm]

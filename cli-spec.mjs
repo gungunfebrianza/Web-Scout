@@ -40,6 +40,8 @@ export const CLI_SPEC = [
   { cmd: 'friction session', pos: [0, 0], mcp: 'webscout_meta.friction' },
   { cmd: 'friction targets', pos: [0, 0], val: ['--filter', '--sort', '--limit'], mcp: 'webscout_meta.friction', params: { '--filter': 'filter', '--sort': 'sort', '--limit': 'limit' } },
   { cmd: 'friction notices', pos: [0, 0], val: ['--session', '--since'], mcp: 'webscout_meta.friction', params: { '--session': 'session', '--since': 'since' } },
+  { cmd: 'friction next', pos: [0, 0], bool: ['--confirm'], val: ['--notice', '--step'], mcp: 'webscout_meta.friction', params: { '--notice': 'notice', '--step': 'step', '--confirm': 'confirm' } },
+  { cmd: 'friction trend', pos: [0, 2], val: ['--sessions'], mcp: 'webscout_meta.friction', params: { '--sessions': 'sessions' } },
   { cmd: 'friction watch', pos: [0, 0], val: ['--for', '--count', '--session'], mcp: null, mcpExempt: 'an open-ended stream has no request/response shape - an MCP caller polls "friction notices" with the since cursor instead' },
   { cmd: 'friction regressions', pos: [0, 0], bool: ['--fail'], mcp: 'webscout_meta.friction', cliOnly: { '--fail': 'sets the exit status for CI - an MCP caller reads the count in the reply' } },
   { cmd: 'friction prune', pos: [0, 0], bool: ['--confirm'], val: ['--days', '--notice-days', '--read-days'], mcp: 'webscout_meta.friction', params: { '--days': 'days', '--notice-days': 'noticeDays', '--read-days': 'readDays', '--confirm': 'confirm' } },

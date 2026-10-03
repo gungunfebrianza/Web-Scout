@@ -937,6 +937,15 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   friction notices [--session <id>|all] [--since <last id>]
                                    what agents were told (every warning / nudge carries its next steps as a CLI
                                    line, an MCP call and an HTTP request); --since is a cursor for polling
+  friction next [--notice <id>] [--step <n>] [--confirm]
+                                   do what a notice suggested: with no --step, lists the steps of the newest notice
+                                   that has any (or --notice); --step n runs that one through the relay. A step that
+                                   only reads runs at once; one that writes (mark fixed...) is described until
+                                   --confirm. The dashboard's buttons run the same steps.
+  friction trend [<type> <selector>] [--sessions <n>]
+                                   better or worse? one target: its failure rate per session (newest last) with a
+                                   direction and sparkline; no target: what is getting worse and what is getting
+                                   better across the project. --sessions caps how far back (default 8)
   friction watch [--for <seconds>] [--count <n>] [--session <id>]
                                    the same notices as they happen (tails GET /events), until Ctrl+C
   friction regressions [--fail]   targets declared fixed that have failed again since; --fail exits 1 if any

@@ -4,9 +4,24 @@
 // and the analytics caches); what is pure comes straight from friction.mjs. surfaces.test.mjs reads this file too.
 import fs from 'node:fs';
 import * as friction from './friction.mjs';
+import * as notices from './notices.mjs';
 
 export function frictionRoutes(d) {
-  const { allActionsIncremental, allFrictionTargets, broadcastUpdate, COMMAND_TYPES, commitsBetween, compileSignature, computeAnalytics, dbApi, declareFrictionResolved, DEFAULT_AGENT, ensureFrictionSession, frictionFactsFor, frictionTargetFromBody, frictionTracker, getAnalytics, HOST, HttpError, KNOWN_ISSUES_PATH, loadKnownIssues, readJsonBody, readKnownIssuesRaw, readSharedKnownIssues, resolveFrictionCluster } = d;
+  const { allActionsIncremental, allFrictionTargets, broadcastUpdate, COMMAND_TYPES, commitsBetween, compileSignature, computeAnalytics, dbApi, declareFrictionResolved, DEFAULT_AGENT, ensureFrictionSession, frictionFactsFor, frictionTargetFromBody, frictionTracker, getAnalytics, HOST, HttpError, KNOWN_ISSUES_PATH, loadKnownIssues, PORT, readJsonBody, readKnownIssuesRaw, readSharedKnownIssues, resolveFrictionCluster } = d;
+  const resolutionMap = () => {
+    const map = new Map();
+    try { for (const x of dbApi.listFrictionResolutions()) map.set(x.key, x.resolved_at); } catch { /* best-effort */ }
+    return map;
+  };
+  // The notice a "next" request means: by id, else the newest one of the wanted session that offers any step.
+  function describeNext(noticeId, session) {
+    const sessionId = session === 'all' ? null : session ? Number(session) : (dbApi.getCurrentSession()?.id ?? null);
+    const list = dbApi.listNotices({ sessionId, limit: 1000 });
+    const notice = noticeId ? list.find((x) => x.id === Number(noticeId)) : [...list].reverse().find((x) => x.next?.length);
+    if (!notice) throw new HttpError(404, noticeId ? `no notice #${noticeId} in that scope (list them with "friction notices")` : 'no notice with next steps yet - nothing to do');
+    const steps = (notice.next ?? []).map((c, i) => ({ n: i + 1, label: c.label, cli: c.cli, http: c.http, mutating: notices.parseHttpStep(c)?.mutating ?? null }));
+    return { notice, steps };
+  }
   return [
   // ---- "Mark fixed": declare a selector's friction resolved as of now. Analytics then counts
   // only failures AFTER that instant (the selector's old history stops ranking and stops
@@ -73,6 +88,11 @@ export function frictionRoutes(d) {
         thisSession: facts.live ? { ...facts.live } : null,
         resolution: facts.resolution ? { resolvedAt: facts.resolution.resolved_at, note: facts.resolution.note } : null,
         failureContext: facts.context,
+        trend: (() => { try { const t = friction.buildFrictionTrend(allActionsIncremental().actions, { key: facts.key, resolutions: resolutionMap() }); return t[0] ? { direction: t[0].direction, sparkline: t[0].sparkline, points: t[0].points } : null; } catch { return null; } })(),
+        next: [
+          ...(facts.resolution ? [] : [notices.fixedCommand(type, target.value)]),
+          notices.trendCommand(type, target.value),
+        ],
         cluster: (() => { try { return getAnalytics().frictionClusters.find((c) => c.targets.some((t) => t.key === facts.key)) ?? null; } catch { return null; } })(),
         config: friction.frictionConfig(),
       };
@@ -123,6 +143,24 @@ export function frictionRoutes(d) {
     },
   },
 
+  // ---- Better or worse? One target (?type=&selector= | &store=): its failure rate per session, newest last, with the
+  // direction and a sparkline. Without a target: what is getting worse and what is getting better, project-wide.
+  // ?sessions=<n> is how many recent sessions to look at (default 8).
+  {
+    method: 'GET',
+    pattern: /^\/friction\/trend$/,
+    handler: async (req) => {
+      const q = new URL(req.url, `http://${HOST}`).searchParams;
+      const sessions = Math.min(50, Math.max(2, Number(q.get('sessions')) || friction.TREND_SESSIONS));
+      const { actions } = allActionsIncremental();
+      if (!q.get('type')) return { sessions, ...friction.summarizeTrends(friction.buildFrictionTrend(actions, { resolutions: resolutionMap(), sessions })) };
+      const { type, key } = frictionTargetFromBody({ type: q.get('type'), selector: q.get('selector') ?? undefined, store: q.get('store') ?? undefined }, { allowScopes: false });
+      const found = friction.buildFrictionTrend(actions, { key, resolutions: resolutionMap(), sessions })[0];
+      if (!found) throw new HttpError(404, `no recorded calls for ${type} ${q.get('selector') ?? q.get('store')} - nothing to trend`);
+      return found;
+    },
+  },
+
   // ---- What agents were told: the kept notices (notices.mjs), newest last. ?session=<id>|all (default: the
   // active session, else all), ?since=<last id seen> makes it a cursor, ?limit=.
   {
@@ -134,6 +172,32 @@ export function frictionRoutes(d) {
       const sessionId = wanted === 'all' ? null : wanted ? Number(wanted) : (dbApi.getCurrentSession()?.id ?? null);
       const list = dbApi.listNotices({ sessionId, sinceId: Number(q.get('since')) || 0, limit: Number(q.get('limit')) || 200 });
       return { sessionId, notices: list, next: list.length ? list[list.length - 1].id : (Number(q.get('since')) || 0) };
+    },
+  },
+
+  // ---- Do what a notice suggested. GET lists the steps of one notice (?notice=<id>, default the newest that has any;
+  // ?session=<id>|all like /friction/notices); POST {notice?, step? (1-based, default 1), confirm?} runs one. A GET step
+  // runs at once; anything that writes is only described until confirm:true - the same dry-run rule as everywhere else.
+  {
+    method: 'GET',
+    pattern: /^\/friction\/next$/,
+    handler: async (req) => describeNext(new URL(req.url, `http://${HOST}`).searchParams.get('notice'), new URL(req.url, `http://${HOST}`).searchParams.get('session')),
+  },
+  {
+    method: 'POST',
+    pattern: /^\/friction\/next$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      const { notice, steps } = describeNext(body.notice ?? null, body.session ?? null);
+      const n = Number.isInteger(Number(body.step)) && Number(body.step) > 0 ? Number(body.step) : 1;
+      const step = steps[n - 1];
+      if (!step) throw new HttpError(400, `step ${n} does not exist - that notice has ${steps.length} step(s): ${steps.map((s) => `${s.n} ${s.label}`).join(', ')}`);
+      const parsed = notices.parseHttpStep(notice.next[n - 1]);
+      if (!parsed) throw new HttpError(400, `step ${n} (${step.label}) has no runnable HTTP form - run it yourself: ${step.cli}`);
+      if (parsed.mutating && body.confirm !== true) return { ran: false, notice: { id: notice.id, kind: notice.kind, message: notice.message }, step, wouldRun: { method: parsed.method, path: parsed.path, body: parsed.body }, note: 'dry run - this step writes; repeat with confirm:true (CLI: --confirm) to run it' };
+      const res = await fetch(`http://${HOST}:${PORT}${parsed.path}`, { method: parsed.method, ...(parsed.method === 'GET' ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed.body) }) });
+      const json = await res.json();
+      return { ran: true, notice: { id: notice.id, kind: notice.kind, message: notice.message }, step, ok: json.ok === true, ...(json.ok ? { result: json.result } : { error: json.error }) };
     },
   },
 

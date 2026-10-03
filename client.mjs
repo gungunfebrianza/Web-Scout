@@ -23,7 +23,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { startRelay, restartRelay, recordRelayEvent } from './relay-control.mjs';
-import { parseNotices, renderNotice, NOTICES_HEADER } from './notices.mjs';
+import { parseNotices, renderNotice, renderSteps, NOTICES_HEADER } from './notices.mjs';
 
 // "crv seed"/"crv cleanup" convenience (both cli.mjs and mcp-server.mjs use
 // these): a manifest of {store, ids} entries tracking synthetic rows written
@@ -325,8 +325,11 @@ export async function request(method, pathName, body, { autostart = true } = {})
   }
   const json = await res.json();
   if (!json.ok) {
-    const err = new Error(json.error || `request to ${pathName} failed`);
+    // A refusal the relay recognises carries a notice (notices.mjs errorNotice): the way out, in this caller's style.
+    const steps = json.notice ? renderSteps(json.notice, noteStyle) : '';
+    const err = new Error(`${json.error || `request to ${pathName} failed`}${steps ? `\n  Next: ${steps}` : ''}`);
     err.status = res.status;
+    if (json.notice) err.notice = json.notice;
     // A failed dom.click/dom.fill/idb.put/idb.patch TIMEOUT (504) is not
     // necessarily a failed ACTION - the page may have received and even
     // finished processing the command; only the reply never made it back in

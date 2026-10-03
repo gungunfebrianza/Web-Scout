@@ -12,7 +12,7 @@
 const quote = (v) => `"${String(v).replace(/(["\\])/g, '\\$1')}"`;
 const enc = encodeURIComponent;
 
-export const NOTICE_KINDS = ['selector-risk', 'macro-match', 'friction-broadcast', 'recovered', 'nudge', 'regression'];
+export const NOTICE_KINDS = ['selector-risk', 'macro-match', 'friction-broadcast', 'recovered', 'nudge', 'regression', 'error'];
 
 // ---- the commands a notice can point at ----
 
@@ -54,6 +54,15 @@ export function macroRecordCommand(sessionId) {
   };
 }
 
+export function trendCommand(type, value) {
+  return {
+    label: 'trend',
+    cli: `friction trend ${type} ${quote(value)}`,
+    mcp: { tool: 'webscout_meta', action: 'friction', params: { sub: 'trend', type, selector: value } },
+    http: `GET /friction/trend?type=${enc(type)}&selector=${enc(value)}`,
+  };
+}
+
 export function regressionsCommand() {
   return {
     label: 'see them',
@@ -67,6 +76,31 @@ export function makeNotice({ kind, level = 'info', message, key = null, next = [
   return { kind, level, message: String(message), ...(key ? { key: String(key) } : {}), next: next.filter(Boolean) };
 }
 
+// ---- errors: the same shape, so a refusal says what to do next on every surface ----
+// A failed request used to carry only a sentence. errorNotice() recognises the refusals callers hit most and attaches
+// the way out as a notice (kind 'error', key = a stable code), rendered like any other. Unrecognised errors get null.
+
+const sessionStart = () => ({
+  label: 'start a session',
+  cli: `session start ${quote('<goal>')}`,
+  mcp: { tool: 'webscout_session', action: 'start', params: { goal: '<goal>' } },
+  http: 'POST /sessions',
+  body: { goal: '<goal>', context: '<context>' },
+});
+const listCommand = (label, cli, tool, action, http) => ({ label, cli, mcp: { tool, action, params: {} }, http });
+
+export function errorNotice({ status = 500, message = '' } = {}) {
+  const text = String(message);
+  const make = (code, next) => makeNotice({ kind: 'error', level: 'error', message: text, key: code, next });
+  if (/^no active session|no session specified and no active session/.test(text)) return make('no-session', [sessionStart()]);
+  if (/no web-scout agent named/.test(text)) return make('no-agent', [listCommand('see agents', 'agents', 'webscout_meta', 'agents', 'GET /agents'), listCommand('relay status', 'status', 'webscout_meta', 'status', 'GET /health')]);
+  if (/was pinned to .* at "session start"/.test(text)) return make('origin-moved', [sessionStart(), listCommand('current session', 'session current', 'webscout_session', 'current', 'GET /sessions')]);
+  if (/cross-context replay guard/.test(text)) return make('cross-context', [listCommand('see macros', 'macro list', 'webscout_macro', 'list', 'GET /macros'), listCommand('current session', 'session current', 'webscout_session', 'current', 'GET /sessions')]);
+  if (status === 404 && /^no such session/.test(text)) return make('no-such-session', [listCommand('list sessions', 'session list', 'webscout_session', 'list', 'GET /sessions')]);
+  if (status === 404 && /^no such macro/.test(text)) return make('no-such-macro', [listCommand('list macros', 'macro list', 'webscout_macro', 'list', 'GET /macros')]);
+  return null;
+}
+
 // ---- rendering ----
 
 export const mcpText = (m) => `${m.tool}.${m.action} ${JSON.stringify(m.params)}`;
@@ -78,6 +112,23 @@ export function renderNotice(n, style = 'cli') {
     return how ? `${c.label}: ${how}` : null;
   }).filter(Boolean);
   return steps.length ? `${n.message} [${steps.join('; ')}]` : n.message;
+}
+
+// Just the steps, for appending to an existing sentence (an error message, a drawer).
+export function renderSteps(n, style = 'cli') {
+  return (n.next ?? []).map((c) => {
+    const how = style === 'mcp' ? (c.mcp ? mcpText(c.mcp) : null) : style === 'http' ? c.http : c.cli;
+    return how ? `${c.label}: ${how}` : null;
+  }).filter(Boolean).join('; ');
+}
+
+// ---- running a step: the one place "METHOD /path" + body becomes a request ----
+// `friction next`, the dashboard buttons and the MCP `next` sub all execute a notice's http step through this, so
+// they agree on what is safe to run unasked: a GET runs, anything else needs confirm.
+
+export function parseHttpStep(step) {
+  const m = /^(GET|POST|PUT|DELETE)\s+(\/\S*)$/.exec(String(step?.http ?? '').trim());
+  return m ? { method: m[1], path: m[2], body: step.body ?? {}, mutating: m[1] !== 'GET' } : null;
 }
 
 // ---- transport: one response header ----
