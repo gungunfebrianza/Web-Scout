@@ -19,7 +19,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Files the relay process loads once at boot. An edit to any of them is
 // invisible to a running relay until it restarts.
-export const RELAY_SOURCE_FILES = ['relay.mjs', 'db.mjs', 'ai.mjs', 'report.mjs', 'command-registry.mjs', 'build-id.mjs', 'relay-control.mjs', 'read-pipeline.mjs', 'read-shape.mjs', 'token-estimate.mjs', 'crv-verify.mjs', 'session-viz.mjs', 'intent-import.mjs', 'trace.mjs', 'transcript-tokens.mjs', 'friction.mjs', 'notices.mjs', 'routes-friction.mjs', 'self-repair.mjs', 'host-health.mjs', 'scratch.mjs'];
+export const RELAY_SOURCE_FILES = ['relay.mjs', 'db.mjs', 'ai.mjs', 'report.mjs', 'command-registry.mjs', 'build-id.mjs', 'relay-control.mjs', 'read-pipeline.mjs', 'read-shape.mjs', 'token-estimate.mjs', 'crv-verify.mjs', 'session-viz.mjs', 'intent-import.mjs', 'trace.mjs', 'transcript-tokens.mjs', 'friction.mjs', 'notices.mjs', 'routes-friction.mjs', 'routes-macros.mjs', 'routes-state.mjs','self-repair.mjs', 'host-health.mjs', 'scratch.mjs'];
 
 export function pidfilePath(port) {
   return process.env.WEBSCOUT_PID_PATH || path.join(os.tmpdir(), `webscout-relay-${port}.pid`);
