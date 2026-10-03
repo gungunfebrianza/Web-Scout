@@ -14,6 +14,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { frictionKeyFor } from './friction.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // WEBSCOUT_DB_PATH overrides the default location - lets a real deployment
@@ -146,6 +147,18 @@ CREATE TABLE IF NOT EXISTS friction_resolutions (
   note         TEXT,
   resolved_at  TEXT NOT NULL
 );
+
+-- The "already said" half of friction awareness, kept so a relay restart under a live session
+-- does not make it re-warn from scratch. kind 'warn': key is a friction key, at_live/count are the
+-- tracker's warnState. kind 'announce': a one-shot live note (key is "<sub-kind>|<key>").
+CREATE TABLE IF NOT EXISTS friction_session_state (
+  session_id  INTEGER NOT NULL,
+  kind        TEXT NOT NULL,
+  key         TEXT NOT NULL,
+  at_live     INTEGER NOT NULL DEFAULT 0,
+  count       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (session_id, kind, key)
+);
 `);
 
 // Migrations onto tables that pre-date this column - node:sqlite's bundled
@@ -177,6 +190,13 @@ ensureColumn('actions', 'agent_name', "agent_name TEXT NOT NULL DEFAULT 'default
 // picks remediation by class. NULL on rows recorded before these columns existed.
 ensureColumn('actions', 'origin', 'origin TEXT');
 ensureColumn('actions', 'error_class', 'error_class TEXT');
+// friction.mjs's frictionKey for the action's target (selector or store), '' when it has none.
+// Indexed so the pre-action warn asks "what do we know about THIS target" with one lookup instead
+// of carrying a snapshot of every risky selector taken at session start (see backfillSelectorKeys
+// near the friction functions for rows that pre-date the column).
+ensureColumn('actions', 'selector_key', 'selector_key TEXT');
+db.exec('CREATE INDEX IF NOT EXISTS idx_actions_selector_key ON actions(selector_key, id)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_actions_type_ok ON actions(type, ok)');
 ensureColumn('state_snapshots', 'agent_name', "agent_name TEXT NOT NULL DEFAULT 'default'");
 // Golden regression baseline - a snapshot tagged with a name here can be
 // diffed against by ANY future session (not just two ids within the same
@@ -984,8 +1004,8 @@ export function listSessions() {
 // ---------- actions ----------
 
 const stmtInsertAction = db.prepare(`
-  INSERT INTO actions (session_id, type, params_json, params_hash, result_json, result_hash, ok, error, started_at, ended_at, duration_ms, agent_name, origin, error_class)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO actions (session_id, type, params_json, params_hash, result_json, result_hash, ok, error, started_at, ended_at, duration_ms, agent_name, origin, error_class, selector_key)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtListActions = db.prepare('SELECT * FROM actions WHERE session_id = ? ORDER BY id DESC');
 const stmtListActionsAsc = db.prepare('SELECT * FROM actions WHERE session_id = ? ORDER BY id ASC');
@@ -1033,6 +1053,7 @@ export function logAction({ sessionId, type, params, result, ok, error, startedA
     agentName ?? 'default',
     origin ?? null,
     errorClass ?? null,
+    frictionKeyFor(type, params) ?? '',
   );
   return Number(info.lastInsertRowid);
 }
@@ -2117,6 +2138,104 @@ export function clearFrictionResolved(key) {
   const info = stmtDeleteFrictionResolution.run(key);
   if (info.changes === 0) throw new Error(`no such friction resolution: ${key}`);
   return { cleared: true, key };
+}
+
+const stmtGetFrictionResolution = db.prepare('SELECT key, type, selector, note, resolved_at FROM friction_resolutions WHERE key = ?');
+export function getFrictionResolution(key) {
+  return stmtGetFrictionResolution.get(key) ?? null;
+}
+
+// ---------- friction lookups (indexed by actions.selector_key) ----------
+
+// Rows written before the column existed have selector_key NULL; compute theirs once. '' means
+// "no friction target", so a row is never examined twice. Runs at load, inside one transaction.
+function backfillSelectorKeys() {
+  const pending = db.prepare('SELECT id, type, params_json, params_hash FROM actions WHERE selector_key IS NULL').all();
+  if (!pending.length) return;
+  const update = db.prepare('UPDATE actions SET selector_key = ? WHERE id = ?');
+  db.exec('BEGIN');
+  try {
+    for (const r of pending) {
+      let key = '';
+      try {
+        const json = resolveParamsJson(r.params_json, r.params_hash);
+        key = (json ? frictionKeyFor(r.type, JSON.parse(json)) : null) ?? '';
+      } catch { /* malformed params - treated as having no target, same as listAllActions skips them */ }
+      update.run(key, r.id);
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+}
+backfillSelectorKeys();
+
+function frictionActionRow(r) {
+  try {
+    const json = resolveParamsJson(r.params_json, r.params_hash);
+    return { ...r, params: json ? JSON.parse(json) : null, result: null };
+  } catch {
+    return null;
+  }
+}
+
+const stmtKeyRows = db.prepare('SELECT * FROM actions WHERE selector_key = ? AND session_id != ? ORDER BY id ASC');
+const stmtTypeEverFailed = db.prepare('SELECT 1 AS hit FROM actions WHERE type = ? AND ok = 0 AND session_id != ? LIMIT 1');
+
+// Every earlier-session action aimed at `key` (so the caller overlays THIS session's own live
+// counters on top without double counting), plus the full neighbourhood of the most recent
+// `recoverySessions` sessions that failed on it - the recovery scan needs the actions AROUND a
+// failure, not only the failure itself. Result bodies are not loaded. Chronological.
+export function listFrictionKeyHistory(key, { excludeSessionId = -1, recoverySessions = 5 } = {}) {
+  const keyRows = stmtKeyRows.all(key, Number(excludeSessionId)).map(frictionActionRow).filter(Boolean);
+  if (!keyRows.length) return [];
+  const failedSessions = [];
+  for (let i = keyRows.length - 1; i >= 0 && failedSessions.length < recoverySessions; i -= 1) {
+    if (!keyRows[i].ok && !failedSessions.includes(keyRows[i].session_id)) failedSessions.push(keyRows[i].session_id);
+  }
+  const byId = new Map(keyRows.map((r) => [r.id, r]));
+  for (const sessionId of failedSessions) {
+    for (const r of stmtListActionsAsc.all(sessionId)) if (!byId.has(r.id)) { const row = frictionActionRow(r); if (row) byId.set(r.id, row); }
+  }
+  return [...byId.values()].sort((a, b) => a.id - b.id);
+}
+
+// Has any session other than `excludeSessionId` ever recorded a failure of this action type?
+export function typeEverFailed(type, excludeSessionId = -1) {
+  return Boolean(stmtTypeEverFailed.get(type, Number(excludeSessionId)));
+}
+
+// ---------- friction per-session "already said" state ----------
+
+const stmtUpsertFrictionState = db.prepare(`
+  INSERT INTO friction_session_state (session_id, kind, key, at_live, count) VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT(session_id, kind, key) DO UPDATE SET at_live = excluded.at_live, count = excluded.count
+`);
+const stmtListFrictionState = db.prepare('SELECT kind, key, at_live, count FROM friction_session_state WHERE session_id = ?');
+const stmtClearFrictionState = db.prepare('DELETE FROM friction_session_state WHERE session_id = ?');
+
+export function saveFrictionWarn(sessionId, key, atLive, count) {
+  stmtUpsertFrictionState.run(Number(sessionId), 'warn', key, Number(atLive) || 0, Number(count) || 0);
+}
+
+export function saveFrictionAnnounce(sessionId, kind, key) {
+  stmtUpsertFrictionState.run(Number(sessionId), 'announce', `${kind}|${key}`, 0, 1);
+}
+
+export function listFrictionSessionState(sessionId) {
+  const rows = stmtListFrictionState.all(Number(sessionId));
+  return {
+    warns: rows.filter((r) => r.kind === 'warn').map(({ key, at_live, count }) => ({ key, at_live, count })),
+    announces: rows.filter((r) => r.kind === 'announce').map((r) => {
+      const i = r.key.indexOf('|');
+      return { kind: r.key.slice(0, i), key: r.key.slice(i + 1) };
+    }),
+  };
+}
+
+export function clearFrictionSessionState(sessionId) {
+  stmtClearFrictionState.run(Number(sessionId));
 }
 
 // ---------- token savings report ----------

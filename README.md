@@ -176,7 +176,12 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   selector-normalized and live: this session's own failures count at once, it is said once and
   escalates when ignored, and `friction resolve <type> <selector>` declares a selector fixed so
   its old history stops counting; failed replies carry the error class and what worked before;
-  `analytics` drafts known-issue candidates and weights ranking by time wasted;)
+  `analytics` drafts known-issue candidates and weights ranking by time wasted;
+  round 3 - roadmap V41 - made it one coherent system: one selector list for the warning and the
+  dashboard, history read on demand instead of frozen at session start, stores and macro steps
+  covered, `friction explain <type> <selector>` to see why it did or did not warn,
+  `friction config` for the thresholds in effect, `known-issues promote <candidateId>` to turn a draft
+  into a registry entry, and a "mark fixed?" suggestion at `session end`;)
   `friction unresolve <type> <selector>` undoes it and `friction list` shows every declaration)
   and `session end` reports `emergentFriction` - a type/selector failing for the first
   time ever, flagged before it has accumulated enough history to rank in the global

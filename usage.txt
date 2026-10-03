@@ -780,36 +780,47 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    reply (cli.mjs prints it as "Known issue: ..."), no separate
                                    "analytics" call needed.
                                    analytics also carries: selectorFriction (the richer per-selector
-                                   view behind the pre-action warn: selector-normalized so #row-41 and
-                                   #row-97 are one entry, dom.click/dom.clickWait merged, per-origin
+                                   view behind the pre-action warn AND the dashboard panel - the one
+                                   selector list: selector-normalized so #row-41 and #row-97 are one entry, dom.click/dom.clickWait merged, per-origin
                                    failure counts, "unresolved" failures since the last success,
                                    error classes, wastedMs, what worked right after a failure);
                                    knownIssueCandidates (the same unmatched error repeating - a DRAFT
                                    known-issues.json entry to review, never auto-written); and wastedMs
                                    on every failing type/selector. topFrictionItems severity is
-                                   failures + 1 point per second spent inside failed calls, so a
-                                   15s-timeout selector outranks ten instant misses.
+                                   failures + 1 point per second spent failing + half a point per retry,
+                                   so a 15s-timeout selector outranks ten instant misses.
 
-  friction resolve <type> <selector> [--note "..."]
+  friction resolve <type> <selector|store> [--note "..."]
                                    "mark fixed": analytics and the pre-action warn then count only
-                                   failures AFTER now for that selector (normalized, click and
-                                   clickWait are one). A relapse is visible as fresh failures.
-  friction unresolve <type> <selector>    undo it
+                                   failures AFTER now for that target (normalized, click and
+                                   clickWait are one; for an idb.* type the argument is a STORE).
+  friction unresolve <type> <selector|store>    undo it
   friction list                           every declaration, newest first
+  friction explain <type> <selector|store>  why it does / doesn't warn right now: per-origin history,
+                                   this session's failures, resolutions, recoveries ("worked 4 of 5
+                                   times"), the decision and the thresholds it was judged on
+  friction config                         the thresholds in effect (all WEBSCOUT_* env knobs)
+  known-issues promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm]
+                                   turns an analytics knownIssueCandidates draft into a real
+                                   known-issues.json entry. Needs the remediation (a draft cannot
+                                   know the fix); without --confirm it only prints the entry.
 
-  The pre-action selector-risk warning (x-webscout-selector-risk) is scoped, not global: history
-  counts only for the origin the tab is on (older rows with no origin count everywhere); a success
-  after the failures clears them ("unresolved" must reach 3); this session's own failures count
-  immediately (2 warns - no prior history needed); it is said once per selector per session and
-  again only after a NEW failure; at 3 same-session failures it is prefixed ESCALATED. It never
-  blocks, unless the relay runs with WEBSCOUT_RISKY_BLOCK=1: then an ESCALATED selector is refused
+  The pre-action warning (x-webscout-selector-risk) is scoped, not global: history comes from
+  EARLIER sessions via an indexed lookup (nothing frozen at session start) and counts only for the
+  origin the tab is on (older rows with no origin count everywhere); a success after the failures
+  clears them ("unresolved" must reach 3); this session's own failures count immediately (2 warns
+  - no prior history needed); it is said once per target per session (surviving a relay restart)
+  and again only after a NEW failure; at 3 same-session failures it is prefixed ESCALATED. It never
+  blocks, unless the relay runs with WEBSCOUT_RISKY_BLOCK=1: then an ESCALATED target is refused
   (409) until the call passes --ack-risk (MCP: ackRisk:true in the action's params). Tune with
   WEBSCOUT_RISKY_FAIL_THRESHOLD (3), WEBSCOUT_RISKY_LIVE_FAIL_THRESHOLD (2),
   WEBSCOUT_RISKY_ESCALATE_FAILS (3), WEBSCOUT_WASTE_MIN_CALLS (5), WEBSCOUT_SPIKE_FACTOR (3).
-  A failed /command also carries selectorFriction (error class, failures this session / earlier,
-  what worked before or class-specific advice) and emergentFriction (a brand-new failing type, or
-  a selector at its 2nd same-session failure with no history) in its error reply - the CLI prints
-  both. Session end adds a failure-rate SPIKE line for a type that already had history.
+  A store is a target too (idb.put/patch fail by store). A macro run checks each step the same way
+  (frictionWarnings on the reply; a failed step carries selectorFriction). A failed /command
+  carries selectorFriction (error class, failures this session / earlier, what worked before) and
+  emergentFriction in its error reply - the CLI prints both. Session end adds a failure-rate SPIKE
+  line for a type that already had history, and "mark fixed?" for a target that failed 3+ times
+  and then succeeded 3+ times in a row across 2+ sessions (resolveSuggestions).
 
   ask [--session <id>] "<question>"   ask the AI backend about the (current, or given) session's
                                        recorded actions/snapshots/diffs - persisted to the session's Q&A log

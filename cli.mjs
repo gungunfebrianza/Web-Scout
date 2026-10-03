@@ -17,6 +17,7 @@ import {
 } from './client.mjs';
 import { validateArgs, findMsysMangledArgs, findSpec } from './cli-spec.mjs';
 import { parseUsage, helpTopic, helpMissing } from './help.mjs';
+import { describeFailureContext } from './friction.mjs';
 import { resolveRelayPid, stopRelay, startRelay, restartRelay, RELAY_SOURCE_FILES } from './relay-control.mjs';
 import { sweepStale, formatSweep, scratchStats } from './scratch.mjs';
 
@@ -255,6 +256,7 @@ async function handleSession(sub, rawArgs) {
     if (ended.emergentFriction?.length) {
       for (const line of ended.emergentFriction) console.error(`NOTE: emergent friction - ${line}`);
     }
+    for (const suggestion of ended.resolveSuggestions ?? []) console.error(`NOTE: mark fixed? ${suggestion.hint}`);
     // One-line cost receipt at the natural end-of-session checkpoint -
     // catches waste the same day it happened instead of only on a later,
     // on-demand "token-report" call nobody remembered to run.
@@ -894,21 +896,47 @@ async function main() {
     return;
   }
 
-  // friction resolve <type> <selector> [--note "..."] / unresolve <type> <selector> / list
+  // friction resolve|unresolve <type> <selector|store> [--note "..."] / list / explain <type> <selector|store> / config
   // "Mark fixed": analytics and the pre-action warn then count only failures AFTER now.
+  // "explain": everything friction awareness knows about one target and why it warns (or doesn't).
+  // For an idb.* type the second argument is a STORE name (those fail by store, not selector).
   if (command === 'friction') {
     const sub = rest[0];
     let fargs = rest.slice(1);
     let note;
     ({ args: fargs, value: note } = extractFlag(fargs, '--note'));
     if (sub === 'list') { printResult(await request('GET', '/friction/resolutions')); return; }
-    if (sub === 'resolve' || sub === 'unresolve') {
-      const [type, selector] = fargs;
-      if (!type || !selector) throw new Error(`friction ${sub} requires <type> <selector>, e.g. friction ${sub} dom.click "#submit"`);
-      printResult(await request('POST', `/friction/${sub}`, { type, selector, note }));
+    if (sub === 'config') { printResult(await request('GET', '/friction/config')); return; }
+    if (sub === 'resolve' || sub === 'unresolve' || sub === 'explain') {
+      const [type, target] = fargs;
+      if (!type || !target) throw new Error(`friction ${sub} requires <type> <selector>, e.g. friction ${sub} dom.click "#submit" (for idb.* types the second argument is the store name)`);
+      const aim = type.startsWith('idb.') ? { store: target } : { selector: target };
+      if (sub === 'explain') {
+        const q = new URLSearchParams({ type, ...aim });
+        if (agentFlag) q.set('agent', agentFlag);
+        printResult(await request('GET', `/friction/explain?${q}`));
+      } else {
+        printResult(await request('POST', `/friction/${sub}`, { type, ...aim, note }));
+      }
       return;
     }
-    throw new Error('friction requires a subcommand: resolve <type> <selector> [--note "..."] | unresolve <type> <selector> | list');
+    throw new Error('friction requires a subcommand: explain <type> <selector> | resolve <type> <selector> [--note "..."] | unresolve <type> <selector> | list | config');
+  }
+
+  // known-issues promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm]
+  // Turns an analytics.knownIssueCandidates draft into a real known-issues.json entry. Without
+  // --confirm it only prints the entry it would write.
+  if (command === 'known-issues') {
+    if (rest[0] !== 'promote') throw new Error('known-issues supports: promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm]');
+    let kargs = rest.slice(1);
+    let remediation; let description; let signature; let confirm;
+    ({ args: kargs, value: remediation } = extractFlag(kargs, '--remediation'));
+    ({ args: kargs, value: description } = extractFlag(kargs, '--description'));
+    ({ args: kargs, value: signature } = extractFlag(kargs, '--signature'));
+    ({ args: kargs, value: confirm } = extractBooleanFlag(kargs, '--confirm'));
+    if (!kargs[0]) throw new Error('known-issues promote requires <candidateId> (from "analytics" -> knownIssueCandidates[].draft.id)');
+    printResult(await request('POST', '/known-issues/promote', { id: kargs[0], remediation, description, signature, confirm: confirm === true }));
+    return;
   }
 
   if (command === 'search') {
@@ -1475,10 +1503,7 @@ main().catch((err) => {
   // What friction awareness knew about THIS failure (see relay.mjs's dispatchTracked): the error
   // class, how many times it has failed this session, what worked after a failure last time,
   // and any pattern that is brand new - in the error itself, not only in a pre-action header.
-  if (err.selectorFriction) {
-    const f = err.selectorFriction;
-    console.error(`Friction: ${f.errorClass ?? 'unclassified'} failure, ${f.failuresThisSession}x this session, ${f.priorFailures}x in earlier sessions${f.workedBefore ? ` - ${f.workedBefore}` : f.advice ? ` - ${f.advice}` : ''}`);
-  }
+  if (err.selectorFriction) console.error(describeFailureContext(err.selectorFriction));
   for (const line of err.emergentFriction ?? []) console.error(`NOTE: emergent friction - ${line}`);
   process.exitCode = 1;
 });

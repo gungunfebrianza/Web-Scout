@@ -356,6 +356,10 @@
   .heatmap-table { border-collapse: collapse; font-size: 11px; }
   .heatmap-table th, .heatmap-table td { border: 1px solid var(--border-hud); padding: 3px 6px; white-space: nowrap; }
   .heatmap-table th { position: sticky; top: 0; background: var(--bg-panel); }
+  #frictionDetail { font-size: 11px; margin-top: 8px; }
+  #frictionDetail h3 { font-size: 11px; margin: 10px 0 4px; }
+  #frictionDetail ul { margin: 0; padding-left: 16px; }
+  .friction-act { font-size: 10px; padding: 1px 6px; cursor: pointer; }
   .heat-cell { text-align: center; color: var(--ink-primary); cursor: help; }
   .heat-cell[data-reveal] { cursor: pointer; }
   .heat-cell.heat-empty { color: var(--ink-muted); background: var(--bg-panel-inset) !important; }
@@ -685,9 +689,10 @@
 
   <section class="hud-section hud-scroll-col" id="selectorsSection">
   <h2>Recurring selector failures</h2>
-  <div class="muted">selectors that failed more than once, linked to the action type they failed on - line thickness = fail count</div>
+  <div class="muted">selectors and stores that failed more than once, linked to the action type they failed on - line thickness = fail count; the table is what the pre-action warning is built from</div>
   <div class="hud-scroll-body" id="selectorGraphContainer"></div>
   <div id="selectorGraphEmpty" class="empty" hidden>No repeated selector failures yet.</div>
+  <div id="frictionDetail"></div>
   </section>
 </div>
 
@@ -3824,7 +3829,7 @@ function renderHeatmap(a) {
 // ---------- Recurring-selector failure graph (bipartite: type <-> selector) ----------
 function renderSelectorGraph(a) {
   const container = el('selectorGraphContainer');
-  const items = (a.topFailedSelectors || []).slice(0, 12);
+  const items = (a.selectorFriction || a.topFailedSelectors || []).slice(0, 12);
   if (!items.length) { container.innerHTML = ''; el('selectorGraphEmpty').hidden = false; return; }
   el('selectorGraphEmpty').hidden = true;
   const types = [...new Set(items.map((i) => i.type))];
@@ -3848,6 +3853,58 @@ function renderSelectorGraph(a) {
   }).join('');
   container.innerHTML = `<svg class="selector-graph-svg" viewBox="0 0 ${width} ${height}" style="width:100%; height:${height}px;">${lines}${typeNodes}${selNodes}</svg>`;
 }
+
+// ---------- Friction detail: the same data the pre-action warning uses, with the controls ----------
+// One list (analytics.selectorFriction) feeds the graph above, this table and the agent's warning,
+// so they cannot disagree. Controls are the ones the CLI has: mark fixed / undo, promote a candidate.
+function frictionTargetLabel(f) { return (f.targetKind === 'store' ? 'store ' : '') + f.selector; }
+function frictionRecoveryText(r) {
+  if (!r) return '';
+  const what = r.kind === 'alt-selector' ? esc(r.selector) : esc(r.type + (r.selector ? ' ' + r.selector : ''));
+  return `${what} (${r.worked}/${r.of})`;
+}
+function renderFrictionDetail(a) {
+  const box = el('frictionDetail');
+  if (!box) return;
+  const rows = (a.selectorFriction || []).slice(0, 12);
+  const classMix = (f) => Object.entries(f.errorClasses || {}).sort((x, y) => y[1] - x[1]).map(([k, n]) => `${esc(k)} ${n}`).join(', ');
+  const originCount = (f) => Object.keys(f.origins || {}).filter(Boolean).length;
+  const body = rows.map((f) => `<tr>
+    <td title="${esc(f.key)}">${esc(frictionTargetLabel(f))}</td><td>${esc(f.type)}</td><td>${f.failCount}</td>
+    <td>${f.wastedMs >= 1000 ? (f.wastedMs / 1000).toFixed(1) + 's' : f.wastedMs + 'ms'}</td><td>${f.retries || 0}</td><td>${f.score}</td>
+    <td>${classMix(f)}</td><td>${originCount(f) || '-'}</td><td>${frictionRecoveryText(f.recovery)}</td>
+    <td><button class="friction-act" data-friction-act="resolve" data-type="${esc(f.type)}" data-target="${esc(f.selector)}" data-kind="${esc(f.targetKind || 'selector')}">mark fixed</button></td></tr>`).join('');
+  const table = rows.length ? `<table class="heatmap-table"><thead><tr><th>target</th><th>type</th><th>fails</th><th>wasted</th><th>retries</th><th>cost</th><th>error classes</th><th>origins</th><th>worked after</th><th></th></tr></thead><tbody>${body}</tbody></table>` : '';
+  const suggestions = (a.resolveSuggestions || []).map((s) => `<li>${esc(s.hint)} <button class="friction-act" data-friction-act="resolve" data-type="${esc(s.type)}" data-target="${esc(s.selector)}" data-kind="${esc(s.targetKind || 'selector')}">mark fixed</button></li>`).join('');
+  const resolved = (a.resolvedFriction || []).map((r) => `<li>${esc(r.type)} ${esc(r.selector)} fixed at ${esc(fmtTime(r.resolvedAt))}${r.note ? ' - ' + esc(r.note) : ''} <button class="friction-act" data-friction-act="unresolve" data-type="${esc(r.type)}" data-target="${esc(r.selector)}" data-kind="${/^idb\./.test(r.type) ? 'store' : 'selector'}">undo</button></li>`).join('');
+  const candidates = (a.knownIssueCandidates || []).map((c) => `<li><code>${esc(c.draft.signature)}</code> seen ${c.count}x in ${c.sessionCount} session(s) [${esc(c.errorClass)}] <button class="friction-act" data-friction-act="promote" data-id="${esc(c.draft.id)}">promote to known issue</button></li>`).join('');
+  box.innerHTML = table
+    + (suggestions ? `<h3>Probably fixed - declare it?</h3><ul>${suggestions}</ul>` : '')
+    + (candidates ? `<h3>Unrecognised repeating errors</h3><ul>${candidates}</ul>` : '')
+    + (resolved ? `<h3>Marked fixed</h3><ul>${resolved}</ul>` : '');
+}
+el('frictionDetail')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-friction-act]');
+  if (!btn) return;
+  const act = btn.dataset.frictionAct;
+  btn.disabled = true;
+  try {
+    if (act === 'promote') {
+      const remediation = window.prompt('What is the fix for this error? (required - a draft cannot know it)');
+      if (!remediation) { btn.disabled = false; return; }
+      const description = window.prompt('Root cause, in one line? (required)');
+      if (!description) { btn.disabled = false; return; }
+      await api('POST', '/known-issues/promote', { id: btn.dataset.id, remediation, description, confirm: true });
+    } else {
+      const aim = btn.dataset.kind === 'store' ? { store: btn.dataset.target } : { selector: btn.dataset.target };
+      await api('POST', '/friction/' + act, { type: btn.dataset.type, ...aim });
+    }
+    await refreshFriction();
+  } catch (err) {
+    btn.disabled = false;
+    window.alert('friction: ' + err.message);
+  }
+});
 
 // ---------- Cross-session cumulative token burn ----------
 function renderBurnChart(a) {
@@ -4322,6 +4379,7 @@ el('hostSessionsTable').addEventListener('click', (e) => {
 function renderCrossSessionCharts(a) {
   renderHeatmap(a);
   renderSelectorGraph(a);
+  renderFrictionDetail(a);
   renderBurnChart(a);
   renderDurationChart(a);
   renderWasteBySession(a);
@@ -4799,7 +4857,7 @@ const analyticsRows = (pick) => { const a = lastAnalyticsData; return a ? pick(a
 const PANELS = {
   allSessionsHero: { group: 'global', wide: true, label: 'Overview', count: () => (lastAnalyticsData ? { n: lastAnalyticsData.totals.sessions, title: 'sessions ever recorded' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => Object.entries(a.totals).map(([metric, value]) => ({ metric, value }))) },
   heatmapSection: { group: 'global', label: 'Heatmap', autoEmpty: true, count: () => (lastAnalyticsData ? { n: lastAnalyticsData.heatmap?.types?.length ?? 0, title: 'action types tracked' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.heatmap?.cells ?? []) },
-  selectorsSection: { group: 'global', label: 'Selectors', autoEmpty: true, failLabel: 'recurring', count: () => { const n = lastAnalyticsData?.topFailedSelectors?.length; return n === undefined ? null : { n, fail: n, title: 'selectors that failed more than once' }; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.topFailedSelectors ?? []) },
+  selectorsSection: { group: 'global', label: 'Selectors', autoEmpty: true, failLabel: 'recurring', count: () => { const n = lastAnalyticsData?.selectorFriction?.length; return n === undefined ? null : { n, fail: n, title: 'selectors that failed more than once' }; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.selectorFriction ?? []) },
   burnSection: { group: 'global', wide: true, label: 'Burn', autoEmpty: true, failLabel: 'over budget', count: () => { const t = lastAnalyticsData?.sessionTokenTotals; return t ? { n: t.filter((s) => s.totalEstTokens > 0).length, fail: t.filter((s) => s.tokenBudget && s.totalEstTokens > s.tokenBudget).length, title: 'sessions with recorded token use' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.sessionTokenTotals ?? []) },
   savingsSection: { group: 'global', wide: true, label: 'Savings', autoEmpty: true, count: () => { const s = lastSavingsReport?.savings; return s?.ledgers ? { n: s.ledgers.filter((l) => l.countedInTotal).length, text: `~${fmtK(s.byKind?.storage?.estTokensSaved ?? 0)} tok-eq.`, title: 'savings mechanisms counted in the totals (disk bytes avoided, not tokens a caller avoided)' } : null; }, refresh: () => refreshSavings(true), exportRows: () => (lastSavingsReport?.savings?.ledgers ?? []).map((l) => ({ mechanism: l.label, kind: l.kind, counted: l.countedInTotal, bytesSaved: l.bytesSaved, estTokensEquivalent: l.estTokensSaved, reductionPct: l.reductionPct, refsTotal: l.refs?.total ?? null, refsStored: l.refs?.unique ?? null })) },
   repairSection: { group: 'global', label: 'Self-repair', count: () => (lastRepairConfig ? { n: lastRepairConfig.enabled ? 1 : 0, title: lastRepairConfig.enabled ? 'self-repair loop is ENABLED' : 'self-repair loop is disabled' } : null), refresh: () => refreshRepairStatus(), exportRows: () => lastRepairConfig?.history ?? null },
@@ -4929,7 +4987,7 @@ function panelTickSig(id, sig) {
   return panelTick(id, changed);
 }
 function panelTickAnalytics(a) {
-  const slices = { allSessionsHero: [a.totals, a.failureRateByType], heatmapSection: a.heatmap, selectorsSection: a.topFailedSelectors, burnSection: a.sessionTokenTotals, durationSection: a.durationByType, wasteBySessionSection: a.wasteBySession, punchcardSection: a.activityPunchcard };
+  const slices = { allSessionsHero: [a.totals, a.failureRateByType], heatmapSection: a.heatmap, selectorsSection: a.selectorFriction, burnSection: a.sessionTokenTotals, durationSection: a.durationByType, wasteBySessionSection: a.wasteBySession, punchcardSection: a.activityPunchcard };
   for (const [id, slice] of Object.entries(slices)) panelTickSig(id, JSON.stringify(slice ?? null));
 }
 

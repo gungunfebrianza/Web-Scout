@@ -2969,6 +2969,52 @@ the session-end diff remains the exact one.
 
 Tests: `friction.test.mjs` (pure), `friction-awareness-live.test.mjs` (real relay + fake tab).
 
+## V41 - friction awareness, round 3: one coherent system (implemented)
+
+Driven by what V40 left open: two selector lists that disagreed, a snapshot that froze at session
+start, state that died with the relay, and four front ends each describing friction their own way.
+No new detector - the same facts, said from one place.
+
+- **One selector list.** `topFailedSelectors` (exact-string, no origin, not success-aware) is gone as a
+  computation; it is now the same array as `selectorFriction`, and the dashboard's panel and counters read
+  that. The panel can no longer say one thing while the agent's warning says another.
+- **No frozen snapshot.** `actions.selector_key` (+ index; rows from before the column are backfilled once at
+  startup) makes "what do we know about this target" one lookup, over OTHER sessions only - this session's own
+  failures are the live tracker's. So a selector that failed exactly once before is seen as exactly that
+  (V40's snapshot only held 2+), and the live "emerging pattern" note is exact. The session snapshot now
+  holds only macro-nudge candidates.
+- **One facts object.** `frictionFactsFor()` (relay.mjs) builds history + live + warn state + resolution +
+  decision; the pre-action header, the failure's error body, the macro runner and `friction explain` all
+  read it. `friction-contract.test.mjs` pins that they agree. The CLI and the MCP server print a failure's
+  friction through one `describeFailureContext`.
+- **Survives a restart.** Live counters are rebuilt from the action log on first touch of a session, and the
+  "already said" state (warnings, one-shot live notes) is stored in `friction_session_state`, so a restarted
+  relay neither forgets nor re-warns from scratch.
+- **`friction explain <type> <selector|store>`** (GET /friction/explain): per-origin history, this session,
+  the resolution, recoveries, the decision with its reason and the thresholds. Read-only: it never spends the
+  once-per-session warning. `friction config` prints the thresholds in effect (also on `analytics`).
+- **Stores are targets.** idb.* writes fail by store; the key is `family::target` (`idb.patch` is `idb.put`),
+  a store never collides with a selector. Warnings, resolve, explain and the ranking all cover them.
+  Not done: timeouts keyed by page (no page-level target exists on an action yet).
+- **Cost ranking** adds retries (a failure re-attempted in the same session, half a point each) to failures and
+  time wasted; `score` orders `selectorFriction`. **Recoveries** are aggregated over every failure and ranked by
+  how often they worked: the warning says "worked 4 of 5 times", not whichever happened last.
+- **Macro runs** check each step like a direct command (`frictionWarnings` on the reply; a failed step carries
+  its `selectorFriction`).
+- **"Mark fixed?"** At `session end` (and in `analytics.resolveSuggestions`): a target that failed 3+ times and
+  has since succeeded 3+ times in a row across 2+ sessions is offered with the exact `friction resolve`
+  command. Thresholds: `WEBSCOUT_RESOLVE_SUGGEST_MIN_FAILS/_OKS/_SESSIONS`.
+- **`known-issues promote <candidateId> --remediation "..."`**: dry run unless `--confirm`; refuses a missing
+  remediation, a TODO description and a duplicate id; appends to known-issues.json.
+- **One surface.** MCP `webscout_meta.friction {sub: explain|resolve|unresolve|list|config|promote}` mirrors the
+  CLI (the V40 "not done"); the tool list stayed under its cap by tightening other descriptions, not by raising
+  it. The dashboard's selector panel gained a table (cost, wasted time, retries, error classes, origins, what
+  worked after) with mark-fixed / undo / promote controls and the "probably fixed" suggestions.
+- **Flaky test fixed**: `client-notes.test.mjs` now points the stale-warning cooldown at a private file.
+
+Tests: `friction.test.mjs` (pure), `friction-round3.test.mjs` (relay, incl. a real restart),
+`friction-contract.test.mjs`.
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

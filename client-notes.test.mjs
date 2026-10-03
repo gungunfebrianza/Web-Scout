@@ -26,7 +26,12 @@ const server = http.createServer((_req, res) => {
 });
 await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
 process.env.WEBSCOUT_PORT = String(port);
-after(() => server.close());
+// The in-process tests below share client.mjs's persisted stale-warning cooldown; pointed at the
+// default (cwd) file, a stale-relay warning recorded by an earlier run would silence the next run's
+// assertion. A private per-run cache file makes them deterministic.
+const isolatedWarnCacheDir = tmpDir('webscout-warn-cache-');
+process.env.WEBSCOUT_WARN_CACHE_PATH = path.join(isolatedWarnCacheDir, 'cache.json');
+after(() => { server.close(); fs.rmSync(isolatedWarnCacheDir, { recursive: true, force: true }); });
 
 const { request, collectNotes } = await import('./client.mjs');
 

@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {
   normalizeSelector, typeFamily, frictionKey, classifyError, buildSelectorFriction, historyForOrigin,
   createFrictionTracker, assessSelectorRisk, failureContext, findRateSpikes, buildKnownIssueCandidates,
+  frictionTarget, frictionKeyFor, evaluateSelectorRisk, findResolveSuggestions, describeFailureContext, frictionConfig,
 } from './friction.mjs';
 
 let clock = 0;
@@ -196,4 +197,138 @@ test('buildKnownIssueCandidates drafts an entry for a repeating unmatched error,
   assert.equal(candidate.draft.signature, 'Element not found');
   assert.match(candidate.draft.id, /^candidate-element-not-found/);
   assert.equal(buildKnownIssueCandidates(rows, { matchKnownIssues: () => [{ id: 'known' }] }).length, 0);
+});
+
+// ---------- round 3 ----------
+
+test('targets: a selector or (for idb.*) a store; put/patch share a key, a store never collides with a selector', () => {
+  assert.deepEqual(frictionTarget('dom.click', { selector: '#a' }), { kind: 'selector', value: '#a' });
+  assert.deepEqual(frictionTarget('idb.put', { store: 'orders' }), { kind: 'store', value: 'orders' });
+  assert.equal(frictionTarget('dom.click', { store: 'orders' }), null, 'a store only aims idb.* commands');
+  assert.equal(frictionTarget('dom.click', {}), null);
+  assert.equal(frictionKeyFor('idb.put', { store: 'orders' }), frictionKeyFor('idb.patch', { store: 'orders' }));
+  assert.notEqual(frictionKeyFor('idb.put', { store: 'orders' }), frictionKeyFor('idb.put', { store: 'tags' }));
+  assert.notEqual(frictionKeyFor('idb.put', { store: 'x' }), frictionKey('idb.put', 'x'), 'store x is not selector x');
+});
+
+test('buildSelectorFriction: stores accumulate like selectors', () => {
+  const rows = [row({ type: 'idb.put', params: { store: 'orders' } }), row({ type: 'idb.patch', params: { store: 'orders' } })];
+  const [entry] = buildSelectorFriction(rows);
+  assert.equal(entry.targetKind, 'store');
+  assert.equal(entry.selector, 'orders');
+  assert.equal(entry.failCount, 2);
+});
+
+test('buildSelectorFriction: recoveries are aggregated across failures and carry worked/of', () => {
+  const rows = [];
+  for (let s = 1; s <= 3; s += 1) {
+    rows.push(row({ session: s, selector: '#primary' }));
+    rows.push(row({ session: s, selector: '#fallback', ok: true }));
+  }
+  rows.push(row({ session: 4, selector: '#primary' }));
+  rows.push(row({ session: 4, type: 'dom.wait', selector: '#spinner', ok: true }));
+  const [entry] = buildSelectorFriction(rows);
+  assert.equal(entry.failCount, 4);
+  assert.deepEqual(entry.recoveries.map((r) => [r.kind, r.worked, r.of]), [['alt-selector', 3, 4], ['wait', 1, 4]]);
+  assert.equal(entry.recovery.selector, '#fallback', 'the top recovery is also exposed as `recovery`');
+});
+
+test('buildSelectorFriction: retries and time wasted raise the cost score; ranking follows it', () => {
+  const rows = [
+    row({ session: 1, selector: '#fast-miss' }), row({ session: 2, selector: '#fast-miss' }),
+    row({ session: 3, selector: '#slow', ms: 12000 }), row({ session: 3, selector: '#slow', ms: 12000 }),
+  ];
+  const entries = buildSelectorFriction(rows);
+  assert.equal(entries[0].selector, '#slow', 'time wasted outranks an equal count of instant misses');
+  const slow = entries[0];
+  assert.equal(slow.retries, 1, 'the second attempt in the same session is a retry');
+  assert.ok(slow.score >= slow.failCount + 24);
+  assert.equal(entries.find((e) => e.selector === '#fast-miss').retries, 0, 'a failure in a different session is not a retry');
+});
+
+test('buildSelectorFriction: minFails 1 returns a single prior failure too', () => {
+  const rows = [row({ selector: '#once' })];
+  assert.equal(buildSelectorFriction(rows).length, 0);
+  assert.equal(buildSelectorFriction(rows, { minFails: 1 }).length, 1);
+});
+
+test('evaluateSelectorRisk explains a quiet decision and returns the numbers it used', () => {
+  const entry = buildSelectorFriction([row({ selector: '#a' }), row({ selector: '#a' })])[0];
+  const quiet = evaluateSelectorRisk({ type: 'dom.click', selector: '#a', entry, live: null, state: null, origin: null });
+  assert.equal(quiet.assessment, null);
+  assert.match(quiet.reason, /quiet: 2 unresolved earlier failure\(s\) \+ 0 this session/);
+  assert.equal(quiet.facts.historyUnresolved, 2);
+
+  const worked = evaluateSelectorRisk({ type: 'dom.click', selector: '#a', entry, live: { unresolved: 0, fails: 1, lastOkAt: 'x' }, state: null });
+  assert.match(worked.reason, /succeeded earlier in this session/);
+
+  const said = evaluateSelectorRisk({ type: 'dom.click', selector: '#a', entry, live: { unresolved: 2, fails: 2, errorClass: 'timeout' }, state: { atLive: 2, count: 1 } });
+  assert.equal(said.assessment, null);
+  assert.match(said.reason, /already warned/);
+
+  const loud = evaluateSelectorRisk({ type: 'dom.click', selector: '#a', entry, live: { unresolved: 2, fails: 2, errorClass: 'timeout' }, state: null });
+  assert.equal(loud.assessment.level, 'warn');
+  assert.equal(assessSelectorRisk({ type: 'dom.click', selector: '#a', entry, live: { unresolved: 2, fails: 2, errorClass: 'timeout' }, state: null }).message, loud.assessment.message, 'assessSelectorRisk is the same decision');
+});
+
+test('evaluateSelectorRisk words a store target as a store, and the recovery with its odds', () => {
+  const rows = [];
+  for (let s = 1; s <= 2; s += 1) { rows.push(row({ session: s, selector: '#p' })); rows.push(row({ session: s, selector: '#alt', ok: true })); }
+  const entry = buildSelectorFriction(rows, { minFails: 1 })[0];
+  const msg = evaluateSelectorRisk({ type: 'dom.click', selector: '#p', entry, live: { unresolved: 1, fails: 1 }, state: null }).assessment.message;
+  assert.match(msg, /"#alt" \(dom\.click\) worked \(2 of 2 times\)/);
+  const store = evaluateSelectorRisk({ type: 'idb.put', selector: 'orders', targetKind: 'store', entry: undefined, live: { unresolved: 2, fails: 2 }, state: null }).assessment.message;
+  assert.match(store, /^store "orders" \(idb\.put\)/);
+});
+
+test('tracker: persist hooks fire, and restore rebuilds counters + the already-said state', () => {
+  const saved = [];
+  const t = createFrictionTracker({ persist: { warn: (...a) => saved.push(['warn', ...a]), announce: (...a) => saved.push(['announce', ...a]) } });
+  t.recordWarn(7, 'k', 2);
+  assert.equal(t.announceOnce(7, 'type', 'dom.click'), true);
+  assert.equal(t.announceOnce(7, 'type', 'dom.click'), false);
+  assert.deepEqual(saved, [['warn', 7, 'k', 2, 1], ['announce', 7, 'type', 'dom.click']]);
+
+  const fresh = createFrictionTracker();
+  const key = frictionKey('dom.click', '#r');
+  assert.equal(fresh.has(7), false);
+  fresh.restore(7, [
+    { type: 'dom.click', params: { selector: '#r' }, ok: 0, error: 'Element not found', duration_ms: 5, started_at: 't1' },
+    { type: 'dom.click', params: { selector: '#r' }, ok: 0, error: 'Element not found', duration_ms: 5, started_at: 't2' },
+  ], { warns: [{ key, at_live: 2, count: 1 }], announces: [{ kind: 'type', key: 'dom.click' }] });
+  assert.equal(fresh.get(7, key).fails, 2);
+  assert.equal(fresh.warnState(7, key).atLive, 2);
+  assert.equal(fresh.announceOnce(7, 'type', 'dom.click'), false, 'a restored one-shot note is not repeated');
+  assert.deepEqual(fresh.keys(7), [key]);
+});
+
+test('findResolveSuggestions: failed 3+, then 3+ consecutive successes across 2+ sessions - and nothing less', () => {
+  const rows = [
+    row({ session: 1, selector: '#f' }), row({ session: 1, selector: '#f' }), row({ session: 1, selector: '#f' }),
+    row({ session: 2, selector: '#f', ok: true }), row({ session: 2, selector: '#f', ok: true }),
+  ];
+  assert.equal(findResolveSuggestions(rows).length, 0, 'only 2 successes, one session');
+  rows.push(row({ session: 3, selector: '#f', ok: true }));
+  const [s] = findResolveSuggestions(rows);
+  assert.equal(s.failures, 3);
+  assert.equal(s.okStreak, 3);
+  assert.equal(s.sessions, 2);
+  assert.match(s.hint, /friction resolve dom\.click "#f"/);
+
+  assert.equal(findResolveSuggestions([...rows, row({ session: 3, selector: '#f' })]).length, 0, 'a fresh failure breaks the streak');
+  const resolvedAt = rows[rows.length - 1].started_at;
+  assert.equal(findResolveSuggestions(rows, { resolutions: new Map([[frictionKey('dom.click', '#f'), resolvedAt]]) }).length, 0, 'already declared fixed');
+});
+
+test('describeFailureContext is the one rendering used by the CLI and the MCP server', () => {
+  const ctx = failureContext({ type: 'dom.click', selector: '#a', entry: undefined, live: { errorClass: 'timeout', fails: 2 }, origin: null });
+  assert.equal(describeFailureContext(ctx), 'Friction: timeout failure, 2x this session, 0x in earlier sessions - the page was slow or never replied - add a settle/dom.wait first, or check "ping".');
+  assert.equal(describeFailureContext(null), null);
+});
+
+test('frictionConfig reports the thresholds in effect', () => {
+  const c = frictionConfig();
+  assert.equal(typeof c.riskyFailThreshold, 'number');
+  assert.equal(typeof c.resolveSuggest.minOks, 'number');
+  assert.equal(typeof c.block, 'boolean');
 });

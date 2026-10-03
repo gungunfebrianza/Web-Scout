@@ -37,6 +37,7 @@ import {
   request, BASE, netHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, collectNotes, ensureFreshRelayForNewSession,
   manifestPath, readManifest, writeManifest,
 } from './client.mjs';
+import { describeFailureContext } from './friction.mjs';
 
 const SERVER_NAME = 'web-scout';
 const SERVER_VERSION = '0.27.0'; // bumped alongside docs/web-scout-roadmap.md's V39 entry
@@ -88,13 +89,14 @@ function requireField(params, name) {
 const TOOLS = [
   {
     name: 'webscout_meta',
-    description: 'Relay/session status and cross-session utilities (read-only).\n'
+    description: 'Relay/session status and cross-session utilities.\n'
       + 'Actions:\n'
       + '  status {} - relay health, agents, active session, DB_VERSION drift\n'
       + '  agents {} - connected multi-tab agent names\n'
       + '  analytics {} - Friction Analytics: recurring failure patterns across ALL sessions\n'
+      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?} - sub: explain (why it warns), resolve|unresolve (mark fixed), list, config, promote (candidate id -> known-issues.json; confirm writes)\n'
       + '  search {q} - full-text search across every session\'s actions\n'
-      + '  db_version_check {agent?, dbJsPath?} - js/db.js\'s DB_VERSION (default "js/db.js") vs the tab\'s LIVE IndexedDB version; on drift also probes whether opening at the source version is blocked now, and by what\n'
+      + '  db_version_check {agent?, dbJsPath?} - js/db.js\'s DB_VERSION vs the tab\'s LIVE IndexedDB version; on drift also probes whether opening at the source version is blocked\n'
       + '  dashboard_url {} - the realtime dashboard URL (does not open a browser)\n'
       + '  ping {agent?} - fast liveness probe (no DOM/IndexedDB work) -> {alive, ...}\n'
       + '  token_report {sessionId?} - estimated tokens per command type (+ byTarget/byIntent/loops/redundantCalls/byMacro with sessionId); without it the ALL-TIME report incl. savings ledgers\n'
@@ -107,6 +109,22 @@ const TOOLS = [
       agents: () => request('GET', '/agents'),
       analytics: () => request('GET', '/analytics'),
       search: (p) => request('GET', `/search?q=${encodeURIComponent(requireField(p, 'q'))}`),
+      friction: (p) => {
+        const sub = requireField(p, 'sub');
+        if (sub === 'list') return request('GET', '/friction/resolutions');
+        if (sub === 'config') return request('GET', '/friction/config');
+        if (sub === 'promote') {
+          return request('POST', '/known-issues/promote', { id: requireField(p, 'id'), remediation: p.remediation, description: p.description, signature: p.signature, confirm: p.confirm === true });
+        }
+        if (sub !== 'explain' && sub !== 'resolve' && sub !== 'unresolve') throw new Error('params.sub must be explain|resolve|unresolve|list|config|promote');
+        const target = { type: requireField(p, 'type'), selector: p.selector, store: p.store };
+        if (sub !== 'explain') return request('POST', `/friction/${sub}`, { ...target, note: p.note });
+        const q = new URLSearchParams({ type: target.type });
+        if (p.selector) q.set('selector', p.selector);
+        if (p.store) q.set('store', p.store);
+        if (p.agent) q.set('agent', p.agent);
+        return request('GET', `/friction/explain?${q}`);
+      },
       db_version_check: (p) => dbVersionCheck({ agent: p?.agent, dbJsPath: p?.dbJsPath }),
       dashboard_url: () => ({ url: `${BASE}/dashboard` }),
     },
@@ -115,7 +133,7 @@ const TOOLS = [
     name: 'webscout_session',
     description: 'Session lifecycle and evidence. A goal MUST be declared (start) before any dom/idb/net/console/eval/page action is accepted; exactly one session is active at a time.\n'
       + 'Actions:\n'
-      + '  start {goal, context?, strictCrv?, strictCrvStores?, crvCompact?, tags?, tokenBudget?, noBriefing?, lean?, allowRemote?, ifStaleMin?} - declare a session; becomes the active one. ifStaleMin: a conflicting active session at least that many minutes old is ended first (younger still refuses). strictCrvStores scopes every strictCrv auto-snapshot (omitting it on a real-size db WILL time out). crvCompact adds a change preview to every strictCrv reply (verify\'s pass shape), not just counts.tokenBudget arms a read guard: past 60% of it reads over ~3000 estimated tokens return their shape (noGuard overrides), past 85% ~1000, rows as {columns, rows}. lean makes read shaping the DEFAULT (tables; a pointer/delta for a repeat of a result you hold; the shape of a body over ~4000 tokens; noGuard gives the body). The reply carries a `briefing` (stores + counts, DB version, tab freshness) unless noBriefing. Pinned to its origin: a later write/eval refuses if that changed, or is non-local, unless allowRemote\n'
+      + '  start {goal, context?, strictCrv?, strictCrvStores?, crvCompact?, tags?, tokenBudget?, noBriefing?, lean?, allowRemote?, ifStaleMin?} - declare a session; becomes the active one. ifStaleMin: a conflicting active session at least that many minutes old is ended first (younger still refuses). strictCrvStores scopes strictCrv auto-snapshots (omitted on a real-size db it WILL time out). crvCompact adds a change preview to each strictCrv reply. tokenBudget arms a read guard: past 60% reads over ~3000 tokens return their shape (noGuard overrides), past 85% ~1000. lean makes shaping the DEFAULT (tables; pointer/delta for a repeat; the shape of a body over ~4000 tokens; noGuard gives the body). The reply carries a `briefing` (stores + counts, DB version, tab freshness) unless noBriefing. Pinned to its origin: a later write/eval refuses if that changed, or is non-local, unless allowRemote\n'
       + '  end {id?, trace?} - end a session (default: the active one); trace also exports it (anonymised) to grow the trace.mjs replay corpus, result.trace: {file, events, reads}\n'
       + '  current {} - the active session, or {active:false}\n'
       + '  list {} - every session, newest first\n'
@@ -213,8 +231,8 @@ const TOOLS = [
       + '  rect {selector, +shape} - getBoundingClientRect\n'
       + '  style {selector, properties?, +shape} - computed style (curated defaults, or a given array of property names)\n'
       + '  wait {selector, text?, timeoutMs?, changed?, stable?, stableCount?} - poll until selector matches (and, if text given, contains it), '
-      + 'or - with changed:true - until its textContent differs from what it was at call time (use for a placeholder-swapped-'
-      + 'for-a-real-result pattern, e.g. an AI-review button, instead of predicting the eventual text); stable:true waits until the match count holds for stableCount consecutive polls\n'
+      + 'or - with changed:true - until its textContent differs from what it was at call time (for a placeholder swapped '
+      + 'for a real result, instead of predicting its text); stable:true waits until the match count holds for stableCount consecutive polls\n'
       + '  click_wait {selector, nth?, waitSelector?, text?, timeoutMs?, changed?, stable?, stableCount?} - click, then wait for a (possibly different) waitSelector to reach a state, in ONE round trip\n'
       + '  pick {timeoutMs?} - BLOCKS until a HUMAN clicks something in the real tab; returns a selector for it. No programmatic target.\n'
       + '  settle {selector?, quietMs?, timeoutMs?} - wait until the DOM under selector (default document.body) has had no mutations for quietMs (default 300)\n'
@@ -265,7 +283,7 @@ const TOOLS = [
     description: 'IndexedDB read/write plus persisted snapshot/diff/verify/restore, against the active session\'s tab. Every action takes optional agent.\n'
       + 'Actions:\n'
       + '  list {stores?, nonEmpty?, +shape} - store names + cheap row counts (store.count(), not a dump) - check before an unscoped snapshot; stores: only those (unknown ones come back as missing), nonEmpty: skip empty stores\n'
-      + '  dump {store, where?, fields?, limit?, countOnly?, +shape} - rows + real keyPath. where (exact-equality field map), fields (names to keep) and limit filter/project IN THE PAGE - use them on any large store; countOnly: counts, no rows\n'
+      + '  dump {store, where?, fields?, limit?, countOnly?, +shape} - rows + real keyPath. where (exact-equality map), fields, limit filter IN THE PAGE - use on any large store; countOnly: counts, no rows\n'
       + '  get {store, key, fields?, +shape} - single-key lookup (store.get), not a scan; fields: keep only those keys\n'
       + '  snapshot {stores?, golden?, where?, since?} - capture + PERSIST -> {id, counts}; golden names it a regression baseline; where scopes every store to matching rows (partial by construction). since: a baseline id - fresh snapshot of that baseline\'s stores returning ONLY what changed\n'
       + '  verify {baseline?, stores?, expect?, allowExtra?, samples?, verbose?} - the verify step of baseline -> action -> verify in ONE call: re-snapshots the baseline\'s stores, diffs, checks expect, replies pass/fail plus rows only for what failed. expect: "notes:+1,tags:same" (+N added, +N+ at least N, -N removed, ~N changed, same) or a JSON array; a changed store not named is "unexpected" and fails unless allowExtra; no expect = nothing may change. baseline: snapshot id, golden name, or omitted for the session\'s newest snapshot\n'
@@ -569,10 +587,7 @@ async function handleToolsCall(msg) {
     // than a CLI agent got for the identical failure.
     if (err.postTimeoutVerification) extraText.push(`[web-scout] Post-timeout verification (best-effort): ${JSON.stringify(err.postTimeoutVerification)}`);
     if (err.knownIssue) extraText.push(`[web-scout] Known issue: ${err.knownIssue.id}${err.knownIssue.description ? ` - ${err.knownIssue.description}` : ''}${err.knownIssue.remediation ? ` (remediation: ${err.knownIssue.remediation})` : ''}`);
-    if (err.selectorFriction) {
-      const f = err.selectorFriction;
-      extraText.push(`[web-scout] Friction: ${f.errorClass ?? 'unclassified'} failure, ${f.failuresThisSession}x this session, ${f.priorFailures}x in earlier sessions${f.workedBefore ? ` - ${f.workedBefore}` : f.advice ? ` - ${f.advice}` : ''}`);
-    }
+    if (err.selectorFriction) extraText.push(`[web-scout] ${describeFailureContext(err.selectorFriction)}`);
     for (const line of err.emergentFriction ?? []) extraText.push(`[web-scout] Emergent friction: ${line}`);
     if (err.knownIssuesCheckError) extraText.push(`[web-scout] known-issues.json could not be checked: ${err.knownIssuesCheckError}`);
     sendResult(msg.id, { content: [{ type: 'text', text: err.message }, ...extraText.map((t) => ({ type: 'text', text: t })), ...(err.notes ?? []).map((n) => ({ type: 'text', text: `[web-scout] ${n}` }))], isError: true });
