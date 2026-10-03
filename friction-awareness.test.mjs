@@ -140,26 +140,30 @@ test('session end reports emergentFriction for dom.drag\'s "to" repeating, same 
 });
 
 test('macro run\'s riskPreview flags a risky "to" drop target too, tagged with role "to"', async () => {
+  let broken = false;
   await withRelay(async ({ api }) => {
+    // Record the macro first (a macro only records successful steps), THEN let the drop target fail
+    // repeatedly in a later session: a success after the failures would rightly silence the warning.
+    const b = await api('POST', '/sessions', { goal: 'record macro', context: 'friction-awareness.test.mjs', briefing: false });
+    await api('POST', '/command', { type: 'dom.drag', params: { selector: '#src', to: '#bad-target' } });
+    const macro = await api('POST', '/macros', { name: 'drag-risk-preview-macro', sessionId: b.id });
+    assert.equal(macro.steps.length, 1);
+    await api('POST', `/sessions/${b.id}/end`);
+
+    broken = true;
     const a = await api('POST', '/sessions', { goal: 'seed drag-target history', context: 'friction-awareness.test.mjs', briefing: false });
     for (let i = 0; i < 3; i += 1) {
       try { await api('POST', '/command', { type: 'dom.drag', params: { selector: `#src${i}`, to: '#bad-target' } }); } catch { /* expected */ }
     }
     await api('POST', `/sessions/${a.id}/end`);
+    broken = false;
 
-    const b = await api('POST', '/sessions', { goal: 'record macro', context: 'friction-awareness.test.mjs', briefing: false });
-    await api('POST', '/command', { type: 'dom.drag', params: { selector: '#src', to: '#bad-target' } });
-    const macro = await api('POST', '/macros', { name: 'drag-risk-preview-macro', sessionId: b.id });
-    assert.equal(macro.steps.length, 1);
-
+    await api('POST', '/sessions', { goal: 'record macro replay', context: 'friction-awareness.test.mjs', briefing: false });
     const run = await api('POST', `/macros/${macro.id}/run`, {});
-    assert.equal(run.riskPreview.length, 1);
-    assert.equal(run.riskPreview[0].selector, '#bad-target');
-    assert.equal(run.riskPreview[0].role, 'to');
-  }, { handlers: { 'dom.drag': (() => {
-    let calls = 0;
-    return () => { calls += 1; if (calls <= 3) throw new Error('drop rejected'); return { dragged: true, dropAccepted: true, mutated: true, hrefChanged: false }; };
-  })() } });
+    const drop = run.riskPreview.filter((p) => p.role === 'to');
+    assert.equal(drop.length, 1);
+    assert.equal(drop[0].selector, '#bad-target');
+  }, { handlers: { 'dom.drag': () => { if (broken) throw new Error('drop rejected'); return { dragged: true, dropAccepted: true, mutated: true, hrefChanged: false }; } } });
 });
 
 test('a session whose own action types match a recorded-but-never-run macro gets an x-webscout-macro-match nudge', async () => {
@@ -293,55 +297,54 @@ test('crv preflight carries knownFriction, the same ranked topFrictionItems dige
 // siblings (matchKnownIssues, matchKnownIssueForError).
 
 test('macro replay carries the same risky-selector warning and knownIssue match POST /command already gets, per step - not just the CLI/single-command path', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-macro-run-'));
+  const dir = tmpDir('webscout-friction-awareness-macro-run-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify([{ id: 'macro-flaky-el', signature: 'detached from DOM', description: 'stale DOM reference', remediation: 'use dom.click-wait instead' }]));
-  let riskyCalls = 0;
+  let riskyBroken = false;
   let flakyCalled = false;
   await withRelay(async ({ api }) => {
-    // Session A: fail #risky 3x to seed cross-session history, then end.
-    const a = await api('POST', '/sessions', { goal: 'seed risky-selector history', context: 'friction-awareness.test.mjs', briefing: false });
-    for (let i = 0; i < 3; i += 1) {
-      try { await api('POST', '/command', { type: 'dom.click', params: { selector: '#risky' } }); } catch { /* expected */ }
-    }
-    await api('POST', `/sessions/${a.id}/end`);
-
-    // Session B: one SUCCESSFUL click on each selector, so both can be recorded into a macro
-    // (macro record only captures successful actions). #risky's 4th call succeeds live even
-    // though its history is still flagged risky; #flaky succeeds on its first call only.
+    // Session B records the macro (one SUCCESSFUL click per selector - a macro only records successes).
     const b = await api('POST', '/sessions', { goal: 'record macro', context: 'friction-awareness.test.mjs', briefing: false });
     await api('POST', '/command', { type: 'dom.click', params: { selector: '#risky' } });
     await api('POST', '/command', { type: 'dom.click', params: { selector: '#flaky' } });
     const macro = await api('POST', '/macros', { name: 'macro-run-friction-test', sessionId: b.id });
     assert.equal(macro.steps.length, 2);
+    await api('POST', `/sessions/${b.id}/end`);
 
-    // Replay, same still-active session: #risky is expected to succeed again but carry the
-    // history-based riskWarning regardless of the live outcome (same convention /command's own
-    // maybeRiskySelectorWarn uses - it warns off history, not the result that follows);
-    // #flaky is expected to fail this time (2nd call) and carry a matched knownIssue.
+    // Session A: #risky then fails 3x (failures AFTER the recorded success, so they are unresolved history).
+    riskyBroken = true;
+    const a = await api('POST', '/sessions', { goal: 'seed risky-selector history', context: 'friction-awareness.test.mjs', briefing: false });
+    for (let i = 0; i < 3; i += 1) {
+      try { await api('POST', '/command', { type: 'dom.click', params: { selector: '#risky' } }); } catch { /* expected */ }
+    }
+    await api('POST', `/sessions/${a.id}/end`);
+    riskyBroken = false;
+
+    // Replay in a fresh session: #risky succeeds again but the run says it was warned off history (the
+    // warning is about the past, not the result that follows); #flaky fails this time and carries its knownIssue.
+    await api('POST', '/sessions', { goal: 'record macro replay', context: 'friction-awareness.test.mjs', briefing: false });
     const run = await api('POST', `/macros/${macro.id}/run`, { full: true });
     assert.equal(run.results.length, 2);
     const [riskyStep, flakyStep] = run.results;
     assert.equal(riskyStep.ok, true);
-    assert.ok(riskyStep.riskWarning, 'expected a riskWarning on the #risky replay step');
-    assert.match(riskyStep.riskWarning, /#risky/);
-    assert.match(riskyStep.riskWarning, /failed 3x before/);
+    assert.ok(run.frictionWarnings?.length, 'expected a frictionWarnings entry for the #risky replay step');
+    assert.equal(run.frictionWarnings[0].step, 1);
+    assert.match(run.frictionWarnings[0].message, /#risky/);
+    assert.match(run.frictionWarnings[0].message, /failed 3x/);
     assert.equal(flakyStep.ok, false);
     assert.equal(flakyStep.knownIssue?.id, 'macro-flaky-el');
     assert.match(flakyStep.knownIssue.remediation, /dom.click-wait/);
+    assert.ok(flakyStep.selectorFriction, 'a failed step carries what friction awareness knows');
 
-    // Default (compact) reply: riskWarning survives compaction on the successful step (it is a
-    // short signal, not a result body - compacting must not silently drop it), everything else
-    // about that step is dropped; the failed step always keeps its full detail either way.
+    // Default (compact) reply: the failed step keeps its knownIssue, the successful one drops its body.
     const compact = await api('POST', `/macros/${macro.id}/run`, {});
-    assert.ok(compact.results[0].riskWarning);
     assert.equal(compact.results[0].result, undefined);
     assert.equal(compact.results[1].ok, false);
     assert.equal(compact.results[1].knownIssue?.id, 'macro-flaky-el');
   }, {
     handlers: {
       'dom.click': (params) => {
-        if (params.selector === '#risky') { riskyCalls += 1; if (riskyCalls <= 3) throw new Error('still broken'); return { clicked: true }; }
+        if (params.selector === '#risky') { if (riskyBroken) throw new Error('still broken'); return { clicked: true }; }
         if (params.selector === '#flaky') { if (!flakyCalled) { flakyCalled = true; return { clicked: true }; } throw new Error('Element not found: #flaky (detached from DOM)'); }
         return { clicked: true };
       },
@@ -351,8 +354,20 @@ test('macro replay carries the same risky-selector warning and knownIssue match 
 });
 
 test('macro run carries a riskPreview of every risky step, worst offender first, computed BEFORE any step runs', async () => {
+  const broken = new Set();
   await withRelay(async ({ api }) => {
-    // #verybad fails 5x, #risky fails 3x (both cross the 3-fail threshold); #clean never fails.
+    // Record a 3-step macro (clean, then the two selectors that will go bad, deliberately out of
+    // severity order) while everything still works - a macro only records successful steps.
+    const b = await api('POST', '/sessions', { goal: 'record macro', context: 'friction-awareness.test.mjs', briefing: false });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#clean' } });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#risky' } });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#verybad' } });
+    const macro = await api('POST', '/macros', { name: 'risk-preview-macro', sessionId: b.id });
+    assert.equal(macro.steps.length, 3);
+    await api('POST', `/sessions/${b.id}/end`);
+
+    // Later: #verybad fails 5x, #risky 3x (both cross the threshold); #clean never fails.
+    broken.add('#verybad'); broken.add('#risky');
     const a = await api('POST', '/sessions', { goal: 'seed risky-selector history', context: 'friction-awareness.test.mjs', briefing: false });
     for (let i = 0; i < 5; i += 1) {
       try { await api('POST', '/command', { type: 'dom.click', params: { selector: '#verybad' } }); } catch { /* expected */ }
@@ -361,16 +376,9 @@ test('macro run carries a riskPreview of every risky step, worst offender first,
       try { await api('POST', '/command', { type: 'dom.click', params: { selector: '#risky' } }); } catch { /* expected */ }
     }
     await api('POST', `/sessions/${a.id}/end`);
+    broken.clear();
 
-    // Record a 3-step macro (clean, then the two risky selectors, deliberately out of severity
-    // order) in a fresh session - all three calls succeed live so all three record.
-    const b = await api('POST', '/sessions', { goal: 'record macro', context: 'friction-awareness.test.mjs', briefing: false });
-    await api('POST', '/command', { type: 'dom.click', params: { selector: '#clean' } });
-    await api('POST', '/command', { type: 'dom.click', params: { selector: '#risky' } });
-    await api('POST', '/command', { type: 'dom.click', params: { selector: '#verybad' } });
-    const macro = await api('POST', '/macros', { name: 'risk-preview-macro', sessionId: b.id });
-    assert.equal(macro.steps.length, 3);
-
+    await api('POST', '/sessions', { goal: 'record macro replay', context: 'friction-awareness.test.mjs', briefing: false });
     const run = await api('POST', `/macros/${macro.id}/run`, {});
     assert.ok(run.riskPreview, 'expected a riskPreview field');
     assert.equal(run.riskPreview.length, 2, 'only the two selectors over the fail threshold appear');
@@ -382,24 +390,7 @@ test('macro run carries a riskPreview of every risky step, worst offender first,
     assert.equal(run.riskPreview[1].selector, '#risky');
     assert.equal(run.riskPreview[1].failCount, 3);
     assert.equal(run.riskPreview[1].stepIndex, 1);
-  }, {
-    handlers: {
-      // Each selector fails exactly its seed count, then succeeds - so the history-seeding
-      // loops above fail as intended, but the SAME selectors can still be clicked successfully
-      // afterward to record the macro and to replay it (a macro only records successful steps).
-      'dom.click': (() => {
-        const calls = { '#verybad': 0, '#risky': 0 };
-        const threshold = { '#verybad': 5, '#risky': 3 };
-        return (params) => {
-          const sel = params.selector;
-          if (sel === '#clean') return { clicked: true };
-          calls[sel] += 1;
-          if (calls[sel] <= threshold[sel]) throw new Error('still broken');
-          return { clicked: true };
-        };
-      })(),
-    },
-  });
+  }, { handlers: { 'dom.click': (params) => { if (broken.has(params.selector)) throw new Error('still broken'); return { clicked: true }; } } });
 });
 
 test('macro run omits riskPreview entirely for a macro with no risky steps', async () => {
@@ -488,7 +479,7 @@ async function withTwoAgents(fn, { envOverride = {}, alphaHandlers = {}, betaHan
 }
 
 test('a known-issue failure on one agent reaches the OTHER connected agent as a live x-webscout-friction-broadcast header, once, and never the failing agent itself', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-broadcast-'));
+  const dir = tmpDir('webscout-friction-broadcast-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify([{ id: 'shared-flaky-el', signature: 'detached from DOM', remediation: 'use dom.click-wait' }]));
   await withTwoAgents(async ({ apiRaw }) => {
@@ -535,7 +526,7 @@ test('a selector crossing the 3-failure threshold in one session is broadcast ex
 });
 
 test('a failure with only ONE agent connected queues nothing and does not error', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-broadcast-solo-'));
+  const dir = tmpDir('webscout-friction-broadcast-solo-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify([{ id: 'solo', signature: 'detached from DOM', remediation: 'x' }]));
   await withRelay(async ({ apiRaw }) => {
@@ -551,7 +542,7 @@ test('a failure with only ONE agent connected queues nothing and does not error'
 });
 
 test('autoRemediate re-dispatches a matched known issue\'s structured retry ONCE and reports it beside the still-failed original', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-remediate-'));
+  const dir = tmpDir('webscout-friction-awareness-remediate-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify([{
     id: 'flaky-primary-btn', signature: 'detached from DOM', description: 'primary button re-renders',
@@ -575,7 +566,7 @@ test('autoRemediate re-dispatches a matched known issue\'s structured retry ONCE
 });
 
 test('without autoRemediate a structured-retry entry only surfaces the hint - nothing is re-dispatched', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-noremediate-'));
+  const dir = tmpDir('webscout-friction-awareness-noremediate-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify([{ id: 'flaky-primary-btn', signature: 'detached from DOM', remediation: { text: 'use alt', retry: { type: 'dom.click', params: { selector: '#alt-btn' } } } }]));
   const clicked = [];
@@ -592,7 +583,7 @@ test('without autoRemediate a structured-retry entry only surfaces the hint - no
 });
 
 test('autoRemediate on a text-only known issue falls back to exactly today\'s behavior (hint only, no retry attempted)', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-textonly-'));
+  const dir = tmpDir('webscout-friction-awareness-textonly-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify([{ id: 'text-only', signature: 'detached from DOM', remediation: 'use dom.click-wait instead' }]));
   const clicked = [];
@@ -610,7 +601,7 @@ test('autoRemediate on a text-only known issue falls back to exactly today\'s be
 });
 
 test('a failing structured retry is reported as ok:false, and a malformed retry is dropped with a warning while keeping the text hint', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-badretry-'));
+  const dir = tmpDir('webscout-friction-awareness-badretry-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify([
     { id: 'retry-also-fails', signature: 'detached from DOM', remediation: { text: 'try alt', retry: { type: 'dom.click', params: { selector: '#alt-btn' } } } },
@@ -671,7 +662,7 @@ test('"crv run" gets the same pre-dispatch risky-selector warning and post-dispa
 });
 
 test('GET /analytics and crv preflight report knownIssuesCheckError (not a silent "no known issues") when known-issues.json is malformed', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-friction-awareness-analytics-badregistry-'));
+  const dir = tmpDir('webscout-friction-awareness-analytics-badregistry-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, '{ not valid json');
   await withRelay(async ({ api }) => {

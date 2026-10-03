@@ -71,5 +71,7 @@ export async function stopStaticServer({ port }) {
     return { stopped: false, pid: info.pid, reason: `could not signal pid ${info.pid}: ${err.message}` };
   }
   removeServePidfile(port);
+  // A clean stop has nothing left worth reading in the log (a server that died on its own keeps it).
+  if (info.log) { try { fs.unlinkSync(info.log); } catch { /* server may still hold it for a moment, or it is gone */ } }
   return { stopped: true, pid: info.pid, port, dir: info.dir };
 }

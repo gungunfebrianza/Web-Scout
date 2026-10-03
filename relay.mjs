@@ -1061,7 +1061,7 @@ function maybeRiskySelectorWarn(sessionId, type, params, res, agentName, ackRisk
     } else {
       frictionTracker.recordWarn(sessionId, key, assessment.liveUnresolved);
       keys.push(key);
-      messages.push(t.role === 'to' ? `drop target: ${assessment.message}` : assessment.message);
+      messages.push(t.role === 'to' ? `drop target "${target.value}" - ${assessment.message}` : assessment.message);
       if (assessment.level === 'escalated' && stillEscalated) blockMessage = `${assessment.message} - refusing (WEBSCOUT_RISKY_BLOCK=1); pass ackRisk:true to run it anyway.`;
     }
    }
@@ -1152,10 +1152,10 @@ function buildMacroRiskPreview(sessionId, steps, stepOffset, agentName) {
 // must itself be non-risky (same type, per the same analytics threshold), or it is no upgrade.
 function buildMacroSelectorSuggestions(sessionId, steps, actions) {
   try {
-    // The same ranked list the pre-action warning is built from: a selector is "risky" when it has at least
-    // RISKY_SELECTOR_FAIL_THRESHOLD unresolved failures. Keyed by type + selector as the lookups below expect.
+    // The same ranked list the pre-action warning is built from: a selector counts as fragile when it has failed at least
+    // RISKY_SELECTOR_FAIL_THRESHOLD times (a later success does not make a recorded step less fragile to bake in). Keyed by type + selector as the lookups below expect.
     const risky = new Map(getAnalytics().selectorFriction
-      .filter((f) => f.targetKind === 'selector' && friction.historyForOrigin(f, null).unresolved >= friction.RISKY_SELECTOR_FAIL_THRESHOLD)
+      .filter((f) => f.targetKind === 'selector' && f.failCount >= friction.RISKY_SELECTOR_FAIL_THRESHOLD)
       .map((f) => [f.key, f]));
     if (!risky.size) return [];
     const selectorsByElement = new Map(); // "TAG#id" -> Set<selector>
@@ -1663,7 +1663,8 @@ async function gatherReportBundle(sessionId) {
 // append-only, so nothing older can change except through pruneOldResults, which drops this cache.
 const ACTION_TAIL_REFRESH = 200;
 let actionsMemo = null; // action rows, id ascending, result bodies dropped (analytics never reads them; keeping them would pin the whole history in memory)
-const slimAction = (a) => ({ ...a, result: null, result_json: null });
+// Only a golden diff's summary is read from a result (the "still dirty" panel); every other body is dropped.
+const slimAction = (a) => ({ ...a, result: a.type === 'idb.diff' && a.result ? { summary: a.result.summary } : null, result_json: null });
 function allActionsIncremental() {
   const lastId = actionsMemo?.length ? actionsMemo[actionsMemo.length - 1].id : 0;
   if (!actionsMemo) {

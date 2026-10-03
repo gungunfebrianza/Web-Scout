@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startTestRelay, connectFakeAgent } from './test-relay.mjs';
+import { tmpDir } from './scratch.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(__dirname, 'cli.mjs');
@@ -48,7 +49,7 @@ after(async () => {
 });
 
 test('idb put --file reads the row JSON from disk, preserving a nested quote/apostrophe intact', async () => {
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-idb-put-')), 'row.json');
+  const file = path.join(tmpDir('webscout-idb-put-'), 'row.json');
   fs.writeFileSync(file, JSON.stringify({ id: 2, body: 'quote " and apostrophe \'' }));
   const viaFile = await run('idb', 'put', 'notes', '--file', file);
   assert.equal(viaFile.status, 0, viaFile.stderr);
@@ -56,7 +57,7 @@ test('idb put --file reads the row JSON from disk, preserving a nested quote/apo
 });
 
 test('idb put-many --file reads the rows-array JSON from disk', async () => {
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-idb-putmany-')), 'rows.json');
+  const file = path.join(tmpDir('webscout-idb-putmany-'), 'rows.json');
   fs.writeFileSync(file, JSON.stringify([{ id: 1 }, { id: 2 }]));
   const result = await run('idb', 'put-many', 'notes', '--file', file);
   assert.equal(result.status, 0, result.stderr);
@@ -70,7 +71,7 @@ test('idb put with neither a JSON arg nor --file exits 1 with a clear message', 
 });
 
 test('idb put --file pointing at an empty file exits 1, does not silently attempt a no-op write', async () => {
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-idb-put-empty-')), 'row.json');
+  const file = path.join(tmpDir('webscout-idb-put-empty-'), 'row.json');
   fs.writeFileSync(file, '   ');
   const result = await run('idb', 'put', 'notes', '--file', file);
   assert.equal(result.status, 1);

@@ -26,7 +26,10 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 // verify/causal_diff - see self-repair.mjs, webscout2.md) - raised to 18900, same commit, same convention.
 // Raised to 19250 in friction round 5 (session briefing, friction session/prune/cluster, autoRecover,
 // origin+path page targets - the one `friction` action grew by its new subs; nothing else was added).
-const MCP_TOTAL_MAX_BYTES = 19250;
+// Measured 21,313 after merging the distribution line into friction rounds 2-5 (its macro.update, console.history,
+// verity_history/verity_show, css.has_rule, idb.seed_template, dom extract_all/drag text on top of this line's
+// friction subs) - raised to 21350, same commit, same convention. Trimming descriptions is the next move.
+const MCP_TOTAL_MAX_BYTES = 21350;
 // Raised to 3550 when V38 added crv_preflight/crv_seed/crv_cleanup to webscout_idb (already the
 // biggest single tool, from crv_run) - same commit-with-the-text convention as above.
 // Raised to 3650 when V39 extended crv_preflight's one-line description (webscout_idb measured 3,606).

@@ -9,9 +9,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { freePort } from './test-relay.mjs';
+import { tmpDir } from './scratch.mjs';
 
 const realDir = path.dirname(fileURLToPath(import.meta.url));
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-serve-control-'));
+const tmp = tmpDir('webscout-serve-control-');
 const { startStaticServer, stopStaticServer, readServePidfile } = await import('./serve-control.mjs');
 
 let port;

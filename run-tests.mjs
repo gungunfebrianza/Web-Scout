@@ -40,12 +40,15 @@ if (reaped) { console.error(`run-tests: stopped ${reaped} detached helper proces
 // A profile whose files are still locked by a scanner is not a leak yet: give it a real chance to release
 // before it counts (the failure this replaced was a 7s window under load).
 for (const n of fs.readdirSync(root).filter((f) => PREFIXES.some((p) => f.startsWith(p)))) removeDirSync(path.join(root, n), { attempts: 25, quiet: true });
-const leakedNames = fs.readdirSync(root).filter((n) => !IGNORED.some((p) => n.startsWith(p)));
+// <guid>.tmp: scratch files a Chromium/Edge process writes into TEMP itself when it is killed mid-write - not ours.
+const BROWSER_TMP = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}.tmp$/i;
+const isLeak = (n) => !IGNORED.some((p) => n.startsWith(p)) && !BROWSER_TMP.test(n);
+const leakedNames = fs.readdirSync(root).filter(isLeak);
 const left = leakedNames.length;
 // Browsers still pointing into the private root are leaks too: kill, then wipe.
 const orphans = listBrowserProcesses().filter((p) => p.commandLine.toLowerCase().includes(root.toLowerCase()));
 for (const p of orphans) killTree(p.pid);
-if (left) console.error(`run-tests: leaked: ${fs.readdirSync(root).filter((n) => !IGNORED.some((p) => n.startsWith(p))).join(', ')}`);
+if (left) console.error(`run-tests: leaked: ${fs.readdirSync(root).filter(isLeak).join(', ')}`);
 const ok = removeDirSync(root);
 const grew = ours(realTmp) - before;
 console.error(`\nrun-tests: ${left} scratch entr${left === 1 ? 'y' : 'ies'} left in the private root${left ? ' (tests that leaked - fix them)' : ''}; ${orphans.length} orphan browser(s) killed; root ${ok ? 'wiped' : 'could NOT be fully wiped'}; real temp gained ${grew} web-scout dir(s).`);

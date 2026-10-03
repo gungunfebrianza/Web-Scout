@@ -161,7 +161,7 @@ test('agent-stale warning resurfaces once the persisted cooldown has elapsed (ne
 // x-webscout-selector-risk-key (type::selector) rather than the text (which keeps changing -
 // failCount climbs on every failure).
 test('selector-risk warning is remembered across separate PROCESSES within the cooldown window (same class as agent-stale)', async () => {
-  const cacheFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-warn-cache-')), 'cache.json');
+  const cacheFile = path.join(tmpDir('webscout-warn-cache-'), 'cache.json');
   headers = { 'x-webscout-selector-risk': 'selector "#risky" (dom.click) has failed 3x before', 'x-webscout-selector-risk-key': 'dom.click::#risky' };
   const env = { WEBSCOUT_PORT: String(port), WEBSCOUT_WARN_CACHE_PATH: cacheFile };
   try {
@@ -178,7 +178,7 @@ test('selector-risk warning is remembered across separate PROCESSES within the c
 });
 
 test('a DIFFERENT risky selector is never suppressed by another selector\'s cooldown', async () => {
-  const cacheFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-warn-cache-')), 'cache.json');
+  const cacheFile = path.join(tmpDir('webscout-warn-cache-'), 'cache.json');
   const env = { WEBSCOUT_PORT: String(port), WEBSCOUT_WARN_CACHE_PATH: cacheFile };
   try {
     headers = { 'x-webscout-selector-risk': 'selector "#one" (dom.click) has failed 3x before', 'x-webscout-selector-risk-key': 'dom.click::#one' };

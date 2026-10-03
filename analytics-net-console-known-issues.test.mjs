@@ -26,9 +26,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { startTestRelay } from './test-relay.mjs';
+import { tmpDir } from './scratch.mjs';
 
 async function withRelay(issues, fn) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-net-console-known-issues-'));
+  const dir = tmpDir('webscout-net-console-known-issues-');
   const registryPath = path.join(dir, 'known-issues.json');
   fs.writeFileSync(registryPath, JSON.stringify(issues));
   const relay = await startTestRelay({ env: { WEBSCOUT_KNOWN_ISSUES: registryPath } });

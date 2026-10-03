@@ -13,6 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startTestRelay, freePort, spawnAsync } from './test-relay.mjs';
 import { buildLaunchUrl, browserSkip } from './browser-harness.mjs';
+import { killTree, removeDirSync, listBrowserProcesses } from './scratch.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const relay = await startTestRelay();
@@ -88,4 +89,10 @@ test('CLI: "crv launch" opens a real tab with the activation params and the rela
   assert.equal(out.connected, true, JSON.stringify(out));
   assert.equal(out.agent, 'crv-launch-tab');
   assert.match(out.origin, new RegExp(`127\\.0\\.0\\.1:${pagePort}$`));
+  // "crv launch" leaves the tab open on purpose (that is the command); a test must not. The browser may
+  // have handed off to another process, so kill by profile as well as by pid, then remove the profile.
+  if (out.pid) killTree(out.pid);
+  for (const p of listBrowserProcesses().filter((x) => out.profile && x.commandLine.toLowerCase().includes(out.profile.toLowerCase()) && !/--type=/.test(x.commandLine))) killTree(p.pid);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  if (out.profile) removeDirSync(out.profile, { quiet: true });
 });
