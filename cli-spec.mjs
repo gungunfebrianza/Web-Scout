@@ -38,7 +38,18 @@ export const CLI_SPEC = [
   { cmd: 'friction list', pos: [0, 0], mcp: 'webscout_meta.friction' },
   { cmd: 'friction config', pos: [0, 0], mcp: 'webscout_meta.friction' },
   { cmd: 'friction session', pos: [0, 0], mcp: 'webscout_meta.friction' },
+  { cmd: 'friction targets', pos: [0, 0], val: ['--filter', '--sort', '--limit'], mcp: 'webscout_meta.friction', params: { '--filter': 'filter', '--sort': 'sort', '--limit': 'limit' } },
+  { cmd: 'friction notices', pos: [0, 0], val: ['--session', '--since'], mcp: 'webscout_meta.friction', params: { '--session': 'session', '--since': 'since' } },
+  { cmd: 'friction watch', pos: [0, 0], val: ['--for', '--count', '--session'], mcp: null, mcpExempt: 'an open-ended stream has no request/response shape - an MCP caller polls "friction notices" with the since cursor instead' },
+  { cmd: 'friction regressions', pos: [0, 0], bool: ['--fail'], mcp: 'webscout_meta.friction', cliOnly: { '--fail': 'sets the exit status for CI - an MCP caller reads the count in the reply' } },
   { cmd: 'friction prune', pos: [0, 0], bool: ['--confirm'], val: ['--days'], mcp: 'webscout_meta.friction', params: { '--days': 'days', '--confirm': 'confirm' } },
+  {
+    cmd: 'known-issues export', pos: [0, 0], val: ['--out'], mcp: 'webscout_meta.friction',
+    cliOnly: { '--out': 'writes a local file - an MCP caller gets the entries inline' },
+  },
+  {
+    cmd: 'known-issues import', pos: [1, 1], bool: ['--confirm'], mcp: 'webscout_meta.friction', params: { '--confirm': 'confirm' },
+  },
   {
     cmd: 'known-issues promote', pos: [1, 1], bool: ['--confirm'], val: ['--remediation', '--description', '--signature'], mcp: 'webscout_meta.friction',
     params: { '--confirm': 'confirm', '--remediation': 'remediation', '--description': 'description' },
@@ -72,6 +83,7 @@ export const CLI_SPEC = [
     cmd: 'session report', pos: [1, 1], val: ['--format', '--out', '--verity'], mcp: 'webscout_session.report',
     params: { '--format': 'format', '--out': 'out', '--verity': 'verityPath' },
   },
+  { cmd: 'session replay', pos: [1, 1], bool: ['--all', '--confirm'], val: ['--agent'], mcp: 'webscout_session.replay', params: { '--all': 'all', '--confirm': 'confirm' } },
   {
     cmd: 'session cleanup', pos: [1, 1], bool: ['--confirm', '--summary'], val: ['--since-snapshot', '--agent'], mcp: 'webscout_session.cleanup',
     params: { '--confirm': 'confirm', '--summary': 'summary', '--since-snapshot': 'sinceSnapshotId' },
@@ -207,7 +219,7 @@ export const CLI_SPEC = [
   { cmd: 'eval', pos: [0, Infinity], val: ['--file', '--timeout', '--agent'], lenient: true, mcp: 'webscout_eval', params: { '--file': 'filePath', '--timeout': 'timeoutMs' } },
 
   { cmd: 'macro record', pos: [2, 2], bool: ['--all'], mcp: 'webscout_macro.record', params: { '--all': 'all' } },
-  { cmd: 'macro list', pos: [0, 0], mcp: 'webscout_macro.list' },
+  { cmd: 'macro list', pos: [0, 0], bool: ['--risk'], mcp: 'webscout_macro.list', params: { '--risk': 'risk' } },
   { cmd: 'macro show', pos: [1, 1], mcp: 'webscout_macro.show' },
   {
     cmd: 'macro run', pos: [1, 1], bool: ['--continue-on-error', '--confirm', '--full'], val: ['--from-step'], mcp: 'webscout_macro.run',

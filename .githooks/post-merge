@@ -1,6 +1,17 @@
 #!/bin/sh
 # Opt in once per clone:  git config core.hooksPath .githooks
 # After a merge, run the whole suite so a red main is noticed now, not at the next unrelated change.
+# Never fails the merge itself (a hook cannot undo it) - it says plainly what it found.
 echo "post-merge: running the suite (set WEBSCOUT_SKIP_POST_MERGE=1 to skip)"
 [ -n "$WEBSCOUT_SKIP_POST_MERGE" ] && exit 0
-node run-tests.mjs > .post-merge-test.log 2>&1 && echo "post-merge: suite green" || { echo "post-merge: SUITE RED - see .post-merge-test.log"; exit 0; }
+if node run-tests.mjs > .post-merge-test.log 2>&1; then
+  echo "post-merge: suite green"
+else
+  echo "post-merge: SUITE RED - see .post-merge-test.log"
+fi
+# Targets someone declared fixed that are failing again: only checked when a relay is already running
+# (never start one from a hook).
+if WEBSCOUT_NO_AUTOSTART=1 node cli.mjs status >/dev/null 2>&1; then
+  WEBSCOUT_NO_AUTOSTART=1 node cli.mjs friction regressions --fail >/dev/null 2>&1 || echo "post-merge: REGRESSIONS - something declared fixed is failing again (node cli.mjs friction regressions)"
+fi
+exit 0

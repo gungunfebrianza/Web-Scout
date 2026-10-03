@@ -41,6 +41,19 @@ usually a faster path to a change that actually lands.
   handler in `inject.js` all follow this - no silent fallback to a default
   that masks a caller's mistake.
 
+## Where a capability is reachable from (surfaces.mjs)
+
+A capability is one thing a person can do, and it must be reachable from the four places they work: the HTTP
+route, the CLI command, the MCP action and the dashboard. `surfaces.mjs` is the map; `surfaces.test.mjs`
+fails when a relay route is in no capability, when a claim names a route / command / dashboard call that does
+not exist, when a capability leaves the CLI or the dashboard empty without a `cliWhy` / `dashboardWhy`, or when
+a `family: 'friction'` capability is missing a surface at all. A new route therefore needs a line there - say
+where the person reaches it from, or why they do not. The CLI and the MCP action stay in lockstep through
+`cli-spec.mjs` (`cli-parity.test.mjs`). Warnings and nudges to an agent go through `notify()` (`notices.mjs`):
+write the message once and attach the next steps; the CLI, the MCP server and the dashboard render them.
+Wire names are camelCase (`ackRisk`, `tryRecovery`, `strictCrv`); the snake_case spellings older callers send
+are still accepted for the same fields.
+
 ## Adding a new `dom.*`/`idb.*`/etc. command
 
 Start with `node tools/web-scout/scaffold-command.mjs dom.hover --params selector,nth`

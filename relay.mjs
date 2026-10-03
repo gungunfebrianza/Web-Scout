@@ -53,6 +53,7 @@ import { autoCalibrateIfMissing } from './transcript-tokens.mjs';
 import * as repairApi from './self-repair.mjs';
 import * as hostHealth from './host-health.mjs';
 import * as friction from './friction.mjs';
+import * as notices from './notices.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
@@ -845,7 +846,9 @@ function maybeMidSessionNudge(sessionId, res) {
     const lastNudgedAt = sessionNudgeState.get(sessionId) ?? 0;
     if (replayableCount - lastNudgedAt < (lastNudgedAt === 0 ? 5 : MID_SESSION_NUDGE_REPEAT_EVERY)) return;
     sessionNudgeState.set(sessionId, replayableCount);
-    res.setHeader('x-webscout-nudge', `${replayableCount} replayable action(s) so far this session - consider "macro record \\"<name>\\" ${sessionId}" if this shape will repeat.`);
+    const noticeText = `${replayableCount} replayable action(s) so far this session - consider "macro record \\"<name>\\" ${sessionId}" if this shape will repeat.`;
+    res.setHeader('x-webscout-nudge', noticeText);
+    notify(res, sessionId, { kind: 'nudge', message: noticeText, next: [notices.macroRecordCommand(sessionId)] });
   } catch { /* best-effort - never block a command reply on this */ }
 }
 
@@ -862,7 +865,9 @@ function maybeCacheAwarenessNudge(sessionId, res) {
   if (sessionCacheAwarenessNudged.has(sessionId)) return;
   sessionCacheAwarenessNudged.add(sessionId);
   try {
-    res.setHeader('x-webscout-nudge', 'this result was served from the same-session read-result cache instead of re-dispatched (__cacheHit:true) - identical results are also deduped once at the DB level, macros are auto-compacted, and repeat suite diffs are cache-served; run "token-report" (no --session) for real bytes/tokens saved by all of these so far.');
+    const noticeText = 'this result was served from the same-session read-result cache instead of re-dispatched (__cacheHit:true) - identical results are also deduped once at the DB level, macros are auto-compacted, and repeat suite diffs are cache-served; run "token-report" (no --session) for real bytes/tokens saved by all of these so far.';
+    res.setHeader('x-webscout-nudge', noticeText);
+    notify(res, sessionId, { kind: 'nudge', message: noticeText });
   } catch { /* best-effort - never block a command reply on this */ }
 }
 
@@ -1047,6 +1052,7 @@ function maybeRiskySelectorWarn(sessionId, type, params, res, agentName, ackRisk
   let blockMessage = null;
   const keys = [];
   const messages = [];
+  const notices_ = [];
   try {
    for (const t of riskTargetsOf(type, params)) {
     const facts = frictionFactsFor(sessionId, t.type, t.params, agentName);
@@ -1061,6 +1067,7 @@ function maybeRiskySelectorWarn(sessionId, type, params, res, agentName, ackRisk
     } else {
       frictionTracker.recordWarn(sessionId, key, assessment.liveUnresolved);
       keys.push(key);
+      notices_.push({ kind: 'selector-risk', level: assessment.level === 'escalated' ? 'escalated' : 'warn', message: assessment.message, key, next: [notices.whyCommand(friction.typeFamily(t.type), target.value), ...(facts.live?.unresolved ? [] : [notices.fixedCommand(friction.typeFamily(t.type), target.value)])] });
       messages.push(t.role === 'to' ? `drop target "${target.value}" - ${assessment.message}` : assessment.message);
       if (assessment.level === 'escalated' && stillEscalated) blockMessage = `${assessment.message} - refusing (WEBSCOUT_RISKY_BLOCK=1); pass ackRisk:true to run it anyway.`;
     }
@@ -1071,6 +1078,7 @@ function maybeRiskySelectorWarn(sessionId, type, params, res, agentName, ackRisk
      res.setHeader('x-webscout-selector-risk', messages.join(' ').replace(/[^\x20-\x7e]/g, '?'));
      // Stable key for the client's cross-process warn-cache: the text changes as counts climb, the key does not.
      res.setHeader('x-webscout-selector-risk-key', keys.join(',').replace(/[^\x20-\x7e]/g, '?'));
+     for (const n of notices_) notify(res, sessionId, n);
    }
   } catch { /* best-effort - never block a command dispatch on a bookkeeping failure */ }
   if (blockMessage) throw new HttpError(409, blockMessage);
@@ -1124,12 +1132,13 @@ function buildMacroRiskPreview(sessionId, steps, stepOffset, agentName) {
       let facts = null;
       try { facts = frictionFactsFor(sessionId, t.type, t.params, agentName); } catch { /* one unreadable step must not hide the rest */ }
       const e = facts?.entry;
-      if (!facts || !e) continue;
-      const { assessment } = friction.evaluateSelectorRisk({ type: t.type, selector: facts.target.value, targetKind: facts.target.kind, entry: e, live: facts.live, state: null, origin: facts.origin });
+      const live = facts?.live;
+      if (!facts || (!e && !live)) continue; // no history and nothing failing this session: nothing to preview
+      const { assessment } = friction.evaluateSelectorRisk({ type: t.type, selector: facts.target.value, targetKind: facts.target.kind, entry: e, live, state: null, origin: facts.origin });
       if (!assessment) continue;
       preview.push({
-        stepIndex: i + stepOffset, type: step.type, selector: facts.target.value, ...(t.role ? { role: t.role } : {}), failCount: e.failCount, sessionCount: e.sessionCount,
-        lastFailedAt: e.lastFailedAt, knownIssue: e.knownIssues?.[0] ?? null,
+        stepIndex: i + stepOffset, type: step.type, selector: facts.target.value, ...(t.role ? { role: t.role } : {}), failCount: e?.failCount ?? live.fails, sessionCount: e?.sessionCount ?? 1,
+        lastFailedAt: e?.lastFailedAt ?? live.lastFailedAt ?? null, knownIssue: e?.knownIssues?.[0] ?? null,
       });
     }
   });
@@ -1244,7 +1253,9 @@ function maybeFrictionBroadcastNotice(sessionId, agentName, res) {
     const queue = pendingFrictionNotices.get(key);
     if (!queue?.length) return;
     pendingFrictionNotices.delete(key);
-    res.setHeader('x-webscout-friction-broadcast', `${queue.map(frictionNoticeText).join('; ')} - check before repeating it.`.replace(/[\r\n]+/g, ' '));
+    const noticeText = `${queue.map(frictionNoticeText).join('; ')} - check before repeating it.`.replace(/[\r\n]+/g, ' ');
+    res.setHeader('x-webscout-friction-broadcast', noticeText);
+    notify(res, sessionId, { kind: 'friction-broadcast', message: noticeText, next: queue.length === 1 && queue[0].selector ? [notices.whyCommand(friction.typeFamily(queue[0].type), queue[0].selector)] : [] });
   } catch { /* best-effort - never block a command reply on this */ }
 }
 
@@ -1285,7 +1296,9 @@ function maybeMacroMatchNudge(sessionId, res) {
       nudged.add(macro.id);
       sessionMacroMatchNudged.set(sessionId, nudged);
       const sameParams = macro.steps.every((step, i) => MACRO_PARAM_KEYS.every((k) => step.params?.[k] === undefined || step.params[k] === tail[i].params?.[k]));
-      res.setHeader('x-webscout-macro-match', `last ${macro.steps.length} action(s) match macro "${macro.name}" (#${macro.id}; ${sameParams ? 'same selectors/stores' : 'types match, params differ'}; ${describeMacroReliability(macro)}) - "macro run ${macro.id}" instead of continuing by hand.`.replace(/[^\x20-\x7e]/g, '?'));
+      const noticeText = `last ${macro.steps.length} action(s) match macro "${macro.name}" (#${macro.id}; ${sameParams ? 'same selectors/stores' : 'types match, params differ'}; ${describeMacroReliability(macro)}) - "macro run ${macro.id}" instead of continuing by hand.`.replace(/[^\x20-\x7e]/g, '?');
+      res.setHeader('x-webscout-macro-match', noticeText);
+      notify(res, sessionId, { kind: 'macro-match', level: 'info', message: noticeText, key: `macro:${macro.id}`, next: [notices.macroRunCommand(macro.id)] });
       return; // one macro's worth of nudge per reply is enough
     }
   } catch { /* best-effort - never block a command reply on this */ }
@@ -1523,9 +1536,36 @@ async function handleAsk(sessionIdInput, question) {
 
 // ---------- HTTP plumbing ----------
 
+// A notice is what an agent was just told (notices.mjs): it rides back in x-webscout-notices, is kept in
+// session_notices for the report / "friction notices", and is pushed to the dashboard. The legacy per-kind
+// header is still set by the caller, so older clients and scripts keep working unchanged.
+function notify(res, sessionId, input) {
+  try {
+    const notice = notices.makeNotice(input);
+    (res.webscoutNotices ??= []).push(notice);
+    if (sessionId !== null && sessionId !== undefined) {
+      dbApi.saveNotice(sessionId, notice);
+      broadcastUpdate('notice', sessionId, { notice });
+    }
+  } catch { /* best-effort - a notice bug must never change a command's own reply */ }
+}
+
 function sendJson(res, status, body) {
+  if (res.webscoutNotices?.length && !res.headersSent) { try { res.setHeader(notices.NOTICES_HEADER, notices.serializeNotices(res.webscoutNotices)); } catch { /* header is an extra, never the reply */ } }
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
+}
+
+// Canonical wire names are camelCase (the MCP params, ackRisk, tryRecovery...). The snake_case spellings the
+// session-start route used to take are still accepted: every snake_case key also appears as its camelCase twin.
+function withCamelAliases(body) {
+  const out = { ...body };
+  for (const [k, v] of Object.entries(body ?? {})) {
+    if (!k.includes('_')) continue;
+    const camel = k.replace(/_([a-z])/g, (_m, c) => c.toUpperCase());
+    if (!(camel in out)) out[camel] = v;
+  }
+  return out;
 }
 
 function readJsonBody(req) {
@@ -1595,6 +1635,68 @@ function staleAgentNames() {
     .map(([name]) => name);
 }
 
+// What friction awareness did for ONE session, for its report: what it was told (kept notices), what it
+// ignored (a target warned about that kept failing afterwards), what was declared fixed during it.
+function sessionFrictionSummary(sessionId, session, actions) {
+  const told = dbApi.listNotices({ sessionId, limit: 1000 });
+  const failureTimes = new Map(); // friction key -> failed-action timestamps
+  for (const a of actions) {
+    if (a.ok) continue;
+    for (const x of friction.expandDragTargets(a)) {
+      const key = friction.frictionKeyFor(x.type, x.params, x.origin);
+      if (!key) continue;
+      const list = failureTimes.get(key) ?? [];
+      list.push(a.started_at);
+      failureTimes.set(key, list);
+    }
+  }
+  const ignored = [];
+  const seen = new Set();
+  for (const n of told) {
+    if (n.kind !== 'selector-risk' || !n.key || seen.has(n.key)) continue;
+    seen.add(n.key);
+    const after = (failureTimes.get(n.key) ?? []).filter((at) => at > n.at);
+    if (after.length) ignored.push({ key: n.key, warnedAt: n.at, failuresAfter: after.length, message: n.message });
+  }
+  const to = session.ended_at ?? new Date().toISOString();
+  let resolved = [];
+  try {
+    resolved = dbApi.listFrictionResolutions().filter((x) => x.resolved_at >= session.started_at && x.resolved_at <= to).map((x) => ({ type: x.type, selector: x.selector, resolvedAt: x.resolved_at, note: x.note ?? null }));
+  } catch { /* best-effort */ }
+  const byKind = {};
+  for (const n of told) byKind[n.kind] = (byKind[n.kind] ?? 0) + 1;
+  return { noticeCount: told.length, told: byKind, notices: told.slice(-50), ignored, resolved };
+}
+
+// The full ranked target list (not the digest's top-N), rebuilt at most once per ANALYTICS_CACHE_MS: the
+// filter / sort / limit of GET /friction/targets run over it, so every surface asks the same question.
+let targetsMemo = null; // { at, list }
+function allFrictionTargets() {
+  const now = Date.now();
+  if (targetsMemo && now - targetsMemo.at < ANALYTICS_CACHE_MS) return targetsMemo.list;
+  const { actions } = allActionsIncremental();
+  const resolutions = new Map();
+  try { for (const x of dbApi.listFrictionResolutions()) resolutions.set(x.key, x.resolved_at); } catch { /* best-effort */ }
+  const sessionWeights = new Map();
+  for (const s of dbApi.listSessions()) if (s.strict_crv && friction.STRICT_CRV_FAIL_WEIGHT !== 1) sessionWeights.set(s.id, friction.STRICT_CRV_FAIL_WEIGHT);
+  const list = friction.buildSelectorFriction(actions, { matchKnownIssues: lazyKnownIssueMatcher(), resolutions, sessionWeights, limit: 5000 });
+  targetsMemo = { at: now, list };
+  return list;
+}
+
+// known-issues.json as written (not compiled): what export hands out and import merges into.
+function readKnownIssuesRaw() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(KNOWN_ISSUES_PATH, 'utf8'));
+    if (!Array.isArray(parsed)) throw new HttpError(409, 'known-issues file must be a JSON array');
+    return parsed;
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    if (err instanceof HttpError) throw err;
+    throw new HttpError(409, `known-issues.json could not be read: ${err.message}`);
+  }
+}
+
 async function gatherReportBundle(sessionId) {
   const session = dbApi.getSession(sessionId);
   const snapshots = dbApi.listSnapshots(sessionId);
@@ -1634,6 +1736,7 @@ async function gatherReportBundle(sessionId) {
     tokenReport: dbApi.getActionCostReport(sessionId),
     repeatedActionLoops: dbApi.findRepeatedActionLoops(sessionId),
     knownIssues,
+    friction: sessionFrictionSummary(sessionId, session, actions),
     ...(knownIssuesCheckError ? { knownIssuesCheckError } : {}),
     // The dashboard's round-1/round-2 visualizations (session-viz.mjs), same models GET
     // /sessions/:id/viz serves - a saved report had zero trace of any of them before this.
@@ -1800,6 +1903,8 @@ function computeAnalytics() {
   // 2c. Known-issue candidates - the same error text failing repeatedly with no
   // known-issues.json match is the entry nobody has written yet; draft only, never auto-written.
   const knownIssueCandidates = friction.buildKnownIssueCandidates(actions, { matchKnownIssues: matchKnownIssuesFor, frictionEntries: selectorFriction });
+  // Declared fixed, failing again: what "mark fixed" promised to keep visible.
+  const relapsedFriction = friction.buildRelapses(resolutionRows, actions);
 
   // 3. Macros recorded but never actually replayed, and macros that HAVE
   // been replayed but never once succeeded on any step (recorded,
@@ -2093,7 +2198,7 @@ function computeAnalytics() {
   if (selectorFriction.length) {
     // Already cost-ranked (failures + time wasted + retries) by buildSelectorFriction.
     const s = selectorFriction[0];
-    topFrictionItems.push({ kind: 'topFailedSelector', severity: Math.round(s.score), summary: `${s.targetKind === 'store' ? 'store' : 'selector'} "${s.selector}" (${s.type}) failed ${s.failCount}x across ${s.sessionCount} session(s), last at ${s.lastFailedAt}${wastedText(s.wastedMs)}${s.retries ? `, retried ${s.retries}x` : ''}${knownIssueText(s.knownIssues)}` });
+    topFrictionItems.push({ kind: 'topFailedSelector', severity: Math.round(s.score), summary: `${s.targetKind === 'store' ? 'store' : 'selector'} "${s.selector}" (${s.type}) failed ${s.failCount}x across ${s.sessionCount} session(s), last at ${s.lastFailedAt}${wastedText(s.wastedMs)}${s.wastedTokens ? `, ~${s.wastedTokens} tokens` : ''}${s.retries ? `, retried ${s.retries}x` : ''}${knownIssueText(s.knownIssues)}` });
   }
   for (const m of macrosNeverSucceeding) {
     topFrictionItems.push({ kind: 'macroNeverSucceeding', severity: 50 + m.attemptedSteps, summary: `macro "${m.name}" (#${m.id}) has run ${m.attemptedSteps} step(s) and never once succeeded - fixed? friction resolve macro ${m.id}` });
@@ -2128,6 +2233,10 @@ function computeAnalytics() {
     const preview = e.example.length > 80 ? `${e.example.slice(0, 80)}...` : e.example;
     topFrictionItems.push({ kind: 'repeatedEvalShape', severity: e.count, summary: `eval shape repeated ${e.count}x across ${e.sessionCount} session(s) - "${preview}" - candidate for a real command` });
   }
+  if (relapsedFriction[0]) {
+    const x = relapsedFriction[0];
+    topFrictionItems.push({ kind: 'regression', severity: 80 + x.failuresSince, summary: `${x.summary}${relapsedFriction.length > 1 ? ` (+${relapsedFriction.length - 1} more relapse(s))` : ''} - see: friction regressions` });
+  }
   topFrictionItems.sort((a, b) => b.severity - a.severity);
   topFrictionItems.splice(5);
 
@@ -2141,6 +2250,7 @@ function computeAnalytics() {
     knownIssueCandidates,
     resolveSuggestions,
     frictionConfig: friction.frictionConfig(),
+    relapsedFriction,
     resolvedFriction: resolutionRows.map((r) => ({ key: r.key, type: r.type, selector: r.selector, note: r.note, resolvedAt: r.resolved_at })),
     topFailedNetUrls,
     topFailedConsoleMessages,
@@ -2585,29 +2695,29 @@ const routes = [
     method: 'POST',
     pattern: /^\/sessions$/,
     handler: async (req) => {
-      const body = await readJsonBody(req);
+      const body = withCamelAliases(await readJsonBody(req));
       const startingAgentName = body.agent || DEFAULT_AGENT;
-      if (body.if_stale_min !== undefined && body.if_stale_min !== null && !(Number.isFinite(body.if_stale_min) && body.if_stale_min >= 0)) {
-        throw new HttpError(400, 'if_stale_min must be a number of minutes >= 0');
+      if (body.ifStaleMin !== undefined && body.ifStaleMin !== null && !(Number.isFinite(body.ifStaleMin) && body.ifStaleMin >= 0)) {
+        throw new HttpError(400, 'ifStaleMin must be a number of minutes >= 0');
       }
       const session = dbApi.startSession({
         goal: body.goal,
         context: body.context,
-        strictCrv: !!body.strict_crv,
-        strictCrvStores: Array.isArray(body.strict_crv_stores) ? body.strict_crv_stores : undefined,
+        strictCrv: !!body.strictCrv,
+        strictCrvStores: Array.isArray(body.strictCrvStores) ? body.strictCrvStores : undefined,
         tags: Array.isArray(body.tags) ? body.tags : undefined,
-        tokenBudget: Number.isFinite(body.token_budget) ? Number(body.token_budget) : undefined,
+        tokenBudget: Number.isFinite(body.tokenBudget) ? Number(body.tokenBudget) : undefined,
         lean: !!body.lean,
-        strictCrvCompact: !!body.crv_compact,
+        strictCrvCompact: !!body.crvCompact,
         // Best-effort - null when no agent is connected yet under this name
         // (a caller who hasn't opened the tab, or will connect a different
         // one). See dispatchTracked's guardDispatchOrigin for the check this
         // enables, and "session start --allow-remote" for the opt-out below.
         pinnedOrigin: agents.get(startingAgentName)?.origin ?? null,
         agentName: startingAgentName,
-        allowRemote: !!body.allow_remote,
-        autoRecover: !!body.auto_recover,
-        ifStaleMin: body.if_stale_min ?? undefined,
+        allowRemote: !!body.allowRemote,
+        autoRecover: !!body.autoRecover,
+        ifStaleMin: body.ifStaleMin ?? undefined,
       });
       if (session.autoEndedSession) {
         // The db layer already ended the row; this drops the same per-session memory the explicit
@@ -2923,6 +3033,70 @@ const routes = [
       return { sessionId: id, written, matchedActions: items.length, unmatchedActions, transcripts };
     },
   },
+  {
+    // Re-runs a recorded session against the CURRENTLY active one, up to and including its first failure, to see
+    // whether the failure still reproduces ("it failed three sessions ago - does it still?"). The plan is the
+    // session's successful macro-replayable actions (the ones that change state) in order, then the failing action.
+    // These steps write to the page, so it is a dry run unless confirm:true - the plan, the expected failure and
+    // the friction risk of each step come back without touching anything. {"all": true} replays the whole session.
+    method: 'POST',
+    pattern: /^\/sessions\/(\d+)\/replay$/,
+    handler: async (req, m) => {
+      const sourceId = Number(m[1]);
+      const body = await readJsonBody(req);
+      const agentName = body.agent || DEFAULT_AGENT;
+      const source = dbApi.getSession(sourceId);
+      const untilFailure = body.all !== true;
+      const rows = dbApi.listActions(sourceId, { ascending: true });
+      const clean = (params) => {
+        const { via, macroId, macroName, replayOf, auto, phase, for: _for, triggered_by_action_id: _t, ...rest } = params ?? {};
+        return rest;
+      };
+      const replayable = (a) => a.type !== 'idb.snapshot' && a.params?.via !== 'auto-remediate' && a.params?.via !== 'replay' && !a.params?.auto;
+      const failing = untilFailure ? rows.find((a) => !a.ok && replayable(a)) : null;
+      if (untilFailure && !failing) throw new HttpError(404, `session #${sourceId} has no failed action to reproduce (pass {"all": true} to replay all of it anyway)`);
+      const plan = [];
+      for (const a of rows) {
+        if (failing && a.id > failing.id) break;
+        const isFailure = failing && a.id === failing.id;
+        if (!replayable(a)) continue;
+        if (!isFailure && !(a.ok && DEFAULT_MACRO_TYPES.has(a.type))) continue;
+        plan.push({ index: plan.length, actionId: a.id, type: a.type, params: clean(a.params), isTheFailure: Boolean(isFailure) });
+      }
+      const original = failing ? { actionId: failing.id, type: failing.type, error: failing.error, errorClass: friction.classifyError(failing.error) } : null;
+      const currentId = dbApi.getCurrentSession()?.id ?? -1;
+      const riskPreview = buildMacroRiskPreview(currentId, plan.map((p) => ({ type: p.type, params: p.params })), 0, agentName);
+      if (body.confirm !== true) {
+        return { dryRun: true, sourceSession: { id: source.id, goal: source.goal }, steps: plan.length, plan, expected: original, ...(riskPreview.length ? { riskPreview } : {}), note: 'dry run - these steps write to the page. Repeat with confirm:true (CLI: --confirm) to run them in the active session, stopping at the first failure.' };
+      }
+      const session = requireActiveSession();
+      const ran = [];
+      let now = null;
+      for (const step of plan) {
+        const timeoutMs = LONG_POLL_TYPES.has(step.type) ? (Number(step.params?.timeoutMs) || 15000) + 5000 : COMMAND_TIMEOUT_MS;
+        try {
+          await dispatchTracked(session, step.type, { ...step.params, via: 'replay', replayOf: sourceId }, agentName, timeoutMs);
+          if (MUTATING_TYPES.has(step.type)) bumpMutationCounter(session.id);
+          ran.push({ index: step.index, type: step.type, ok: true });
+        } catch (err) {
+          ran.push({ index: step.index, type: step.type, ok: false, error: err.message });
+          now = { index: step.index, type: step.type, error: err.message, errorClass: friction.classifyError(err.message) };
+          break;
+        }
+      }
+      broadcastUpdate('action', session.id);
+      const reproduced = Boolean(original && now && now.index === plan.length - 1 && now.type === original.type && now.errorClass === original.errorClass);
+      return {
+        dryRun: false, sourceSession: { id: source.id, goal: source.goal }, steps: plan.length, ran: ran.length,
+        reproduced, original, now,
+        verdict: !original ? (now ? `the replay failed at step ${now.index + 1}: ${now.error}` : 'the whole session replayed without a failure')
+          : reproduced ? `still reproduces: ${now.type} fails the same way (${now.errorClass})`
+          : now ? `failed differently at step ${now.index + 1} (${now.type}: ${now.error}) - not the original failure`
+          : 'does NOT reproduce: every step, including the one that failed before, succeeded',
+        results: ran,
+      };
+    },
+  },
   { method: 'GET', pattern: /^\/sessions\/(\d+)\/qa$/, handler: async (_req, m) => dbApi.listQA(Number(m[1])) },
   {
     method: 'GET',
@@ -3123,7 +3297,24 @@ const routes = [
       return selectorSuggestions.length ? { ...macro, selectorSuggestions } : macro;
     },
   },
-  { method: 'GET', pattern: /^\/macros$/, handler: async () => dbApi.listMacros() },
+  {
+    // ?risk=1 adds, per macro, how many of its steps would draw a friction warning right now (the same facts the
+    // pre-action header uses) and the worst one - capped to 50 macros so the dashboard can ask on every refresh.
+    method: 'GET',
+    pattern: /^\/macros$/,
+    handler: async (req) => {
+      const macros = dbApi.listMacros();
+      const wantRisk = new URL(req.url, `http://${HOST}`).searchParams.get('risk') === '1';
+      if (!wantRisk) return macros;
+      const sessionId = dbApi.getCurrentSession()?.id ?? -1;
+      return macros.map((m, i) => {
+        if (i >= 50 || !Array.isArray(m.steps)) return m;
+        let preview = [];
+        try { preview = buildMacroRiskPreview(sessionId, m.steps, 0, DEFAULT_AGENT); } catch { /* best-effort */ }
+        return { ...m, risk: { riskySteps: preview.length, worst: preview[0] ? { stepIndex: preview[0].stepIndex, selector: preview[0].selector, failCount: preview[0].failCount } : null } };
+      });
+    },
+  },
   { method: 'GET', pattern: /^\/macros\/(\d+)$/, handler: async (_req, m) => dbApi.getMacro(Number(m[1])) },
   {
     // Full step-array replace - backs the dashboard's macro step inspector
@@ -3479,7 +3670,9 @@ const routes = [
           // If the alternative fails too, its own error (with its own friction context) is what the caller gets.
           outcome = await dispatchTracked(session, type, retry.params, agentName, dispatchTimeoutMs, !!body.autoRemediate);
           ranParams = retry.params;
-          res.setHeader('x-webscout-recovered', `"${params.selector}" (${type}) failed; ran "${retry.recovery.selector}" instead (it worked ${retry.recovery.worked} of ${retry.recovery.of} times after this failure)`.replace(/[^\x20-\x7e]/g, '?'));
+          const noticeText = `"${params.selector}" (${type}) failed; ran "${retry.recovery.selector}" instead (it worked ${retry.recovery.worked} of ${retry.recovery.of} times after this failure)`.replace(/[^\x20-\x7e]/g, '?');
+          res.setHeader('x-webscout-recovered', noticeText);
+          notify(res, session.id, { kind: 'recovered', message: noticeText, next: [notices.whyCommand(friction.typeFamily(type), params.selector)] });
         }
         const { result, actionId } = outcome;
         noteScopedRead(session.id, result, { agentName, type, params: ranParams });
@@ -3643,6 +3836,8 @@ const routes = [
       try {
         const analytics = getAnalytics();
         report.knownFriction = analytics.topFrictionItems;
+        const briefing = friction.buildSessionBriefing(analytics.selectorFriction, { goal: dbApi.getCurrentSession()?.goal ?? '', origin: agents.get(agentName)?.origin ?? null });
+        if (briefing.length) report.frictionBriefing = briefing;
         if (analytics.knownIssuesCheckError && !report.knownIssuesCheckError) report.knownIssuesCheckError = analytics.knownIssuesCheckError;
       } catch { /* best-effort - never blocks preflight */ }
       // The caller's own plan, checked step by step against the facts the pre-action warn will use.
@@ -4105,6 +4300,38 @@ const routes = [
       };
     },
   },
+  // ---- The ranked target list with the same filter / sort / limit everywhere. ?q= filters (target, type,
+  // origin, error class, last error), ?sort= is cost|fails|wasted|tokens|recent|oldest, ?limit= caps.
+  {
+    method: 'GET',
+    pattern: /^\/friction\/targets$/,
+    handler: async (req) => {
+      const q = new URL(req.url, `http://${HOST}`).searchParams;
+      const sort = q.get('sort') || 'cost';
+      if (!friction.TARGET_SORTS[sort]) throw new HttpError(400, `sort must be one of ${Object.keys(friction.TARGET_SORTS).join('|')}`);
+      const all = allFrictionTargets();
+      const targets = friction.viewFrictionTargets(all, { q: q.get('q') ?? '', sort, limit: Number(q.get('limit')) || 0 });
+      return { total: all.length, shown: targets.length, sort, q: q.get('q') ?? '', targets };
+    },
+  },
+
+  // ---- What agents were told: the kept notices (notices.mjs), newest last. ?session=<id>|all (default: the
+  // active session, else all), ?since=<last id seen> makes it a cursor, ?limit=.
+  {
+    method: 'GET',
+    pattern: /^\/friction\/notices$/,
+    handler: async (req) => {
+      const q = new URL(req.url, `http://${HOST}`).searchParams;
+      const wanted = q.get('session');
+      const sessionId = wanted === 'all' ? null : wanted ? Number(wanted) : (dbApi.getCurrentSession()?.id ?? null);
+      const list = dbApi.listNotices({ sessionId, sinceId: Number(q.get('since')) || 0, limit: Number(q.get('limit')) || 200 });
+      return { sessionId, notices: list, next: list.length ? list[list.length - 1].id : (Number(q.get('since')) || 0) };
+    },
+  },
+
+  // ---- Declared fixed, failing again.
+  { method: 'GET', pattern: /^\/friction\/regressions$/, handler: async () => { const list = friction.buildRelapses(dbApi.listFrictionResolutions(), allActionsIncremental().actions); return { count: list.length, relapses: list }; } },
+
   { method: 'GET', pattern: /^\/friction\/config$/, handler: async () => friction.frictionConfig() },
 
   // ---- What THIS session has run into so far, from the same live tracker the pre-action warning reads
@@ -4125,6 +4352,38 @@ const routes = [
         }))
         .sort((a, b) => b.unresolved - a.unresolved || b.fails - a.fails);
       return { session: { id: session.id, goal: session.goal }, targets };
+    },
+  },
+
+  // ---- The registry as written, for sharing between checkouts. Import merges by id: an id already present is
+  // reported and left alone, an invalid entry (no id/signature, a signature that does not compile) is refused
+  // with the reason; nothing is written unless confirm:true.
+  { method: 'GET', pattern: /^\/known-issues$/, handler: async () => ({ file: KNOWN_ISSUES_PATH, entries: readKnownIssuesRaw() }) },
+  {
+    method: 'POST',
+    pattern: /^\/known-issues\/import$/,
+    handler: async (req) => {
+      const body = await readJsonBody(req);
+      if (!Array.isArray(body.entries)) throw new HttpError(400, 'entries (an array of { id, signature, description, remediation }) is required - e.g. the output of "known-issues export"');
+      const current = readKnownIssuesRaw();
+      const have = new Set(current.map((e) => e?.id));
+      const add = [];
+      const skipped = [];
+      for (const entry of body.entries) {
+        if (!entry || typeof entry.id !== 'string' || !entry.id || typeof entry.signature !== 'string' || !entry.signature) { skipped.push({ id: entry?.id ?? null, reason: 'needs a string id and a non-empty string signature' }); continue; }
+        if (have.has(entry.id)) { skipped.push({ id: entry.id, reason: 'an entry with this id already exists (left unchanged)' }); continue; }
+        try { compileSignature(entry.signature); } catch (err) { skipped.push({ id: entry.id, reason: `signature does not compile: ${err.message}` }); continue; }
+        if (entry.remediation === undefined || entry.remediation === null || entry.remediation === '') { skipped.push({ id: entry.id, reason: 'remediation is required - an entry without a fix is not worth sharing' }); continue; }
+        have.add(entry.id);
+        add.push({ id: entry.id, signature: entry.signature, description: entry.description ?? null, remediation: entry.remediation });
+      }
+      if (body.confirm !== true) return { written: false, wouldAdd: add, skipped, file: KNOWN_ISSUES_PATH, note: 'dry run - repeat with confirm:true (CLI: --confirm) to append them' };
+      if (add.length) {
+        fs.writeFileSync(KNOWN_ISSUES_PATH, `${JSON.stringify([...current, ...add], null, 2)}\n`);
+        analyticsCache = null;
+        broadcastUpdate('analytics', null);
+      }
+      return { written: add.length > 0, added: add, skipped, file: KNOWN_ISSUES_PATH };
     },
   },
 
@@ -4203,7 +4462,7 @@ const routes = [
     pattern: /^\/ask$/,
     handler: async (req) => {
       const body = await readJsonBody(req);
-      return handleAsk(body.session_id ? Number(body.session_id) : null, body.question);
+      return handleAsk(body.sessionId ? Number(body.sessionId) : body.session_id ? Number(body.session_id) : null, body.question);
     },
   },
 ];

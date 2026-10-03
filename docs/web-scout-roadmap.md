@@ -3137,6 +3137,63 @@ outside this process); the hot-tail re-read is bounded by 200 ids, not by a chan
 still judges a page command against the route known before the call (the reply corrects the log).
 
 Tests: `friction-round5.test.mjs`, two more in `friction-dashboard.test.mjs`.
+## V44 - friction awareness, round 6: one capability, four surfaces (implemented)
+
+Rounds 3-5 made the facts coherent. This round made the *reach* coherent: a capability that existed on one surface
+(a flag only the CLI had, a filter only the dashboard had, a warning worded three ways) now exists on all four, and a
+test says so.
+
+**A map that fails.** `surfaces.mjs` lists every capability with its HTTP routes, CLI commands (the MCP action comes
+from `cli-spec.mjs`) and the dashboard calls that reach it. `surfaces.test.mjs` fails when a relay route belongs to no
+capability, when a claim names something that does not exist, when a capability leaves the CLI or dashboard empty
+without saying why, and when a `family: 'friction'` capability lacks any surface. It found, the first time it ran, that
+`friction explain/config/prune` had no dashboard control; they have one now.
+
+**One shape for "what the agent was told".** `notices.mjs`: a notice is `{kind, level, message, key, next:[...]}`,
+each next step written once as a CLI line, an MCP call and an HTTP request. The relay's five separate warning headers
+(selector risk, macro match, recovered, friction broadcast, nudge) still go out unchanged for older callers, and are
+also carried as one `x-webscout-notices` header, **kept** in `session_notices`, and pushed to the dashboard over SSE.
+The client renders it once for both front ends - `selector ".x" has failed 3x [why: friction explain dom.click ".x"]`
+in the CLI, `... [why: webscout_meta.friction {"sub":"explain",...}]` over MCP - and the dashboard lists them with
+buttons that run the HTTP form. `friction notices [--since <id>]` polls, `friction watch` tails.
+
+**One vocabulary.** The wire speaks camelCase everywhere (`strictCrv`, `tokenBudget`, `ifStaleMin`, `autoRecover`,
+`sessionId`); `POST /sessions` and `POST /ask` still accept the snake_case spellings (every snake key gets its camelCase
+twin), the CLI and the MCP server send the canonical ones.
+
+**The same answer from every surface.** `GET /friction/targets?q=&sort=&limit=` (CLI `friction targets`, MCP
+`friction targets`, and the dashboard table, which no longer filters in the browser) runs one pure function. Contract
+tests drive one scenario through HTTP, a spawned CLI and a spawned MCP server and assert the same warning wording and
+the same rows.
+
+**More from what is already recorded.**
+- *Cost in tokens, not only seconds.* Every failed call and retry has a token cost (chars/4, the unit `token-report`
+  uses); targets carry `wastedTokens`, the score adds it (250 tokens = 1 point, `WEBSCOUT_TOKENS_PER_POINT`), the table
+  has a column and a sort.
+- *Relapses.* `friction regressions` (HTTP, CLI, MCP, dashboard, `analytics.relapsedFriction`, the digest) lists
+  targets and command types declared fixed that have failed again; `--fail` sets the exit status; the opt-in
+  `.githooks/post-merge` hook runs it when a relay is up.
+- *The registry travels.* `known-issues export [--out]` / `import <file> [--confirm]` merge by id, refuse entries
+  without a valid signature or a remediation, and write only on confirm.
+- *Replay.* `session replay <id>` re-runs a recorded session in the active one up to its first failure - a dry run
+  (plan, expected failure, friction risk per step) unless `--confirm`, which ends with a verdict: still reproduces /
+  fails differently / does not reproduce.
+- *Friction in the report and the flows.* A session report has a "Friction awareness" section (told, warned-then-failed-
+  again, declared fixed); `crv preflight` carries the goal's `frictionBriefing`; `macro list --risk` and the dashboard
+  macros table show how many steps would draw a warning now (a purely live risk counts, not only history).
+
+**Trust.** `host-health` tests build their 205 dirs without ledger appends and wait for a delete a scanner may hold;
+`startTestRelay` retries on a fresh port when another test took the one it was given; `crv-launch.test.mjs` kills the
+tab it launched and removes its profile; `serve-control` removes its log on a clean stop; `<guid>.tmp` and `msedge_*`
+files a killed browser writes into TEMP are not counted as leaks. Not fixed: `reply-budget.test.mjs` failed once at file
+level in a full run and not in isolation (consistent with the port race above, which is now retried).
+
+Not done: an MCP *resource* for the notice stream (a poll with the `since` cursor does the same job today); the
+dashboard cannot pick a file for `issues import` without the browser's file chooser, so that path is covered by the
+API and CLI tests; the `replay` button is a form in the tools drawer, not a per-failure button in the action log.
+
+Tests: `surfaces.test.mjs`, `friction-round6.test.mjs`, one more browser test in `friction-dashboard.test.mjs`.
+
 ## V40r - CRV workflow friction closed after a real P4.10 pass (implemented; numbered separately from V40-V43 above, merged from the distribution line)
 
 A real-browser CRV pass against a P4.10 (Capital Flow "limited authority pilot outcome
@@ -3224,7 +3281,7 @@ gaps, each closing a place where the learned history existed but arrived too lat
   step targets. Suggestion only; no id evidence means no suggestion, by design (a guess would be worse
   than silence).
 
-## V42 - css has-rule, from an eval-body audit rather than a guess (implemented)
+## V42r - css has-rule, from an eval-body audit rather than a guess (implemented)
 
 A session asked "what repeatable shapes are hiding inside `eval` calls" and answered it by querying
 `webscout.db`'s own `actions` table directly (206 real eval bodies across 13 sessions) instead of
@@ -3240,7 +3297,7 @@ recurses into `@media`/`@supports` nesting, and matches `selectorText` by plain 
 reply-shaping flags (`--table`/`--if-changed`/`--delta`/`--peek`/`--no-guard`) every `readCacheable`
 command gets for free.
 
-## V43 - repeatedEvalShapes, turning the V42 audit query into a standing signal (implemented)
+## V43r - repeatedEvalShapes, turning the V42 audit query into a standing signal (implemented)
 
 The V42 audit (above) answered "what's hiding in eval calls" by hand-querying `webscout.db`
 directly - real, but a one-off; nothing would re-run it next time. V43 folds the same
@@ -3255,7 +3312,7 @@ tells you which shape to go design a real command around (the way this exact pro
 hand once, found `css.hasRule`), not something a command gets auto-generated from - the
 normalization throws away the literal selectors/fields a real API needs to get right.
 
-## V44 - dom extract-all, the audit's second-clearest win (implemented)
+## V44r - dom extract-all, the audit's second-clearest win (implemented)
 
 The V42 eval-body audit's #2 shape by raw count: a
 `[...document.querySelectorAll(sel)].map(el => ({...}))`-style extraction,
@@ -3269,7 +3326,7 @@ any other string treated as an attribute name via `getAttribute` - rather
 than inventing a general query language for variety the audit didn't
 actually demonstrate a need for. Read-only/cacheable, capped at 50 rows.
 
-## V45 - dom drag, a named gap rather than an audit-ranked one (implemented)
+## V45r - dom drag, a named gap rather than an audit-ranked one (implemented)
 
 The eval-body audit that found css.hasRule (17) and dom.extractAll (~24) also found a
 hand-rolled drag-and-drop simulation, but only 2 occurrences - the smallest of the three
@@ -3285,7 +3342,7 @@ timeoutVerifiable/autoScreenshot); reuses the same ambiguous-selector resolution
 field-validated of the V42/V44/V45 trio - worth more real-use scrutiny before leaning on it the
 way `css.hasRule` is now trusted.
 
-## V46 - selector-risk warning cross-process dedupe, and dom.drag's "to" joining the friction-tracking system (implemented)
+## V46r - selector-risk warning cross-process dedupe, and dom.drag's "to" joining the friction-tracking system (implemented)
 
 Two gaps from actually using V45's `dom.drag`, same "the mechanism already exists, it just
 missed this one input" shape as most rounds in this file:

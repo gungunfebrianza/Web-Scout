@@ -17,7 +17,7 @@ import { testRunFile } from './host-health.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const realTmp = os.tmpdir();
 const root = fs.mkdtempSync(path.join(realTmp, 'webscout-testroot-'));
-const IGNORED = ['node-compile-cache', 'webscout-relays.jsonl', 'webscout-scratch-log.jsonl', 'webscout-scratch-ledger.jsonl', 'webscout-host-samples.jsonl', 'webscout-warn-cache-', 'msedge_url_fetcher_', 'cv_debug.log']; // shared-by-design files
+const IGNORED = ['node-compile-cache', 'webscout-relays.jsonl', 'webscout-scratch-log.jsonl', 'webscout-scratch-ledger.jsonl', 'webscout-host-samples.jsonl', 'webscout-warn-cache-', 'msedge_', 'cv_debug.log']; // shared-by-design files
 const ours = (dir) => scratchStats({ baseDir: dir }).dirs; // our prefixes only: unrelated tools may create wl-* meanwhile
 const before = ours(realTmp);
 

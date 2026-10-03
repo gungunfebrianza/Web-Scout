@@ -29,7 +29,9 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 // Measured 21,313 after merging the distribution line into friction rounds 2-5 (its macro.update, console.history,
 // verity_history/verity_show, css.has_rule, idb.seed_template, dom extract_all/drag text on top of this line's
 // friction subs) - raised to 21350, same commit, same convention. Trimming descriptions is the next move.
-const MCP_TOTAL_MAX_BYTES = 21350;
+// Measured 21,738 in friction round 6 (friction targets/notices/regressions/issues subs, session replay, macro list risk) -
+// raised to 21750, same commit, same convention.
+const MCP_TOTAL_MAX_BYTES = 21750;
 // Raised to 3550 when V38 added crv_preflight/crv_seed/crv_cleanup to webscout_idb (already the
 // biggest single tool, from crv_run) - same commit-with-the-text convention as above.
 // Raised to 3650 when V39 extended crv_preflight's one-line description (webscout_idb measured 3,606).
@@ -44,7 +46,8 @@ const MCP_TOOL_MAX_BYTES = 3720;
 // Raised to 15800 when V39's "session start --if-stale-min" text landed in the same group (measured
 // 15,774) - same convention, same commit as the text.
 // Raised to 15900 in friction round 5 (session start --auto-recover / frictionBriefing, measured 15,872) - same convention.
-const HELP_GROUP_MAX_CHARS = 15900;
+// Raised to 16300 in round 6 (session replay, measured 16,255) - same convention.
+const HELP_GROUP_MAX_CHARS = 16300;
 const HELP_INDEX_MAX_CHARS = 2200;
 
 let child;

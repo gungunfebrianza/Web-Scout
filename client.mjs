@@ -23,6 +23,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { startRelay, restartRelay, recordRelayEvent } from './relay-control.mjs';
+import { parseNotices, renderNotice, NOTICES_HEADER } from './notices.mjs';
 
 // "crv seed"/"crv cleanup" convenience (both cli.mjs and mcp-server.mjs use
 // these): a manifest of {store, ids} entries tracking synthetic rows written
@@ -75,6 +76,11 @@ export async function collectNotes(fn) {
     throw err;
   }
 }
+
+// How a notice's next steps are written: as a CLI line (cli.mjs) or as a tool call (mcp-server.mjs sets 'mcp'
+// at start-up). One notice, one wording, each caller gets steps it can paste.
+let noteStyle = 'cli';
+export function setNoteStyle(style) { noteStyle = style === 'mcp' ? 'mcp' : 'cli'; }
 
 function emitNote(text, key = text) {
   const sink = noteStore.getStore();
@@ -231,8 +237,23 @@ export async function request(method, pathName, body, { autostart = true } = {})
   // safe from BOTH callers of this shared client: cli.mjs already nudges
   // this way at session end, and mcp-server.mjs's stdio JSON-RPC channel is
   // stdout-only, so a stderr line here can never corrupt a JSON-RPC reply.
+  // One structured header (notices.mjs) now carries what the relay used to say through five separate ones, with
+  // the next steps attached. When it is present it speaks for those legacy headers (which are still sent, for
+  // older callers); a relay that predates it falls through to the per-header handling below.
+  const spoken = new Set();
+  for (const n of parseNotices(res.headers.get(NOTICES_HEADER))) {
+    const legacy = { nudge: 'x-webscout-nudge', 'macro-match': 'x-webscout-macro-match', recovered: 'x-webscout-recovered', 'friction-broadcast': 'x-webscout-friction-broadcast', 'selector-risk': 'x-webscout-selector-risk' }[n.kind];
+    if (legacy) spoken.add(legacy);
+    if (n.kind === 'selector-risk') {
+      const cacheKey = `selector-risk:${n.key ?? n.message}`;
+      if (!warnCacheDue(cacheKey)) continue;
+      warnCacheRecord(cacheKey);
+    }
+    const text = renderNotice(n, noteStyle);
+    emitNote(n.kind === 'recovered' ? `recovered: ${text}` : text);
+  }
   const nudge = res.headers.get('x-webscout-nudge');
-  if (nudge) emitNote(nudge);
+  if (nudge && !spoken.has('x-webscout-nudge')) emitNote(nudge);
   // Pre-action risky-selector warn and proactive macro-match nudge (see relay.mjs's
   // maybeRiskySelectorWarn/maybeMacroMatchNudge) - same header-not-body convention as the
   // nudge above, for the same reason (never change the shape of a command's own real result).
@@ -245,19 +266,19 @@ export async function request(method, pathName, body, { autostart = true } = {})
   // keeps changing (failCount climbs), so it can't be used as its own cache key.
   const selectorRisk = res.headers.get('x-webscout-selector-risk');
   const selectorRiskKey = res.headers.get('x-webscout-selector-risk-key') || selectorRisk;
-  if (selectorRisk && warnCacheDue(`selector-risk:${selectorRiskKey}`)) {
+  if (selectorRisk && !spoken.has('x-webscout-selector-risk') && warnCacheDue(`selector-risk:${selectorRiskKey}`)) {
     warnCacheRecord(`selector-risk:${selectorRiskKey}`);
     emitNote(selectorRisk);
   }
   const macroMatch = res.headers.get('x-webscout-macro-match');
-  if (macroMatch) emitNote(macroMatch);
+  if (macroMatch && !spoken.has('x-webscout-macro-match')) emitNote(macroMatch);
   // --try-recovery ran a different selector than the one asked for: the caller must know which one acted.
   const recovered = res.headers.get('x-webscout-recovered');
-  if (recovered) emitNote(`recovered: ${recovered}`);
+  if (recovered && !spoken.has('x-webscout-recovered')) emitNote(`recovered: ${recovered}`);
   // Another connected agent just hit a known issue / repeated failure (relay.mjs's
   // queueFrictionBroadcast) - informational only, same header-not-body convention.
   const frictionBroadcast = res.headers.get('x-webscout-friction-broadcast');
-  if (frictionBroadcast) emitNote(frictionBroadcast);
+  if (frictionBroadcast && !spoken.has('x-webscout-friction-broadcast')) emitNote(frictionBroadcast);
   // The relay process is running OLDER code than what is on disk (an edit to
   // relay.mjs/db.mjs/... is invisible to it until restart) - once per process
   // is enough for a long-lived caller; the warnCacheDue check below is what

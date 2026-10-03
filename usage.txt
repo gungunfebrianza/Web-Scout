@@ -180,6 +180,10 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   session viz <id> [--section swimlane|episodes|stateMachine|sequence|waste|costTree|failureHeatmap|causality|routeMachine]
                                    the dashboard's own derived views as JSON (same data GET
                                    /sessions/:id/viz serves) - --section prints just one of them
+  session replay <id> [--all] [--confirm] [--agent <name>]
+                                   re-run a session in the ACTIVE one to its first failure (--all: all of it): does it
+                                   still reproduce? Dry run (plan + expected failure) unless --confirm - the steps write
+                                   to the page; --confirm ends with a VERDICT line.
   session cleanup <id> [--confirm] [--summary]
                                    --summary collapses pendingDeletes/deleted/failed/changedNotDeleted
                                    down to a per-store row COUNT instead of full row bodies - a dry-run
@@ -763,8 +767,10 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    says how many); the macro's own historical estTokens cost is
                                    stamped once here too (steps_cost_est), read back with zero live
                                    lookup by "macro list"/"macro run".
-  macro list                      list saved macros (id, name, step count, source session, and
-                                   each one's own steps_cost_est/compacted_steps_removed)
+  macro list [--risk]             list saved macros (id, name, step count, source session, and
+                                   each one's own steps_cost_est/compacted_steps_removed); --risk adds how many
+                                   of a macro's steps would draw a friction warning right now (the same facts
+                                   the pre-action header uses) and the worst one
   macro show <id>                 full macro detail, including every step
   macro run <id> [--continue-on-error] [--from-step N] [--confirm] [--full]
                                    replay a macro's steps against the CURRENTLY active session -
@@ -922,10 +928,29 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    this session's failures, resolutions, recoveries ("worked 4 of 5
                                    times"), the decision and the thresholds it was judged on
   friction session                        what THIS session ran into and what the agent was told
+  friction targets [--filter <text>] [--sort cost|fails|wasted|tokens|recent|oldest] [--limit <n>]
+                                   the ranked list behind the warning, filtered (target, type, origin, error
+                                   class, last error) and sorted on the relay - the dashboard table makes the
+                                   same call, so every surface returns the same rows. Each row carries
+                                   wastedTokens (chars/4 of the failed calls and retries; 250 tokens = 1 point of
+                                   cost, WEBSCOUT_TOKENS_PER_POINT) next to wastedMs.
+  friction notices [--session <id>|all] [--since <last id>]
+                                   what agents were told (every warning / nudge carries its next steps as a CLI
+                                   line, an MCP call and an HTTP request); --since is a cursor for polling
+  friction watch [--for <seconds>] [--count <n>] [--session <id>]
+                                   the same notices as they happen (tails GET /events), until Ctrl+C
+  friction regressions [--fail]   targets declared fixed that have failed again since; --fail exits 1 if any
+                                   (a CI / post-merge check)
   friction config                         the thresholds in effect (all WEBSCOUT_* env knobs)
   friction prune [--days N] [--confirm]   retention, dry run unless --confirm: sweeps orphaned warning
                                    state; with --days (>= 7) also drops the stored result BODIES of
                                    older actions. History, rankings and declarations are kept.
+  known-issues export [--out <file>]
+                                   the registry as written (to a file, or on stdout) - to share with another checkout
+  known-issues import <file> [--confirm]
+                                   merge an export in by id: existing ids are left alone, entries without a valid
+                                   signature or without a remediation are refused with the reason; a dry run
+                                   unless --confirm
   known-issues promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm]
                                    turns an analytics knownIssueCandidates draft into a real
                                    known-issues.json entry. Needs the remediation (a draft cannot

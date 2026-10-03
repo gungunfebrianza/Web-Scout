@@ -335,7 +335,7 @@ test('frictionConfig reports the thresholds in effect', () => {
 
 // ---------- round 4 ----------
 
-import { buildFrictionClusters, normalizeErrorText, STRICT_CRV_FAIL_WEIGHT } from './friction.mjs';
+import { buildFrictionClusters, normalizeErrorText, STRICT_CRV_FAIL_WEIGHT, TOKENS_PER_POINT } from './friction.mjs';
 
 test('buildFrictionClusters: many selectors, one error -> one cause; distinct errors and small groups are not clusters', () => {
   const rows = [];
@@ -360,7 +360,11 @@ test('buildSelectorFriction: a failure in a weighted (strict-CRV) session costs 
   assert.equal(plain[0].score, plain[1].score, 'equal cost without weights');
   const weighted = buildSelectorFriction(rows, { sessionWeights: new Map([[2, 1.5]]) });
   assert.equal(weighted[0].selector, '#b');
-  assert.equal(weighted.find((e) => e.selector === '#b').score, 3.5, '1.5 + 1.5 weighted failures + half a point for the retry');
-  assert.equal(weighted.find((e) => e.selector === '#a').score, 2.5);
+  // time + retries + the tokens the failed calls cost (250 tokens = 1 point), rounded as the score is
+  const pts = (e) => (e.wastedTokens > 0 ? e.wastedTokens / TOKENS_PER_POINT : 0);
+  const b = weighted.find((e) => e.selector === '#b');
+  const a = weighted.find((e) => e.selector === '#a');
+  assert.equal(b.score, Math.round((3.5 + pts(b)) * 10) / 10, '1.5 + 1.5 weighted failures + half a point for the retry + token points');
+  assert.equal(a.score, Math.round((2.5 + pts(a)) * 10) / 10);
   assert.equal(typeof STRICT_CRV_FAIL_WEIGHT, 'number');
 });

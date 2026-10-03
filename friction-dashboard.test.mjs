@@ -136,3 +136,69 @@ test('friction table: filter and sort act on the ranked list, "mark fixed" offer
     await relay.stop();
   }
 });
+
+test('friction panels: what the agent was told (with its next step), declared-fixed-but-failing, the tools drawer, and macro risk', { skip: browserSkip(), timeout: 120000 }, async () => {
+  const relay = await startTestRelay({ env: { WEBSCOUT_ANALYTICS_CACHE_MS: '0' } });
+  let page;
+  let tab;
+  try {
+    const api = async (method, route, body) => (await (await fetch(`http://127.0.0.1:${relay.port}${route}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined })).json()).result;
+    const broken = new Set();
+    tab = await connectFakeAgent(relay.port, {
+      'dom.click': (p) => { if (broken.has(p.selector)) throw new Error(`Element not found: ${p.selector}`); return { clicked: true, mutated: false }; },
+    }, { origin: 'http://localhost:4100' });
+
+    // a macro that will be risky, recorded while everything works
+    const rec = await api('POST', '/sessions', { goal: 'record checkout macro', context: 'friction-dashboard.test.mjs', briefing: false });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#pay' } });
+    await api('POST', '/macros', { name: 'checkout', sessionId: rec.id });
+    await api('POST', `/sessions/${rec.id}/end`);
+
+    // #pay breaks: three failures, declared fixed, then it fails again (a relapse)
+    broken.add('#pay');
+    const a = await api('POST', '/sessions', { goal: 'break pay', context: 'friction-dashboard.test.mjs', briefing: false });
+    for (let n = 0; n < 3; n += 1) await api('POST', '/command', { type: 'dom.click', params: { selector: '#pay' } });
+    await api('POST', `/sessions/${a.id}/end`);
+    await api('POST', '/friction/resolve', { type: 'dom.click', selector: '#pay', note: 'rebuilt' });
+    await new Promise((r) => setTimeout(r, 30));
+    const live = await api('POST', '/sessions', { goal: 'record checkout macro again', context: 'friction-dashboard.test.mjs', briefing: false });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#pay' } });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#pay' } });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#pay' } }); // warned here
+
+    page = await launchBrowser(findBrowser());
+    await page.navigate(`http://127.0.0.1:${relay.port}/dashboard`);
+
+    // notices: the warning the agent got, with a "why" button that runs the explain request
+    assert.ok(await waitFor(page, `document.querySelector('#frictionNotices [data-friction-act=notice-next]') ? true : false`), 'a notice with a next step is listed');
+    assert.match(await page.evaluate(`document.getElementById('frictionNotices').innerText`), /selector-risk/);
+    await page.evaluate(`document.querySelector('#frictionNotices [data-friction-act=notice-next]').click()`);
+    assert.ok(await waitFor(page, `(() => { const o = document.getElementById('frictionExplainOut'); return !o.hidden && /"wouldWarn"/.test(o.textContent); })()`), 'the next step ran and its answer is shown');
+
+    // relapse
+    assert.ok(await waitFor(page, `document.getElementById('frictionRegressions').innerText.includes('failing again (1)')`), 'the relapse is listed');
+    assert.match(await page.evaluate(`document.getElementById('frictionRegressions').innerText`), /#pay was declared fixed/);
+
+    // the table asks the relay (count text comes from GET /friction/targets) and has a why button and a tokens column
+    assert.ok(await waitFor(page, `document.querySelector('#frictionDetail table') ? true : false`));
+    assert.match(await page.evaluate(`document.querySelector('#frictionDetail table thead').innerText`), /tokens/i);
+    assert.match(await page.evaluate(`document.getElementById('frictionCount').textContent`), /target/);
+
+    // tools drawer
+    await page.evaluate(`document.getElementById('frictionTools').open = true; document.querySelector('[data-friction-act=show-config]').click()`);
+    assert.ok(await waitFor(page, `/"riskyFailThreshold"/.test(document.getElementById('frictionConfigOut').textContent)`), 'thresholds shown');
+    await page.evaluate(`document.getElementById('pruneDays').value = '30'; document.querySelector('[data-friction-act=prune-preview]').click()`);
+    assert.ok(await waitFor(page, `/"dryRun": true/.test(document.getElementById('pruneOut').textContent)`), 'a retention preview, nothing applied');
+    await page.evaluate(`document.getElementById('replayId').value = '${a.id}'; document.querySelector('[data-friction-act=replay-plan]').click()`);
+    assert.ok(await waitFor(page, `/"isTheFailure": true/.test(document.getElementById('replayOut').textContent)`), 'a replay plan for the broken session');
+
+    // macros table: the risk column
+    assert.ok(await waitFor(page, `(() => { const r = [...document.querySelectorAll('#macrosTable tbody tr')].find((x) => /checkout/.test(x.innerText)); return r && /1 risky/.test(r.innerText); })()`), 'the macro shows one risky step');
+    void live;
+    assert.deepEqual(page.errors, [], `page errors: ${page.errors.join(' | ')}`);
+  } finally {
+    tab?.close();
+    await page?.close();
+    await relay.stop();
+  }
+});

@@ -63,7 +63,7 @@ export async function startTestRelay({ script = path.join(__dirname, 'relay.mjs'
   }
   if (!reaped) { reaped = true; reapLeakedRelays(); }
   const dir = tmpDir('webscout-test-');
-  const port = await freePort();
+  let port = await freePort();
   const env = {
     WEBSCOUT_PORT: String(port),
     WEBSCOUT_DB_PATH: path.join(dir, 'test.db'),
@@ -83,14 +83,26 @@ export async function startTestRelay({ script = path.join(__dirname, 'relay.mjs'
     WEBSCOUT_NO_HOST_SCAN: '1',
     ...envOverride,
   };
-  const child = spawn(process.execPath, [script], { cwd: path.dirname(script), env: { ...process.env, ...env }, stdio: 'ignore', windowsHide: true });
-  const killNow = () => { try { child.kill(); } catch { /* already gone */ } };
-  process.on('exit', killNow);
-  try {
-    await waitForHealth(`http://127.0.0.1:${port}`, child);
-  } catch (err) {
-    killNow();
-    throw err;
+  // The port was free a moment ago, but another test file can take it before this relay binds (a relay that
+  // dies at once with EADDRINUSE). Retry on a fresh port - unless the caller pinned one on purpose.
+  const pinned = Boolean(envOverride.WEBSCOUT_PORT);
+  let child;
+  let killNow;
+  for (let attempt = 1; ; attempt += 1) {
+    child = spawn(process.execPath, [script], { cwd: path.dirname(script), env: { ...process.env, ...env }, stdio: 'ignore', windowsHide: true });
+    const spawned = child;
+    killNow = () => { try { spawned.kill(); } catch { /* already gone */ } };
+    process.on('exit', killNow);
+    try {
+      await waitForHealth(`http://127.0.0.1:${port}`, child);
+      break;
+    } catch (err) {
+      killNow();
+      process.off('exit', killNow);
+      if (attempt >= 3 || pinned || spawned.exitCode === null) throw err;
+      port = await freePort();
+      env.WEBSCOUT_PORT = String(port);
+    }
   }
   // Registered only once the relay is actually up (a real pid, a real port) - see relay-control.mjs's
   // registry comment. A clean stop() removes this entry; a hard kill leaves it for the next run's

@@ -18,6 +18,7 @@ import {
 import { validateArgs, findMsysMangledArgs, findSpec } from './cli-spec.mjs';
 import { parseUsage, helpTopic, helpMissing } from './help.mjs';
 import { describeFailureContext } from './friction.mjs';
+import { renderNotice } from './notices.mjs';
 import { resolveRelayPid, stopRelay, startRelay, restartRelay, RELAY_SOURCE_FILES } from './relay-control.mjs';
 import { sweepStale, formatSweep, scratchStats } from './scratch.mjs';
 
@@ -219,7 +220,7 @@ async function handleSession(sub, rawArgs) {
     const tags = tagsValue ? tagsValue.split(',').map((t) => t.trim()).filter(Boolean) : [];
     const strictCrvStores = storesValue ? storesValue.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
     await ensureFreshRelayForNewSession();
-    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strict_crv: strictCrv, strict_crv_stores: strictCrvStores, crv_compact: crvCompactValue || undefined, tags, token_budget: tokenBudgetValue !== undefined ? Number(tokenBudgetValue) : undefined, briefing: noBriefing ? false : undefined, lean: leanValue || undefined, agent: agentFlag, allow_remote: allowRemoteValue || undefined, auto_recover: autoRecoverValue || undefined, if_stale_min: ifStaleMinValue !== undefined ? Number(ifStaleMinValue) : undefined });
+    const session = await request('POST', '/sessions', { goal: args[0], context: args[1], strictCrv, strictCrvStores, crvCompact: crvCompactValue || undefined, tags, tokenBudget: tokenBudgetValue !== undefined ? Number(tokenBudgetValue) : undefined, briefing: noBriefing ? false : undefined, lean: leanValue || undefined, agent: agentFlag, allowRemote: allowRemoteValue || undefined, autoRecover: autoRecoverValue || undefined, ifStaleMin: ifStaleMinValue !== undefined ? Number(ifStaleMinValue) : undefined });
     if (session.autoEndedSession) {
       console.error(`NOTE: ${session.autoEndedSession.reason} (session #${session.autoEndedSession.id}: "${session.autoEndedSession.goal}").`);
     }
@@ -379,6 +380,20 @@ async function handleSession(sub, rawArgs) {
     if (section === undefined) { printResult(viz); return; }
     if (!(section in viz)) throw new Error(`session viz --section must be one of: ${Object.keys(viz).filter((k) => typeof viz[k] === 'object' && viz[k] !== null).join(', ')}`);
     printResult(viz[section]);
+    return;
+  }
+  if (sub === 'replay') {
+    let args = rawArgs;
+    let all;
+    let confirm;
+    ({ args, value: all } = extractBooleanFlag(args, '--all'));
+    ({ args, value: confirm } = extractBooleanFlag(args, '--confirm'));
+    ({ args, value: agentFlag } = extractFlag(args, '--agent'));
+    const id = args[0];
+    if (!id) throw new Error('session replay requires the id of the session to replay, e.g. session replay 12 (a dry run) or session replay 12 --confirm');
+    const out = await request('POST', `/sessions/${id}/replay`, { all: all === true, confirm: confirm === true, agent: agentFlag });
+    if (!out.dryRun && out.verdict) console.error(`VERDICT: ${out.verdict}`);
+    printResult(out);
     return;
   }
   if (sub === 'cleanup') {
@@ -578,7 +593,13 @@ async function handleMacro(sub, rawArgs) {
     return;
   }
   if (sub === 'list') {
-    printResult(await request('GET', '/macros'));
+    let risk;
+    ({ args: rawArgs, value: risk } = extractBooleanFlag(rawArgs, '--risk'));
+    const macros = await request('GET', risk ? '/macros?risk=1' : '/macros');
+    for (const m of macros) {
+      if (m.risk?.riskySteps) console.error(`NOTE: macro #${m.id} "${m.name}" has ${m.risk.riskySteps} step(s) that would draw a friction warning right now (worst: step ${m.risk.worst.stepIndex} "${m.risk.worst.selector}", failed ${m.risk.worst.failCount}x)`);
+    }
+    printResult(macros);
     return;
   }
   if (sub === 'show') {
@@ -847,6 +868,40 @@ function watchIdbStore(store, countGte, timeoutMs) {
   });
 }
 
+// Tails the relay's SSE feed (GET /events) and prints each notice an agent is handed, as it happens, with the
+// same next steps the agent saw. Ends after --for seconds or --count notices; otherwise runs until Ctrl+C.
+function watchNotices({ seconds, count, session }) {
+  return new Promise((resolve, reject) => {
+    let seen = 0;
+    let settled = false;
+    const finish = (value) => { if (settled) return; settled = true; clearTimeout(timer); req.destroy(); resolve(value); };
+    const req = http.get(`${BASE}/events`, (res) => {
+      let buf = '';
+      res.on('data', (chunk) => {
+        buf += chunk.toString('utf8');
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const data = frame.split('\n').find((l) => l.startsWith('data: '));
+          if (!data) continue;
+          let evt;
+          try { evt = JSON.parse(data.slice(6)); } catch { continue; }
+          if (evt.kind !== 'notice' || !evt.notice) continue;
+          if (session !== null && session !== 'all' && String(evt.sessionId) !== String(session)) continue;
+          seen += 1;
+          console.log(`[session ${evt.sessionId}] ${renderNotice(evt.notice, 'cli')}`);
+          if (count && seen >= count) finish(seen);
+        }
+      });
+      res.on('error', (err) => { if (!settled) { settled = true; clearTimeout(timer); reject(err); } });
+    });
+    req.on('error', (err) => { if (!settled) { settled = true; clearTimeout(timer); reject(err); } });
+    const timer = seconds ? setTimeout(() => finish(seen), seconds * 1000) : { unref() {} };
+    if (!seconds) clearTimeout(timer);
+  });
+}
+
 async function main() {
   const [command, ...restRaw] = process.argv.slice(2);
   let rest = restRaw;
@@ -976,6 +1031,44 @@ async function main() {
     if (sub === 'list') { printResult(await request('GET', '/friction/resolutions')); return; }
     if (sub === 'config') { printResult(await request('GET', '/friction/config')); return; }
     if (sub === 'session') { printResult(await request('GET', '/friction/session')); return; }
+    if (sub === 'targets') {
+      const q = new URLSearchParams();
+      for (const [flag, name] of [['--filter', 'q'], ['--sort', 'sort'], ['--limit', 'limit']]) {
+        let v;
+        ({ args: fargs, value: v } = extractFlag(fargs, flag));
+        if (v !== undefined) q.set(name, v);
+      }
+      printResult(await request('GET', `/friction/targets?${q}`));
+      return;
+    }
+    if (sub === 'notices') {
+      const q = new URLSearchParams();
+      for (const [flag, name] of [['--session', 'session'], ['--since', 'since']]) {
+        let v;
+        ({ args: fargs, value: v } = extractFlag(fargs, flag));
+        if (v !== undefined) q.set(name, v);
+      }
+      printResult(await request('GET', `/friction/notices?${q}`));
+      return;
+    }
+    if (sub === 'watch') {
+      let seconds; let count; let session;
+      ({ args: fargs, value: seconds } = extractFlag(fargs, '--for'));
+      ({ args: fargs, value: count } = extractFlag(fargs, '--count'));
+      ({ args: fargs, value: session } = extractFlag(fargs, '--session'));
+      const seen = await watchNotices({ seconds: Number(seconds) || 0, count: Number(count) || 0, session: session === undefined ? null : session });
+      console.error(`watched ${seen} notice(s)`);
+      return;
+    }
+    if (sub === 'regressions') {
+      let fail;
+      ({ args: fargs, value: fail } = extractBooleanFlag(fargs, '--fail'));
+      const out = await request('GET', '/friction/regressions');
+      for (const r of out.relapses) console.error(`REGRESSION: ${r.summary}`);
+      printResult(out);
+      if (fail && out.count > 0) process.exitCode = 1;
+      return;
+    }
     if (sub === 'prune') {
       let days; let confirm;
       ({ args: fargs, value: days } = extractFlag(fargs, '--days'));
@@ -996,14 +1089,37 @@ async function main() {
       }
       return;
     }
-    throw new Error('friction requires a subcommand: explain <type> <selector> | resolve <type> <selector> [--note "..."] | resolve cluster <id> | unresolve <type> <selector> | list | session | config | prune [--days N] [--confirm]');
+    throw new Error('friction requires a subcommand: explain <type> <selector> | resolve <type> <selector> [--note "..."] | resolve cluster <id> | unresolve <type> <selector> | list | session | targets [--filter t] [--sort s] [--limit n] | notices [--session id|all] [--since n] | watch [--for s] [--count n] | regressions [--fail] | config | prune [--days N] [--confirm]');
   }
 
   // known-issues promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm]
   // Turns an analytics.knownIssueCandidates draft into a real known-issues.json entry. Without
   // --confirm it only prints the entry it would write.
   if (command === 'known-issues') {
-    if (rest[0] !== 'promote') throw new Error('known-issues supports: promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm]');
+    if (rest[0] === 'export') {
+      let kargs = rest.slice(1);
+      let out;
+      ({ args: kargs, value: out } = extractFlag(kargs, '--out'));
+      const reg = await request('GET', '/known-issues');
+      if (out) {
+        fs.writeFileSync(out, `${JSON.stringify(reg.entries, null, 2)}\n`);
+        console.error(`wrote ${reg.entries.length} entr${reg.entries.length === 1 ? 'y' : 'ies'} to ${out}`);
+      } else {
+        printResult(reg);
+      }
+      return;
+    }
+    if (rest[0] === 'import') {
+      let kargs = rest.slice(1);
+      let confirm;
+      ({ args: kargs, value: confirm } = extractBooleanFlag(kargs, '--confirm'));
+      if (!kargs[0]) throw new Error('known-issues import requires <file> (a JSON array, or {entries:[...]} as "known-issues export" prints) - without --confirm it only reports what it would add');
+      const parsed = JSON.parse(fs.readFileSync(kargs[0], 'utf8'));
+      const entries = Array.isArray(parsed) ? parsed : parsed.entries;
+      printResult(await request('POST', '/known-issues/import', { entries, confirm: confirm === true }));
+      return;
+    }
+    if (rest[0] !== 'promote') throw new Error('known-issues supports: promote <candidateId> --remediation "..." [--description "..."] [--signature "..."] [--confirm] | export [--out <file>] | import <file> [--confirm]');
     let kargs = rest.slice(1);
     let remediation; let description; let signature; let confirm;
     ({ args: kargs, value: remediation } = extractFlag(kargs, '--remediation'));
@@ -1317,7 +1433,7 @@ async function main() {
     }
     const question = a.join(' ');
     if (!question) throw new Error('ask requires a question');
-    printResult(await request('POST', '/ask', { session_id: sessionId ?? undefined, question }));
+    printResult(await request('POST', '/ask', { sessionId: sessionId ?? undefined, question }));
     return;
   }
 

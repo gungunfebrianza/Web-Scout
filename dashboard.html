@@ -363,6 +363,13 @@
   #frictionControls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 11px; margin-top: 8px; }
 #frictionControls input, #frictionControls select { font-size: 11px; }
 #frictionToast { font-size: 11px; margin-top: 6px; padding: 4px 8px; border: 1px solid currentColor; border-radius: 4px; }
+.friction-pre { font-size: 10px; max-height: 220px; overflow: auto; white-space: pre-wrap; margin: 4px 0; padding: 4px 6px; border: 1px solid currentColor; border-radius: 4px; }
+#frictionNotices, #frictionRegressions, #frictionTools { font-size: 11px; margin-top: 8px; }
+#frictionNotices h3, #frictionRegressions h3, #frictionTools h3 { font-size: 11px; margin: 8px 0 4px; }
+#frictionNotices ul, #frictionRegressions ul { margin: 0; padding-left: 16px; }
+#frictionTools summary { cursor: pointer; }
+.friction-tool { margin: 6px 0; }
+.friction-tool input[type=number] { width: 70px; font-size: 11px; }
 #frictionLive { font-size: 11px; margin-top: 8px; }
   #frictionLive h3 { font-size: 11px; margin: 0 0 4px; }
   .friction-form { margin-top: 4px; }
@@ -713,12 +720,24 @@
     <input id="frictionFilter" type="search" placeholder="filter: target, type, origin, error class" aria-label="filter friction table">
     <select id="frictionSort" aria-label="sort friction table">
       <option value="cost">sort: cost</option><option value="fails">sort: fails</option><option value="wasted">sort: time wasted</option>
-      <option value="recent">sort: most recent failure</option><option value="oldest">sort: oldest failure</option>
+      <option value="tokens">sort: tokens wasted</option><option value="recent">sort: most recent failure</option><option value="oldest">sort: oldest failure</option>
     </select>
     <span id="frictionCount" class="muted"></span>
   </div>
+  <pre id="frictionExplainOut" class="friction-pre" hidden></pre>
+  <div id="frictionNotices"></div>
+  <div id="frictionRegressions"></div>
   <div id="frictionLive"></div>
   <div id="frictionDetail"></div>
+  <details id="frictionTools"><summary>Tools: thresholds, retention, known issues, replay</summary>
+    <div class="friction-tool"><h3>Thresholds in effect</h3><button class="friction-act" data-friction-act="show-config">show</button><pre id="frictionConfigOut" class="friction-pre" hidden></pre></div>
+    <div class="friction-tool"><h3>Retention</h3><label>drop stored result bodies older than <input id="pruneDays" type="number" min="7" value="30"> days</label>
+      <button class="friction-act" data-friction-act="prune-preview">preview</button> <button class="friction-act" data-friction-act="prune-apply">apply</button><pre id="pruneOut" class="friction-pre" hidden></pre></div>
+    <div class="friction-tool"><h3>Known issues</h3><button class="friction-act" data-friction-act="issues-export">export</button>
+      <input id="issuesFile" type="file" accept=".json,application/json"> <button class="friction-act" data-friction-act="issues-import-preview">preview import</button> <button class="friction-act" data-friction-act="issues-import-apply">import</button><pre id="issuesOut" class="friction-pre" hidden></pre></div>
+    <div class="friction-tool"><h3>Replay a session</h3><label>session # <input id="replayId" type="number" min="1"></label>
+      <button class="friction-act" data-friction-act="replay-plan">plan</button> <button class="friction-act" data-friction-act="replay-run">reproduce</button><small> (reproduce writes to the page, in the active session)</small><pre id="replayOut" class="friction-pre" hidden></pre></div>
+  </details>
   </section>
 </div>
 
@@ -1258,7 +1277,7 @@
     <button id="recordMacroBtn">Record macro from this session</button>
     <span class="muted">saves this session's own replayable actions (dom/idb/page.reload/eval) as a named, replayable sequence</span>
   </div>
-  <div class="hud-scroll-body"><table id="macrosTable"><thead><tr><th>ID</th><th>Name</th><th>Steps</th><th title="stamped once at record/update time">Est cost</th><th title="duplicate/templated steps folded out at record time">Compacted</th><th>Source session</th><th>Created</th><th>Last run</th><th></th></tr></thead><tbody></tbody></table></div>
+  <div class="hud-scroll-body"><table id="macrosTable"><thead><tr><th>ID</th><th>Name</th><th>Steps</th><th title="stamped once at record/update time">Est cost</th><th title="duplicate/templated steps folded out at record time">Compacted</th><th>Source session</th><th>Created</th><th title="steps that would draw a friction warning right now">Risk</th><th>Last run</th><th></th></tr></thead><tbody></tbody></table></div>
   <div id="macrosEmpty" class="empty" hidden>No macros recorded yet.</div>
   <div id="macroHealthStrip" style="margin-top:8px;"></div>
   </section>
@@ -3008,7 +3027,7 @@ function renderVerityRuns(runs) {
 async function refreshVerityRuns() { if (currentSessionId) renderVerityRuns(await api('GET', `/sessions/${currentSessionId}/verity-runs`)); }
 
 async function refreshMacros() {
-  const macros = await api('GET', '/macros');
+  const macros = await api('GET', '/macros?risk=1');
   lastMacros = macros;
   el('macrosEmpty').hidden = macros.length > 0;
   const body = document.querySelector('#macrosTable tbody');
@@ -3021,7 +3040,7 @@ async function refreshMacros() {
     const estCostText = Number.isFinite(m.steps_cost_est) ? `~${m.steps_cost_est}tok` : 'n/a';
     const compactedTotal = (m.compacted_steps_removed || 0) + (m.templated_steps_removed || 0);
     const compactedText = compactedTotal ? `${compactedTotal}` : '-';
-    tr.innerHTML = `<td>${m.id}</td><td>${esc(m.name)}</td><td>${m.steps.length}</td><td class="muted">${estCostText}</td><td class="muted">${compactedText}</td><td>${m.source_session_id ?? ''}</td><td>${fmtTime(m.created_at)}</td><td class="muted">${lastRunText}</td><td><button class="runMacroBtn">Run</button> <button class="delMacroBtn">Delete</button></td>`;
+    tr.innerHTML = `<td>${m.id}</td><td>${esc(m.name)}</td><td>${m.steps.length}</td><td class="muted">${estCostText}</td><td class="muted">${compactedText}</td><td>${m.source_session_id ?? ''}</td><td>${fmtTime(m.created_at)}</td><td class="muted" title="${m.risk?.worst ? esc(`worst: step ${m.risk.worst.stepIndex} ${m.risk.worst.selector} (failed ${m.risk.worst.failCount}x)`) : ''}">${m.risk?.riskySteps ? `${m.risk.riskySteps} risky` : '-'}</td><td class="muted">${lastRunText}</td><td><button class="runMacroBtn">Run</button> <button class="delMacroBtn">Delete</button></td>`;
     tr.querySelector('.runMacroBtn').addEventListener('click', async (e) => {
       e.stopPropagation();
       try {
@@ -4070,22 +4089,9 @@ async function renderFrictionLive() {
 // detail view is not rebuilt underneath them by the next analytics refresh.
 const frictionFormOpen = () => Boolean(el('frictionDetail')?.querySelector('details[open]'));
 
-// Filter + sort act on the rows the relay already ranked (analytics.selectorFriction), client-side: the same
-// list the agent's warning is built from, just viewed differently. The controls are static markup so typing
-// is never interrupted by a refresh re-rendering the table.
-const FRICTION_SORTS = {
-  cost: (x, y) => y.score - x.score,
-  fails: (x, y) => y.failCount - x.failCount || y.score - x.score,
-  wasted: (x, y) => y.wastedMs - x.wastedMs || y.score - x.score,
-  recent: (x, y) => String(y.lastFailedAt || '').localeCompare(String(x.lastFailedAt || '')),
-  oldest: (x, y) => String(x.lastFailedAt || '~').localeCompare(String(y.lastFailedAt || '~')),
-};
-function frictionView(list) {
-  const q = (el('frictionFilter')?.value || '').trim().toLowerCase();
-  const sort = FRICTION_SORTS[el('frictionSort')?.value] || FRICTION_SORTS.cost;
-  const hit = (f) => !q || [f.selector, f.type, f.targetKind, ...Object.keys(f.origins || {}), ...Object.keys(f.errorClasses || {}), f.lastError || ''].join(' ').toLowerCase().includes(q);
-  return list.filter(hit).sort(sort);
-}
+// Filter + sort run on the relay (GET /friction/targets), the same call `friction targets` makes from the CLI and
+// MCP, so the three views of "the ranked list" cannot differ. The controls are static markup so typing is never
+// interrupted by a refresh re-rendering the table.
 for (const id of ['frictionFilter', 'frictionSort']) {
   el(id)?.addEventListener('input', () => { if (lastAnalyticsData) renderFrictionDetail(lastAnalyticsData, { force: true }); });
 }
@@ -4105,23 +4111,32 @@ function frictionUndoToast(text, undo) {
   frictionToastTimer = setTimeout(() => { box.hidden = true; }, 10000);
 }
 
-function renderFrictionDetail(a, { force = false } = {}) {
+let frictionRenderSeq = 0;
+async function renderFrictionDetail(a, { force = false } = {}) {
   const box = el('frictionDetail');
   if (!box) return;
   renderFrictionLive();
+  renderFrictionNotices();
+  renderFrictionRegressions();
   if (!force && frictionFormOpen()) return;
-  const all = a.selectorFriction || [];
-  const viewed = frictionView(all);
-  const rows = viewed.slice(0, 30);
-  if (el('frictionCount')) el('frictionCount').textContent = all.length ? `${rows.length < viewed.length ? `first ${rows.length} of ` : ''}${viewed.length}${viewed.length !== all.length ? ` of ${all.length}` : ''} target(s)` : '';
+  const seq = (frictionRenderSeq += 1);
+  const q = new URLSearchParams({ sort: el('frictionSort')?.value || 'cost', limit: '30' });
+  const text = (el('frictionFilter')?.value || '').trim();
+  if (text) q.set('q', text);
+  let view;
+  try { view = await api('GET', `/friction/targets?${q}`); } catch { view = { total: (a.selectorFriction || []).length, shown: (a.selectorFriction || []).length, targets: (a.selectorFriction || []).slice(0, 30) }; }
+  if (seq !== frictionRenderSeq) return; // a newer render superseded this one
+  if (!force && frictionFormOpen()) return;
+  const rows = view.targets || [];
+  if (el('frictionCount')) el('frictionCount').textContent = view.total ? `${view.shown < view.total ? `${view.shown} of ${view.total}` : view.total} target(s)` : '';
   const classMix = (f) => Object.entries(f.errorClasses || {}).sort((x, y) => y[1] - x[1]).map(([k, n]) => `${esc(k)} ${n}`).join(', ');
   const originCount = (f) => Object.keys(f.origins || {}).filter(Boolean).length;
   const body = rows.map((f) => `<tr>
     <td title="${esc(f.key)}">${esc(frictionTargetLabel(f))}</td><td>${esc(f.type)}</td><td>${f.failCount}</td>
-    <td>${f.wastedMs >= 1000 ? (f.wastedMs / 1000).toFixed(1) + 's' : f.wastedMs + 'ms'}</td><td>${f.retries || 0}</td><td>${f.score}</td>
+    <td>${f.wastedMs >= 1000 ? (f.wastedMs / 1000).toFixed(1) + 's' : f.wastedMs + 'ms'}</td><td>${f.wastedTokens ? '~' + f.wastedTokens : '-'}</td><td>${f.retries || 0}</td><td>${f.score}</td>
     <td>${classMix(f)}</td><td>${originCount(f) || '-'}</td><td>${frictionRecoveryText(f.recovery)}</td>
-    <td><button class="friction-act" data-friction-act="resolve" data-type="${esc(f.type)}" data-target="${esc(f.selector)}" data-kind="${esc(f.targetKind || 'selector')}">mark fixed</button></td></tr>`).join('');
-  const table = rows.length ? `<table class="heatmap-table"><thead><tr><th>target</th><th>type</th><th>fails</th><th>wasted</th><th>retries</th><th>cost</th><th>error classes</th><th>origins</th><th>worked after</th><th></th></tr></thead><tbody>${body}</tbody></table>` : '';
+    <td><button class="friction-act" data-friction-act="explain" data-type="${esc(f.type)}" data-target="${esc(f.selector)}" data-kind="${esc(f.targetKind || 'selector')}">why</button> <button class="friction-act" data-friction-act="resolve" data-type="${esc(f.type)}" data-target="${esc(f.selector)}" data-kind="${esc(f.targetKind || 'selector')}">mark fixed</button></td></tr>`).join('');
+  const table = rows.length ? `<table class="heatmap-table"><thead><tr><th>target</th><th>type</th><th>fails</th><th>wasted</th><th>tokens</th><th>retries</th><th>cost</th><th>error classes</th><th>origins</th><th>worked after</th><th></th></tr></thead><tbody>${body}</tbody></table>` : '';
   const clusters = (a.frictionClusters || []).map((c) => `<li>${esc(c.summary)} <button class="friction-act" data-friction-act="resolve-cluster" data-id="${esc(c.id)}" data-label="${esc(c.targetCount + ' targets')}">mark all fixed</button> - ${c.targets.slice(0, 4).map((t) => `<code>${esc(t.selector)}</code>`).join(', ')}${c.targetCount > 4 ? ` +${c.targetCount - 4} more` : ''}</li>`).join('');
   const suggestions = (a.resolveSuggestions || []).map((s) => `<li>${esc(s.hint)} <button class="friction-act" data-friction-act="resolve" data-type="${esc(s.type)}" data-target="${esc(s.selector)}" data-kind="${esc(s.targetKind || 'selector')}">mark fixed</button></li>`).join('');
   const resolved = (a.resolvedFriction || []).map((r) => `<li>${esc(r.type)} ${esc(r.selector)} fixed at ${esc(fmtTime(r.resolvedAt))}${r.note ? ' - ' + esc(r.note) : ''} <button class="friction-act" data-friction-act="unresolve" data-type="${esc(r.type)}" data-target="${esc(r.selector)}" data-kind="${/^idb\./.test(r.type) ? 'store' : 'selector'}">undo</button></li>`).join('');
@@ -4162,6 +4177,15 @@ el('frictionDetail')?.addEventListener('click', async (e) => {
       btn.disabled = false;
       return;
     }
+    if (act === 'explain') {
+      const out = el('frictionExplainOut');
+      const aim = btn.dataset.kind === 'store' ? 'store' : 'selector';
+      const why = await api('GET', `/friction/explain?type=${encodeURIComponent(btn.dataset.type)}&${aim}=${encodeURIComponent(btn.dataset.target)}`);
+      out.hidden = false;
+      out.textContent = `${why.decision}\n${JSON.stringify({ wouldWarn: why.wouldWarn, numbers: why.numbers, history: why.history, thisSession: why.thisSession, cluster: why.cluster?.summary ?? null }, null, 2)}`;
+      btn.disabled = false;
+      return;
+    }
     if (act === 'resolve-cluster') {
       const res = await api('POST', '/friction/resolve', { type: 'cluster', selector: btn.dataset.id });
       frictionUndoToast(`marked ${res.count} target(s) fixed (one cause)`, () => api('POST', '/friction/unresolve', { type: 'cluster', targets: res.resolved }));
@@ -4177,6 +4201,87 @@ el('frictionDetail')?.addEventListener('click', async (e) => {
     window.alert('friction: ' + err.message);
   }
 });
+
+// ---------- What agents were told, declared-fixed-but-failing, and the tools drawer ----------
+// Notices are kept by the relay (session_notices); each carries the next steps as HTTP requests, so a button here
+// does exactly what the CLI line or MCP call in the same notice would.
+async function renderFrictionNotices() {
+  const box = el('frictionNotices');
+  if (!box) return;
+  try {
+    const out = await api('GET', '/friction/notices?limit=8');
+    const list = (out.notices || []).slice(-8).reverse();
+    if (!list.length) { box.innerHTML = ''; return; }
+    const items = list.map((n) => `<li><b>${esc(n.kind)}</b> ${esc(n.message)} ${(n.next || []).map((c) => `<button class="friction-act" data-friction-act="notice-next" data-http="${esc(c.http)}" data-body="${esc(JSON.stringify(c.body || {}))}" title="${esc(c.cli)}">${esc(c.label)}</button>`).join(' ')}</li>`).join('');
+    box.innerHTML = `<h3>What the agent was told (this session)</h3><ul>${items}</ul>`;
+  } catch { /* best-effort */ }
+}
+
+async function renderFrictionRegressions() {
+  const box = el('frictionRegressions');
+  if (!box) return;
+  try {
+    const out = await api('GET', '/friction/regressions');
+    if (!out.count) { box.innerHTML = ''; return; }
+    const items = out.relapses.slice(0, 6).map((r) => `<li>${esc(r.summary)} <button class="friction-act" data-friction-act="explain" data-type="${esc(r.type)}" data-target="${esc(r.selector)}" data-kind="${/^idb./.test(r.type) ? 'store' : 'selector'}">why</button></li>`).join('');
+    box.innerHTML = `<h3>Declared fixed, failing again (${out.count})</h3><ul>${items}</ul>`;
+  } catch { /* best-effort */ }
+}
+
+const showPre = (id, text) => { const out = el(id); if (out) { out.hidden = false; out.textContent = text; } };
+async function frictionToolAction(btn) {
+  const act = btn.dataset.frictionAct;
+  if (act === 'notice-next') {
+    const [method, route] = btn.dataset.http.split(' ');
+    const body = JSON.parse(btn.dataset.body || '{}');
+    const out = await api(method, route, method === 'GET' ? undefined : body);
+    showPre('frictionExplainOut', JSON.stringify(out, null, 2));
+    await refreshFriction({ force: true });
+  } else if (act === 'show-config') {
+    showPre('frictionConfigOut', JSON.stringify(await api('GET', '/friction/config'), null, 2));
+  } else if (act === 'prune-preview' || act === 'prune-apply') {
+    const days = Number(el('pruneDays').value) || undefined;
+    showPre('pruneOut', JSON.stringify(await api('POST', '/friction/prune', { days, confirm: act === 'prune-apply' }), null, 2));
+  } else if (act === 'issues-export') {
+    const reg = await api('GET', '/known-issues');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(reg.entries, null, 2)], { type: 'application/json' }));
+    a.download = 'known-issues.export.json';
+    a.click();
+    showPre('issuesOut', `exported ${reg.entries.length} entr${reg.entries.length === 1 ? 'y' : 'ies'} from ${reg.file}`);
+  } else if (act === 'issues-import-preview' || act === 'issues-import-apply') {
+    const file = el('issuesFile').files[0];
+    if (!file) throw new Error('choose a known-issues export file first');
+    const parsed = JSON.parse(await file.text());
+    const entries = Array.isArray(parsed) ? parsed : parsed.entries;
+    showPre('issuesOut', JSON.stringify(await api('POST', '/known-issues/import', { entries, confirm: act === 'issues-import-apply' }), null, 2));
+  } else if (act === 'replay-plan' || act === 'replay-run') {
+    const id = Number(el('replayId').value);
+    if (!id) throw new Error('enter the number of the session to replay');
+    if (act === 'replay-run' && !window.confirm('Reproduce re-runs that session\'s steps against the page in the ACTIVE session and stops at the first failure. Continue?')) return;
+    const out = await api('POST', `/sessions/${id}/replay`, { confirm: act === 'replay-run' });
+    showPre('replayOut', `${out.verdict ? out.verdict + '\n' : ''}${JSON.stringify(out, null, 2)}`);
+  }
+}
+for (const id of ['frictionTools', 'frictionNotices', 'frictionRegressions']) {
+  el(id)?.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-friction-act]');
+    if (!btn) return;
+    btn.disabled = true;
+    try {
+      if (btn.dataset.frictionAct === 'explain') {
+        const why = await api('GET', `/friction/explain?type=${encodeURIComponent(btn.dataset.type)}&${btn.dataset.kind === 'store' ? 'store' : 'selector'}=${encodeURIComponent(btn.dataset.target)}`);
+        showPre('frictionExplainOut', `${why.decision}\n${JSON.stringify({ wouldWarn: why.wouldWarn, numbers: why.numbers, history: why.history }, null, 2)}`);
+      } else {
+        await frictionToolAction(btn);
+      }
+    } catch (err) {
+      window.alert('friction: ' + err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
 
 // ---------- Cross-session cumulative token burn ----------
 function renderBurnChart(a) {
@@ -4815,6 +4920,7 @@ const KIND_REFRESH = {
   verity: async () => { await refreshVerityRuns(); renderTimeline(); },
   'repair-config': refreshRepairStatus,
   host: () => refreshHost({ slow: true, fresh: true }),
+  notice: () => { renderFrictionNotices(); },
 };
 
 function connectEvents() {

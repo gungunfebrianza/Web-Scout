@@ -177,7 +177,7 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   `node cli.mjs help friction` (usage.txt) is the canonical description**; this paragraph only names what exists:
   `friction explain <type> <selector>` (why it warned or not), `friction resolve <type> <selector>` /
   `friction resolve type|macro|verity|cluster <id>` and `friction unresolve` (mark fixed, only what happens
-  after counts), `friction list`, `friction session` (what this session's agent was told), `friction config`
+  after counts), `friction list`, `friction session` (what this session's agent was told), `friction targets` (the ranked list, filtered and sorted on the relay - the dashboard table makes the same call), `friction notices` / `friction watch` (what agents were told, with the next step attached to each, as stored or as it happens), `friction regressions` (declared fixed, failing again; `--fail` for CI), `known-issues export` / `known-issues import` (share the registry between checkouts), `session replay <id>` (re-run a recorded session to its first failure to see if it still reproduces; a dry run unless `--confirm`), `macro list --risk`, `friction config`
   (thresholds), `friction prune [--days N] [--confirm]` (retention: orphaned state and old result bodies,
   never history or declarations), `known-issues promote <candidateId>`, `crv preflight --plan` (check a plan
   before running it), `session start --auto-recover` / `--try-recovery` (retry a failed click/fill/wait once on

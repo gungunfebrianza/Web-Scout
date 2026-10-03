@@ -34,7 +34,7 @@
 import fs from 'node:fs';
 import readline from 'node:readline';
 import {
-  request, BASE, netHistory, consoleHistory, verityHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, collectNotes, ensureFreshRelayForNewSession,
+  request, BASE, setNoteStyle, netHistory, consoleHistory, verityHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, collectNotes, ensureFreshRelayForNewSession,
   manifestPath, readManifest, writeManifest,
 } from './client.mjs';
 import { describeFailureContext } from './friction.mjs';
@@ -94,7 +94,7 @@ const TOOLS = [
       + '  status {} - relay health, agents, active session, DB_VERSION drift\n'
       + '  agents {} - connected multi-tab agent names\n'
       + '  analytics {} - Friction Analytics: recurring failure patterns across ALL sessions\n'
-      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?, days?} - sub: explain (why it warns), resolve|unresolve (mark fixed), list, session (what this session was told), config, prune (days: drop old result bodies; confirm applies), promote (candidate id -> known-issues.json; confirm writes). type may also be macro|verity|type|cluster (selector = id/label/command/cluster id); page.reload/dom.settle/...: selector = origin or origin+path\n'
+      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?, days?, filter?, sort?, limit?, session?, since?, entries?} - sub: explain (why it warns), resolve|unresolve (mark fixed; type may also be macro|verity|type|cluster, selector = its id/label/command), list, session, targets (ranked; filter text, sort cost|fails|wasted|tokens|recent|oldest), notices (what agents were told; since = last id seen), regressions (fixed, failing again), issues (known-issues.json; entries imports, confirm writes), config, prune (days; confirm applies), promote (candidate id; confirm writes). Page commands (page.reload...): selector = origin or origin+path\n'
       + '  search {q} - full-text search across every session\'s actions\n'
       + '  db_version_check {agent?, dbJsPath?} - js/db.js\'s DB_VERSION vs the tab\'s LIVE IndexedDB version; on drift also probes whether opening at the source version is blocked\n'
       + '  dashboard_url {} - the realtime dashboard URL (does not open a browser)\n'
@@ -114,11 +114,15 @@ const TOOLS = [
         if (sub === 'list') return request('GET', '/friction/resolutions');
         if (sub === 'config') return request('GET', '/friction/config');
         if (sub === 'session') return request('GET', '/friction/session');
+        if (sub === 'targets') return request('GET', `/friction/targets?${new URLSearchParams({ ...(p.filter ? { q: p.filter } : {}), ...(p.sort ? { sort: p.sort } : {}), ...(p.limit ? { limit: String(p.limit) } : {}) })}`);
+        if (sub === 'notices') return request('GET', `/friction/notices?${new URLSearchParams({ ...(p.session !== undefined ? { session: String(p.session) } : {}), ...(p.since !== undefined ? { since: String(p.since) } : {}) })}`);
+        if (sub === 'regressions') return request('GET', '/friction/regressions');
+        if (sub === 'issues') return Array.isArray(p.entries) ? request('POST', '/known-issues/import', { entries: p.entries, confirm: p.confirm === true }) : request('GET', '/known-issues');
         if (sub === 'prune') return request('POST', '/friction/prune', { days: p.days, confirm: p.confirm === true });
         if (sub === 'promote') {
           return request('POST', '/known-issues/promote', { id: requireField(p, 'id'), remediation: p.remediation, description: p.description, signature: p.signature, confirm: p.confirm === true });
         }
-        if (sub !== 'explain' && sub !== 'resolve' && sub !== 'unresolve') throw new Error('params.sub must be explain|resolve|unresolve|list|session|config|prune|promote');
+        if (sub !== 'explain' && sub !== 'resolve' && sub !== 'unresolve') throw new Error('params.sub must be explain|resolve|unresolve|list|session|targets|notices|regressions|issues|config|prune|promote');
         const target = { type: requireField(p, 'type'), selector: p.selector, store: p.store };
         if (sub !== 'explain') return request('POST', `/friction/${sub}`, { ...target, note: p.note });
         const q = new URLSearchParams({ type: target.type });
@@ -139,6 +143,7 @@ const TOOLS = [
       + '  end {id?, trace?, applySuggestions?} - end a session (default: the active one); trace also exports it (anonymised) to grow the trace.mjs replay corpus; applySuggestions marks the "probably fixed" friction targets fixed\n'
       + '  current {} - the active session, or {active:false}\n'
       + '  list {} - every session, newest first\n'
+      + '  replay {id, all?, confirm?, agent?} - re-run a session to its first failure in the active one (does it still reproduce?); dry run unless confirm:true\n'
       + '  show {id} - full detail: actions, snapshots, diffs, qa, console, net\n'
       + '  report {id, format?: "md"|"json", out?, verityPath?} - export a report; out writes a local file instead of returning it\n'
       + '  cleanup {id, confirm?, sinceSnapshotId?, summary?, agent?} - list (confirm:true deletes) rows this session\'s writes left live; dry-run by default; summary: per-store counts, not row bodies\n'
@@ -151,17 +156,17 @@ const TOOLS = [
       start: async (p) => {
         await ensureFreshRelayForNewSession();
         const session = await request('POST', '/sessions', {
-          goal: requireField(p, 'goal'), context: p.context, strict_crv: !!p.strictCrv,
-          strict_crv_stores: Array.isArray(p.strictCrvStores) ? p.strictCrvStores : undefined,
-          crv_compact: !!p.crvCompact,
+          goal: requireField(p, 'goal'), context: p.context, strictCrv: !!p.strictCrv,
+          strictCrvStores: Array.isArray(p.strictCrvStores) ? p.strictCrvStores : undefined,
+          crvCompact: !!p.crvCompact,
           tags: p.tags ?? [],
-          token_budget: p.tokenBudget !== undefined ? Number(p.tokenBudget) : undefined,
+          tokenBudget: p.tokenBudget !== undefined ? Number(p.tokenBudget) : undefined,
           briefing: p.noBriefing ? false : undefined,
           lean: p.lean || undefined,
           agent: p.agent,
-          allow_remote: p.allowRemote || undefined,
-          auto_recover: p.autoRecover || undefined,
-          if_stale_min: p.ifStaleMin !== undefined && p.ifStaleMin !== null ? Number(p.ifStaleMin) : undefined,
+          allowRemote: p.allowRemote || undefined,
+          autoRecover: p.autoRecover || undefined,
+          ifStaleMin: p.ifStaleMin !== undefined && p.ifStaleMin !== null ? Number(p.ifStaleMin) : undefined,
         });
         // Folds the CLI's separate stderr-only warnOnDbVersionDrift() into
         // the returned result instead - an MCP client has no equivalent of
@@ -185,6 +190,7 @@ const TOOLS = [
       },
       current: async () => (await request('GET', '/health')).active_session ?? { active: false },
       list: () => request('GET', '/sessions'),
+      replay: (p) => request('POST', `/sessions/${requireField(p, 'id')}/replay`, { all: p.all === true, confirm: p.confirm === true, agent: p.agent }),
       show: async (p) => {
         const id = requireField(p, 'id');
         const [session, actions, snapshots, diffs, qa, consoleEntries, net] = await Promise.all([
@@ -217,7 +223,7 @@ const TOOLS = [
         if (!Array.isArray(checks)) checks = [checks];
         return request('POST', `/sessions/${id}/assert`, { checks, agent: p.agent });
       },
-      ask: (p) => request('POST', '/ask', { session_id: p?.sessionId, question: requireField(p, 'question') }),
+      ask: (p) => request('POST', '/ask', { sessionId: p?.sessionId, question: requireField(p, 'question') }),
       verity_import: (p) => {
         const sessionId = requireField(p, 'sessionId');
         const result = p.result ?? (p.path ? JSON.parse(fs.readFileSync(p.path, 'utf8')) : undefined);
@@ -440,7 +446,7 @@ const TOOLS = [
     description: 'Named, replayable sequences of a session\'s recorded actions.\n'
       + 'Actions:\n'
       + '  record {name, sessionId, all?} - save that session\'s replayable actions (dom.click/fill/wait, idb.put/delete/deleteMany/clear/wait, page.reload, eval) as a macro\n'
-      + '  list {} - id, name, step count, source session per macro\n'
+      + '  list {risk?} - id, name, step count, source session per macro; risk adds steps that would draw a friction warning now\n'
       + '  show {id} - full detail incl. every step\n'
       + '  run {id, continueOnError?, fromStep?, confirm?, full?} - replay against the ACTIVE session (409 if its goal looks unrelated to the macro\'s source session unless confirm:true); full:true returns every step\'s complete result instead of the compact summary\n'
       + '  update {id, steps} - replace the whole step array (fix/reorder/remove a step without deleting and re-recording)\n'
@@ -448,7 +454,7 @@ const TOOLS = [
       + '  export_verity {id, outPath?} - skeleton Verity scenario JSON from dom.click/dom.wait steps (selectors left as TODO)',
     actions: {
       record: (p) => request('POST', '/macros', { name: requireField(p, 'name'), sessionId: Number(requireField(p, 'sessionId')), all: !!p.all }),
-      list: () => request('GET', '/macros'),
+      list: (p) => request('GET', p?.risk ? '/macros?risk=1' : '/macros'),
       show: (p) => request('GET', `/macros/${requireField(p, 'id')}`),
       run: (p) => request('POST', `/macros/${requireField(p, 'id')}/run`, {
         continueOnError: !!p.continueOnError, confirm: !!p.confirm, full: !!p.full, fromStep: p.fromStep !== undefined ? Number(p.fromStep) : undefined,
@@ -649,4 +655,5 @@ rl.on('line', (line) => {
   });
 });
 
+setNoteStyle('mcp'); // notices tell an MCP caller what to CALL, not what to type
 logErr(`${SERVER_NAME} MCP server ${SERVER_VERSION} ready (stdio) - relay expected at ${BASE}`);

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { tmpDir, createScratchDir, ownScratchDir, isPidAlive, LEDGER_NAME } from './scratch.mjs';
+import { tmpDir, createScratchDir, ownScratchDir, isPidAlive, LEDGER_NAME, MARKER } from './scratch.mjs';
 import {
   level, findOrphanBrowsers, readFootprint, readTrend, sessionScratchCost, cleanupScratch, lowDiskWarning,
   hostFrictionItems, FOOTPRINT_NAME, SAMPLES_NAME,
@@ -28,6 +28,10 @@ const api = async (method, route, body) => {
   return json.result;
 };
 const deadPid = () => { const r = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }); return Number(r.stdout); };
+// A scratch dir with an owner marker and nothing else - no ledger append, so making hundreds stays cheap under load.
+const fastDir = (ownerPid) => { const d = fs.mkdtempSync(path.join(root, PFX)); fs.writeFileSync(path.join(d, MARKER), JSON.stringify({ pid: ownerPid, createdAt: Date.now(), creator: process.pid })); return d; };
+// Windows can hold a just-deleted dir open for a moment (scanner/indexer): wait for it to really be gone before asserting.
+const waitGone = async (d, ms = 5000) => { const end = Date.now() + ms; while (fs.existsSync(d) && Date.now() < end) await new Promise((r) => setTimeout(r, 100)); return !fs.existsSync(d); };
 const jsonl = (name, rows) => fs.writeFileSync(path.join(root, name), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
 after(async () => { delete process.env.WEBSCOUT_TMPDIR; await relay.stop(); });
 
@@ -130,9 +134,9 @@ test('cleanupScratch: dry-run by default deletes nothing; `dirs` narrows a real 
   for (const d of [b, live]) fs.rmSync(d, { recursive: true, force: true });
 });
 
-test('cleanupScratch: a real delete of more than 200 dirs is refused without confirm', () => {
+test('cleanupScratch: a real delete of more than 200 dirs is refused without confirm', { timeout: 60000 }, () => {
   const dead = deadPid();
-  const made = Array.from({ length: 205 }, () => createScratchDir(PFX, { baseDir: root, ownerPid: dead }));
+  const made = Array.from({ length: 205 }, () => fastDir(dead));
   const refused = cleanupScratch({ dryRun: false });
   assert.equal(refused.needsConfirm, true);
   assert.equal(refused.dryRun, true);
@@ -181,7 +185,7 @@ test('POST /host/cleanup previews by default and only deletes on an explicit dry
   assert.ok(fs.existsSync(d), 'preview deleted nothing');
   const real = await api('POST', '/host/cleanup', { dirs: [path.basename(d)], dryRun: false });
   assert.equal(real.dryRun, false);
-  assert.ok(!fs.existsSync(d));
+  assert.ok(await waitGone(d), 'the dir is removed (allowing for a scanner holding it for a moment)');
 });
 
 test('POST /host/kill-orphans never reports a kill when no orphan browser names one of our profile dirs', { skip: skipLive }, async () => {

@@ -117,7 +117,7 @@ function buildVizSection(viz) {
   return lines;
 }
 
-export function buildReportMarkdown({ session, actions, snapshots, diffs, qa, console: consoleEntries, net, verityRuns, tokenReport, repeatedActionLoops, viz, knownIssues, knownIssuesCheckError }) {
+export function buildReportMarkdown({ session, actions, snapshots, diffs, qa, console: consoleEntries, net, verityRuns, tokenReport, repeatedActionLoops, viz, knownIssues, knownIssuesCheckError, friction }) {
   const lines = [];
   lines.push(`# Web-scout Session Report: ${session.goal}`);
   lines.push('');
@@ -158,6 +158,30 @@ export function buildReportMarkdown({ session, actions, snapshots, diffs, qa, co
       lines.push(`| #${k.actionId} | ${mdEscapeCell(k.type)} | ${mdEscapeCell(k.knownIssue.id)}${k.knownIssue.description ? ` - ${mdEscapeCell(k.knownIssue.description)}` : ''} | ${mdEscapeCell(k.knownIssue.remediation ?? '')} |`);
     }
     lines.push('');
+  }
+
+  // What friction awareness did for this session: what the agent was told, what it kept doing anyway, and
+  // what was declared fixed. Present only when there is something to say.
+  if (friction && (friction.noticeCount || friction.ignored?.length || friction.resolved?.length)) {
+    lines.push('## Friction awareness');
+    lines.push('');
+    const kinds = Object.entries(friction.told ?? {}).map(([k, n]) => `${n} ${k}`).join(', ');
+    lines.push(`The agent was told **${friction.noticeCount}** thing(s) this session${kinds ? ` (${kinds})` : ''}.`);
+    lines.push('');
+    if (friction.ignored?.length) {
+      lines.push('Warned, then failed again anyway:');
+      lines.push('');
+      lines.push('| Target | Warned at | Failures after the warning |');
+      lines.push('|---|---|---|');
+      for (const g of friction.ignored) lines.push(`| ${mdEscapeCell(g.key)} | ${g.warnedAt} | ${g.failuresAfter} |`);
+      lines.push('');
+    }
+    if (friction.resolved?.length) {
+      lines.push('Declared fixed during this session:');
+      lines.push('');
+      for (const x of friction.resolved) lines.push(`- ${mdEscapeCell(x.type)} ${mdEscapeCell(x.selector)} at ${x.resolvedAt}${x.note ? ` - ${mdEscapeCell(x.note)}` : ''}`);
+      lines.push('');
+    }
   }
 
   // chars/4 estimate over the same result_json every action already

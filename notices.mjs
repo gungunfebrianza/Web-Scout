@@ -1,0 +1,107 @@
+// One shape for "something the agent was just told", whatever carried it. The relay used to speak through a
+// dozen separate x-webscout-* headers, each formatted and worded differently by the CLI, the MCP server and
+// the dashboard, and none of them said what to DO about it. A notice carries the message and the next steps,
+// each written once as a CLI line, an MCP call and an HTTP request, so every surface can render the same
+// thing and the person can act on it from where they are.
+//
+//   notice  = { kind, level, message, key?, next: [command] }
+//   command = { label, cli, mcp: { tool, action, params }, http }
+//
+// Pure: no I/O, so relay, client, MCP server and dashboard share it and the contract tests can pin it.
+
+const quote = (v) => `"${String(v).replace(/(["\\])/g, '\\$1')}"`;
+const enc = encodeURIComponent;
+
+export const NOTICE_KINDS = ['selector-risk', 'macro-match', 'friction-broadcast', 'recovered', 'nudge', 'regression'];
+
+// ---- the commands a notice can point at ----
+
+export function whyCommand(type, value) {
+  return {
+    label: 'why',
+    cli: `friction explain ${type} ${quote(value)}`,
+    mcp: { tool: 'webscout_meta', action: 'friction', params: { sub: 'explain', type, selector: value } },
+    http: `GET /friction/explain?type=${enc(type)}&selector=${enc(value)}`,
+  };
+}
+
+export function fixedCommand(type, value) {
+  return {
+    label: 'mark fixed',
+    cli: `friction resolve ${type} ${quote(value)}`,
+    mcp: { tool: 'webscout_meta', action: 'friction', params: { sub: 'resolve', type, selector: value } },
+    http: 'POST /friction/resolve',
+    body: { type, selector: value },
+  };
+}
+
+export function macroRunCommand(id) {
+  return {
+    label: 'run it',
+    cli: `macro run ${id}`,
+    mcp: { tool: 'webscout_macro', action: 'run', params: { id } },
+    http: `POST /macros/${id}/run`,
+  };
+}
+
+export function macroRecordCommand(sessionId) {
+  return {
+    label: 'record it',
+    cli: `macro record ${quote('<name>')} ${sessionId}`,
+    mcp: { tool: 'webscout_macro', action: 'record', params: { name: '<name>', sessionId } },
+    http: 'POST /macros',
+    body: { name: '<name>', sessionId },
+  };
+}
+
+export function regressionsCommand() {
+  return {
+    label: 'see them',
+    cli: 'friction regressions',
+    mcp: { tool: 'webscout_meta', action: 'friction', params: { sub: 'regressions' } },
+    http: 'GET /friction/regressions',
+  };
+}
+
+export function makeNotice({ kind, level = 'info', message, key = null, next = [] }) {
+  return { kind, level, message: String(message), ...(key ? { key: String(key) } : {}), next: next.filter(Boolean) };
+}
+
+// ---- rendering ----
+
+export const mcpText = (m) => `${m.tool}.${m.action} ${JSON.stringify(m.params)}`;
+
+// style: 'cli' (a command line) | 'mcp' (a tool call) | 'http' (a request line).
+export function renderNotice(n, style = 'cli') {
+  const steps = (n.next ?? []).map((c) => {
+    const how = style === 'mcp' ? (c.mcp ? mcpText(c.mcp) : null) : style === 'http' ? c.http : c.cli;
+    return how ? `${c.label}: ${how}` : null;
+  }).filter(Boolean);
+  return steps.length ? `${n.message} [${steps.join('; ')}]` : n.message;
+}
+
+// ---- transport: one response header ----
+
+export const NOTICES_HEADER = 'x-webscout-notices';
+const HEADER_MAX = 6000; // well under a typical 8 KB header block; extra notices are dropped, never truncated mid-JSON
+
+// Header values must be latin1/ASCII-safe: escape everything outside printable ASCII as \uXXXX inside the JSON.
+export function serializeNotices(list) {
+  const kept = [];
+  let size = 2;
+  for (const n of list ?? []) {
+    const piece = JSON.stringify(n).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+    if (size + piece.length + 1 > HEADER_MAX) break;
+    kept.push(piece);
+    size += piece.length + 1;
+  }
+  return `[${kept.join(',')}]`;
+}
+
+export function parseNotices(value) {
+  if (!value) return [];
+  try {
+    const list = JSON.parse(value);
+    return Array.isArray(list) ? list.filter((n) => n && typeof n.kind === 'string' && typeof n.message === 'string') : [];
+  } catch { return []; }
+}

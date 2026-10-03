@@ -45,6 +45,15 @@ export const STRICT_CRV_FAIL_WEIGHT = envNumber('WEBSCOUT_STRICT_CRV_FAIL_WEIGHT
 
 // The knobs in effect, for `friction explain` and the health surface - an operator can see what
 // the warn is being judged against without reading the environment.
+// Tokens the agent spent issuing and reading a failed call (chars/4, the unit every ledger here uses) become
+// ranking points at this rate: 250 tokens = 1 point = about one second of wasted time. 0 turns it off.
+export const TOKENS_PER_POINT = (() => {
+  const raw = process.env.WEBSCOUT_TOKENS_PER_POINT;
+  if (raw === undefined || raw === '') return 250;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 250;
+})();
+
 export function frictionConfig() {
   return {
     riskyFailThreshold: RISKY_SELECTOR_FAIL_THRESHOLD,
@@ -58,6 +67,7 @@ export function frictionConfig() {
     block: process.env.WEBSCOUT_RISKY_BLOCK === '1',
     strictCrvFailWeight: STRICT_CRV_FAIL_WEIGHT,
     clusterMinTargets: CLUSTER_MIN_TARGETS,
+    tokensPerPoint: TOKENS_PER_POINT,
   };
 }
 
@@ -182,6 +192,13 @@ const RECOVERY_LOOKAHEAD = 6;
 // lookup (db.listFrictionKeyHistory) loads the surroundings of exactly this many, so the project-wide scan
 // uses the same window - otherwise "worked 4 of 5" in the warning and "worked 5 of 8" in analytics.
 export const RECOVERY_SESSIONS = 5;
+// What one logged call cost the agent in tokens: the command and its params going out, the error (or short result)
+// coming back. chars/4, same unit as token-report, so the two never disagree about what a token is.
+export function actionTokens(a) {
+  const params = a?.params ? JSON.stringify(a.params) : '';
+  return Math.round(((a?.type?.length ?? 0) + params.length + String(a?.error ?? '').length + 40) / 4);
+}
+
 const RETRY_WEIGHT = 0.5; // a failure that was immediately re-attempted cost an extra round trip
 
 function emptyBucket() {
@@ -217,12 +234,13 @@ export function buildSelectorFriction(actions, { matchKnownIssues = () => [], re
     if (isResolved(key, a.started_at)) continue;
     const entry = entries.get(key) ?? {
       key, type: typeFamily(a.type), targetKind: target.kind, selector: target.value, failCount: 0, sessionIds: new Set(), lastFailedAt: null, lastSuccessAt: null,
-      origins: {}, errorClasses: {}, lastError: null, wastedMs: 0, retries: 0, knownIssues: [], recMap: new Map(), recoveryTrials: 0, weightedCost: 0,
+      origins: {}, errorClasses: {}, lastError: null, wastedMs: 0, wastedTokens: 0, retries: 0, knownIssues: [], recMap: new Map(), recoveryTrials: 0, weightedCost: 0,
     };
     entries.set(key, entry);
     entry.failCount += 1;
     entry.sessionIds.add(a.session_id);
     entry.wastedMs += Number(a.duration_ms) || 0;
+    entry.wastedTokens += actionTokens(a);
     entry.weightedCost += (sessionWeights.get(a.session_id) ?? 1) * (1 + (Number(a.duration_ms) || 0) / 1000);
     const klass = a.error_class || classifyError(a.error);
     entry.errorClasses[klass] = (entry.errorClasses[klass] ?? 0) + 1;
@@ -271,6 +289,7 @@ export function buildSelectorFriction(actions, { matchKnownIssues = () => [], re
         if (!retried && nextTarget && targetKey(next.type, nextTarget) === key) {
           retried = true;
           entry.retries += 1;
+          entry.wastedTokens += actionTokens(next);
         }
         if (recoveryFound || !next.ok) continue;
         const nextSel = nextTarget?.kind === 'selector' ? nextTarget.value : null;
@@ -299,7 +318,8 @@ export function buildSelectorFriction(actions, { matchKnownIssues = () => [], re
         .slice(0, 3);
       // Ranking cost: failures, plus a second per second spent failing, plus half a point per
       // retry. A selector that "works on the 3rd try" bleeds time with few outright failures.
-      const score = Math.round((weightedCost + rest.retries * RETRY_WEIGHT) * 10) / 10;
+      const tokenPoints = TOKENS_PER_POINT > 0 ? rest.wastedTokens / TOKENS_PER_POINT : 0;
+      const score = Math.round((weightedCost + rest.retries * RETRY_WEIGHT + tokenPoints) * 10) / 10;
       return { ...rest, ...(knownIssues.length ? { knownIssues } : {}), sessionCount: sessionIds.size, score, recoveries, recovery: recoveries[0] ?? null };
     })
     .sort((a, b) => b.score - a.score || (b.lastFailedAt > a.lastFailedAt ? 1 : -1))
@@ -320,6 +340,66 @@ export function historyForOrigin(entry, origin) {
     if (b.lastSuccessAt && (!out.lastSuccessAt || b.lastSuccessAt > out.lastSuccessAt)) out.lastSuccessAt = b.lastSuccessAt;
   }
   return out;
+}
+
+// ---------- one view of the ranked list, for every surface ----------
+
+export const TARGET_SORTS = {
+  cost: (x, y) => y.score - x.score,
+  fails: (x, y) => y.failCount - x.failCount || y.score - x.score,
+  wasted: (x, y) => y.wastedMs - x.wastedMs || y.score - x.score,
+  tokens: (x, y) => (y.wastedTokens || 0) - (x.wastedTokens || 0) || y.score - x.score,
+  recent: (x, y) => String(y.lastFailedAt || '').localeCompare(String(x.lastFailedAt || '')),
+  oldest: (x, y) => String(x.lastFailedAt || '~').localeCompare(String(y.lastFailedAt || '~')),
+};
+
+// Filter (case-insensitive substring over target, type, kind, origins, error classes and last error) then sort
+// then cap. The CLI, the MCP action, GET /friction/targets and the dashboard all call this, so "the same
+// filter" returns the same rows everywhere.
+export function viewFrictionTargets(entries, { q = '', sort = 'cost', limit = 0 } = {}) {
+  const needle = String(q ?? '').trim().toLowerCase();
+  const by = TARGET_SORTS[sort] ?? TARGET_SORTS.cost;
+  const hit = (e) => !needle || [e.selector, e.type, e.targetKind, ...Object.keys(e.origins || {}), ...Object.keys(e.errorClasses || {}), e.lastError || ''].join(' ').toLowerCase().includes(needle);
+  const rows = (entries ?? []).filter(hit).sort(by);
+  const n = Number(limit);
+  return n > 0 ? rows.slice(0, n) : rows;
+}
+
+// ---------- relapses: declared fixed, failing again ----------
+
+// resolutions: rows of friction_resolutions ({ key, type, selector, resolved_at, note }). actions: chronological.
+// A relapse is a target (or a whole command type) that has failed again AFTER it was declared fixed. This is
+// what "mark fixed" promised to keep visible ("a relapse shows from zero") and nothing yet reported.
+export function buildRelapses(resolutions, actions) {
+  const cutoffs = new Map();
+  for (const r of resolutions ?? []) if (r?.key && r.resolved_at && !/^(macro|verity)::/.test(r.key)) cutoffs.set(r.key, r);
+  if (!cutoffs.size) return [];
+  const since = new Map(); // key -> { count, lastFailedAt, lastError, sessions:Set }
+  const note = (key, a) => {
+    const r = cutoffs.get(key);
+    if (!r || !a.started_at || a.started_at <= r.resolved_at) return;
+    const e = since.get(key) ?? { count: 0, lastFailedAt: null, lastError: null, sessions: new Set() };
+    e.count += 1;
+    e.sessions.add(a.session_id);
+    if (!e.lastFailedAt || a.started_at >= e.lastFailedAt) { e.lastFailedAt = a.started_at; e.lastError = a.error ? String(a.error).slice(0, 200) : null; }
+    since.set(key, e);
+  };
+  for (const a of actions ?? []) {
+    if (a.ok) continue;
+    note(scopeKey('type', a.type), a);
+    for (const x of expandDragTargets(a)) {
+      const key = frictionKeyFor(x.type, x.params, x.origin);
+      if (key) note(key, a);
+    }
+  }
+  return [...since.entries()].map(([key, e]) => {
+    const r = cutoffs.get(key);
+    return {
+      key, type: r.type, selector: r.selector, resolvedAt: r.resolved_at, note: r.note ?? null,
+      failuresSince: e.count, sessionsSince: e.sessions.size, lastFailedAt: e.lastFailedAt, lastError: e.lastError,
+      summary: `${r.type} ${r.selector} was declared fixed at ${r.resolved_at} and has failed ${e.count}x since${e.lastError ? ` (last: ${e.lastError})` : ''}`,
+    };
+  }).sort((a, b) => b.failuresSince - a.failuresSince);
 }
 
 // ---------- session-start briefing ----------

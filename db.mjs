@@ -2343,6 +2343,42 @@ export function clearFrictionSessionState(sessionId) {
   stmtClearFrictionState.run(Number(sessionId));
 }
 
+// ---------- notices: what an agent was told ----------
+//
+// Every warning/nudge the relay hands back (notices.mjs) is also kept, so "what was this session told, and what
+// did it do next" is answerable after the fact (session report, friction notices, the dashboard) instead of
+// vanishing with the response header it rode in on. Small rows; pruned with the session history, never alone.
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS session_notices (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  at         TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  level      TEXT NOT NULL DEFAULT 'info',
+  message    TEXT NOT NULL,
+  key        TEXT,
+  next_json  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_session_notices_session ON session_notices(session_id, id);
+`);
+const stmtInsertNotice = db.prepare('INSERT INTO session_notices (session_id, at, kind, level, message, key, next_json) VALUES (?, ?, ?, ?, ?, ?, ?)');
+const stmtNoticesBySession = db.prepare('SELECT * FROM session_notices WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?');
+const stmtNoticesAll = db.prepare('SELECT * FROM session_notices WHERE id > ? ORDER BY id ASC LIMIT ?');
+const hydrateNotice = (r) => ({ id: r.id, sessionId: r.session_id, at: r.at, kind: r.kind, level: r.level, message: r.message, ...(r.key ? { key: r.key } : {}), next: r.next_json ? JSON.parse(r.next_json) : [] });
+
+export function saveNotice(sessionId, notice) {
+  const info = stmtInsertNotice.run(Number(sessionId), new Date().toISOString(), notice.kind, notice.level || 'info', notice.message, notice.key ?? null, notice.next?.length ? JSON.stringify(notice.next) : null);
+  return Number(info.lastInsertRowid);
+}
+
+// sessionId null = every session. sinceId is a cursor: pass the last id seen to get only what is new.
+export function listNotices({ sessionId = null, sinceId = 0, limit = 200 } = {}) {
+  const n = Math.min(Math.max(Number(limit) || 200, 1), 1000);
+  const rows = sessionId === null || sessionId === undefined ? stmtNoticesAll.all(Number(sinceId) || 0, n) : stmtNoticesBySession.all(Number(sessionId), Number(sinceId) || 0, n);
+  return rows.map(hydrateNotice);
+}
+
 // ---------- retention ----------
 
 const stmtOrphanFrictionState = db.prepare("DELETE FROM friction_session_state WHERE session_id NOT IN (SELECT id FROM sessions WHERE status = 'active')");
