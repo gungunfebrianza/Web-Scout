@@ -2917,6 +2917,58 @@ session, so use it only when nothing else shares the relay.
 
 Versions: relay 0.26.0, MCP server 0.27.0. Full suite: 393 tests, 387 pass, 2 skipped (need a live tab), 4 failing that predate this round and are unrelated (2 in `auto-restart.test.mjs`, the same fire-and-forget `session end`/`session start` race V38 documented; the `--peek` read-shaping case; and the committed-calibration freshness check, the known stray-local-`token-calibration.json` trigger). 9 new tests: 8 in `preflight-diagnostics.test.mjs` (registry match/absent/broken, example file, tab collision, agents[] when not connected, `--if-stale-min` over HTTP and via the CLI) and 1 in `db.mjs.test.mjs` (threshold arithmetic with a stubbed clock).
 
+## V40 - friction awareness, round 2: live, scoped, success-aware (implemented)
+
+Driven by reading the round-1 system (V7 analytics + the pre-action warn, macro nudge and session-end
+diff) for what it got wrong, not by an incident. The shared pattern in every gap: the system was
+told something true once (a frozen session-start snapshot, an all-time count) and kept saying it.
+
+- **Live in-session overlay.** The snapshot stays frozen (it must never poison the shared analytics
+  cache) but is now history only; `friction.mjs`'s tracker, updated by `withLoggedAction` for every
+  logged action, adds this session's own failures. Two same-session failures warn with no prior
+  history at all.
+- **Success-aware.** A selector's failures count as *unresolved* only until its next success
+  (per origin bucket); a warning needs 3 unresolved. A success earlier in the current session
+  silences stale history entirely.
+- **Origin-scoped.** `actions` gained `origin` and `error_class` columns (`ensureColumn`); the same
+  `#submit` on another site is a different selector. Rows from before the column count everywhere.
+- **Normalized identity.** Whitespace/quote/combinator spacing, `:nth-*`, 2+-digit runs and
+  digit-bearing attribute values collapse; `dom.click`/`dom.clickWait` are one family. Stable
+  selectors (`.col-md-6` vs `.col-md-4`) are deliberately not merged.
+- **Says what to do.** Error class (timeout / detached / not-found / navigation / eval-throw) picks the
+  advice; if the same session once recovered after this failure (an alternate selector or a wait),
+  the warning names it.
+- **Quiet, then loud.** Said once per selector per session, again only after a new failure, and
+  prefixed ESCALATED at 3. `WEBSCOUT_RISKY_BLOCK=1` (off by default - the old "never blocks"
+  contract stands) refuses an escalated selector until `--ack-risk` / `ackRisk:true`; the refusal
+  persists across retries.
+- **In the failure itself.** A failed `/command`'s error `extra` carries `selectorFriction` and a
+  live `emergentFriction` (first-ever failing type; a selector's 2nd same-session failure with no
+  history). CLI and MCP both print them (MCP's pre-action header already rides `collectNotes`).
+- **Session end** adds a failure-rate *spike* (this session >= 3x the rate across all others, with
+  >= 10 prior calls) for types the first-ever diff skips because they already have history.
+- **Ranking weighs time.** `wastedMs` on failing types/selectors; severity = failures + 1/s spent
+  failing. Tokens were not added: a failed reply is tiny, so it would be noise.
+- **`knownIssueCandidates`** in `analytics`: the same unmatched error text repeating >= 3x gets a draft
+  registry entry (stable literal prefix as the signature). Draft only.
+- **`friction resolve|unresolve|list`** ("mark fixed", table `friction_resolutions`) - failures at or
+  before the declared instant are ignored by `topFailedSelectors`/`selectorFriction`.
+- **Macro nudge** now also offers *proven* macros (not only never-run), excluding macros that never once
+  succeeded and any tail that is itself a replay; says "same selectors/stores" vs "types match,
+  params differ" and the macro's recent pass rate (flagged unreliable under 50%).
+- **Configurable**: `WEBSCOUT_RISKY_FAIL_THRESHOLD`, `_LIVE_FAIL_THRESHOLD`, `_ESCALATE_FAILS`,
+  `WEBSCOUT_WASTE_MIN_CALLS`, `WEBSCOUT_SPIKE_FACTOR`, `WEBSCOUT_SPIKE_MIN_PRIOR_CALLS`,
+  `WEBSCOUT_KNOWN_ISSUE_CANDIDATE_MIN_FAILS`; `WEBSCOUT_ANALYTICS_CACHE_MS=0` for tests.
+
+**Considered and not done:** MCP actions for `friction resolve` (the tool list is at its byte budget,
+`schema-budget.test.mjs`; the relay routes exist for when that is raised); a dashboard control for
+resolve (the existing banner is read-only); a dismiss-aware "resolved" badge. Live emergent detection
+judges "no history" against the session-start snapshot, which only holds selectors with >= 2 prior
+failures, so it can say "no repeat-failure history" for a selector that failed exactly once before;
+the session-end diff remains the exact one.
+
+Tests: `friction.test.mjs` (pure), `friction-awareness-live.test.mjs` (real relay + fake tab).
+
 ## Explicit non-goals
 
 - Becoming a general-purpose browser automation/testing framework (a

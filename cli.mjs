@@ -30,6 +30,7 @@ import { rankAutoTraces } from './trace.mjs';
 // dispatch below includes it as a top-level `agent` field on the request
 // body (never nested inside `params`) - see tools/web-scout/relay.mjs.
 let agentFlag;
+let ackRiskFlag = false;
 // Reply shaping for cacheable reads (--table / --if-changed / --delta / --peek / --no-guard),
 // set once in main() and sent as the request's `opts` - see relay-side read-pipeline.mjs.
 let shapeOpts;
@@ -39,7 +40,7 @@ let prettyFlag = false;
 const wantPretty = () => prettyFlag || process.env.WEBSCOUT_PRETTY === '1' || (process.stdout.isTTY === true && process.env.WEBSCOUT_COMPACT !== '1');
 
 function send(type, params) {
-  return request('POST', '/command', { type, params, agent: agentFlag, opts: shapeOpts });
+  return request('POST', '/command', { type, params, agent: agentFlag, opts: shapeOpts, ...(ackRiskFlag ? { ackRisk: true } : {}) });
 }
 
 // chars/4 - same rough estimate as db.mjs's getActionCostReport, applied
@@ -893,6 +894,23 @@ async function main() {
     return;
   }
 
+  // friction resolve <type> <selector> [--note "..."] / unresolve <type> <selector> / list
+  // "Mark fixed": analytics and the pre-action warn then count only failures AFTER now.
+  if (command === 'friction') {
+    const sub = rest[0];
+    let fargs = rest.slice(1);
+    let note;
+    ({ args: fargs, value: note } = extractFlag(fargs, '--note'));
+    if (sub === 'list') { printResult(await request('GET', '/friction/resolutions')); return; }
+    if (sub === 'resolve' || sub === 'unresolve') {
+      const [type, selector] = fargs;
+      if (!type || !selector) throw new Error(`friction ${sub} requires <type> <selector>, e.g. friction ${sub} dom.click "#submit"`);
+      printResult(await request('POST', `/friction/${sub}`, { type, selector, note }));
+      return;
+    }
+    throw new Error('friction requires a subcommand: resolve <type> <selector> [--note "..."] | unresolve <type> <selector> | list');
+  }
+
   if (command === 'search') {
     const q = rest.join(' ');
     if (!q) throw new Error('search requires a query, e.g. search "cfi_ontology_candidates"');
@@ -953,6 +971,10 @@ async function main() {
 
   let args = rest;
   ({ args, value: agentFlag } = extractFlag(args, '--agent'));
+  // `--ack-risk`: acknowledge an ESCALATED selector-risk warning so a WEBSCOUT_RISKY_BLOCK=1 relay
+  // lets the call through (see relay.mjs's maybeRiskySelectorWarn). No effect on a relay that
+  // does not block.
+  ({ args, value: ackRiskFlag } = extractBooleanFlag(args, '--ack-risk'));
   {
     const shape = {};
     for (const [flag, key] of [['--table', 'table'], ['--if-changed', 'ifChanged'], ['--delta', 'delta'], ['--peek', 'peek'], ['--no-guard', 'noGuard']]) {
@@ -1450,5 +1472,13 @@ main().catch((err) => {
   if (err.knownIssue) {
     console.error(`Known issue: ${err.knownIssue.id}${err.knownIssue.description ? ` - ${err.knownIssue.description}` : ''}${err.knownIssue.remediation ? ` (remediation: ${err.knownIssue.remediation})` : ''}`);
   }
+  // What friction awareness knew about THIS failure (see relay.mjs's dispatchTracked): the error
+  // class, how many times it has failed this session, what worked after a failure last time,
+  // and any pattern that is brand new - in the error itself, not only in a pre-action header.
+  if (err.selectorFriction) {
+    const f = err.selectorFriction;
+    console.error(`Friction: ${f.errorClass ?? 'unclassified'} failure, ${f.failuresThisSession}x this session, ${f.priorFailures}x in earlier sessions${f.workedBefore ? ` - ${f.workedBefore}` : f.advice ? ` - ${f.advice}` : ''}`);
+  }
+  for (const line of err.emergentFriction ?? []) console.error(`NOTE: emergent friction - ${line}`);
   process.exitCode = 1;
 });

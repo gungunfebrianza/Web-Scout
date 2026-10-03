@@ -135,6 +135,17 @@ CREATE TABLE IF NOT EXISTS net_entries (
   occurred_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_net_session ON net_entries(session_id, id);
+
+-- Operator-declared "this selector is fixed as of <resolved_at>" (see friction.mjs): friction
+-- analytics ignores failures at or before that instant, so a fixed selector stops ranking
+-- on its cumulative-forever history. key is friction.mjs's frictionKey (type family + normalized selector).
+CREATE TABLE IF NOT EXISTS friction_resolutions (
+  key          TEXT PRIMARY KEY,
+  type         TEXT NOT NULL,
+  selector     TEXT NOT NULL,
+  note         TEXT,
+  resolved_at  TEXT NOT NULL
+);
 `);
 
 // Migrations onto tables that pre-date this column - node:sqlite's bundled
@@ -160,6 +171,12 @@ ensureColumn('sessions', 'strict_crv', 'strict_crv INTEGER NOT NULL DEFAULT 0');
 ensureColumn('sessions', 'strict_crv_stores', 'strict_crv_stores TEXT');
 ensureColumn('sessions', 'tags', 'tags TEXT');
 ensureColumn('actions', 'agent_name', "agent_name TEXT NOT NULL DEFAULT 'default'");
+// The page origin the dispatching agent was connected from when the action ran, and a coarse
+// error class (timeout / not-found / detached / ...) - friction awareness scopes a selector's
+// failure history by origin (the same `#submit` on another site is a different selector) and
+// picks remediation by class. NULL on rows recorded before these columns existed.
+ensureColumn('actions', 'origin', 'origin TEXT');
+ensureColumn('actions', 'error_class', 'error_class TEXT');
 ensureColumn('state_snapshots', 'agent_name', "agent_name TEXT NOT NULL DEFAULT 'default'");
 // Golden regression baseline - a snapshot tagged with a name here can be
 // diffed against by ANY future session (not just two ids within the same
@@ -967,8 +984,8 @@ export function listSessions() {
 // ---------- actions ----------
 
 const stmtInsertAction = db.prepare(`
-  INSERT INTO actions (session_id, type, params_json, params_hash, result_json, result_hash, ok, error, started_at, ended_at, duration_ms, agent_name)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO actions (session_id, type, params_json, params_hash, result_json, result_hash, ok, error, started_at, ended_at, duration_ms, agent_name, origin, error_class)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtListActions = db.prepare('SELECT * FROM actions WHERE session_id = ? ORDER BY id DESC');
 const stmtListActionsAsc = db.prepare('SELECT * FROM actions WHERE session_id = ? ORDER BY id ASC');
@@ -982,7 +999,7 @@ export function setActionDelivered(actionId, bytes) {
   stmtSetActionDelivered.run(Math.max(0, Math.round(bytes)), Number(actionId));
 }
 
-export function logAction({ sessionId, type, params, result, ok, error, startedAt, endedAt, agentName }) {
+export function logAction({ sessionId, type, params, result, ok, error, startedAt, endedAt, agentName, origin, errorClass }) {
   const durationMs = new Date(endedAt).getTime() - new Date(startedAt).getTime();
   const resultJson = result === undefined ? null : JSON.stringify(result);
   const paramsJson = params === undefined ? null : JSON.stringify(params);
@@ -1014,6 +1031,8 @@ export function logAction({ sessionId, type, params, result, ok, error, startedA
     error ?? null,
     startedAt, endedAt, Number.isFinite(durationMs) ? durationMs : 0,
     agentName ?? 'default',
+    origin ?? null,
+    errorClass ?? null,
   );
   return Number(info.lastInsertRowid);
 }
@@ -2073,6 +2092,31 @@ export function deleteMacro(id) {
   const info = stmtDeleteMacro.run(Number(id));
   if (info.changes === 0) throw new Error(`no such macro: ${id}`);
   return { deleted: true };
+}
+
+// ---------- friction resolutions ("mark fixed") ----------
+
+const stmtUpsertFrictionResolution = db.prepare(`
+  INSERT INTO friction_resolutions (key, type, selector, note, resolved_at) VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT(key) DO UPDATE SET type = excluded.type, selector = excluded.selector, note = excluded.note, resolved_at = excluded.resolved_at
+`);
+const stmtListFrictionResolutions = db.prepare('SELECT key, type, selector, note, resolved_at FROM friction_resolutions ORDER BY resolved_at DESC');
+const stmtDeleteFrictionResolution = db.prepare('DELETE FROM friction_resolutions WHERE key = ?');
+
+export function markFrictionResolved({ key, type, selector, note, resolvedAt }) {
+  const at = resolvedAt ?? new Date().toISOString();
+  stmtUpsertFrictionResolution.run(key, type, selector, note ?? null, at);
+  return { key, type, selector, note: note ?? null, resolved_at: at };
+}
+
+export function listFrictionResolutions() {
+  return stmtListFrictionResolutions.all();
+}
+
+export function clearFrictionResolved(key) {
+  const info = stmtDeleteFrictionResolution.run(key);
+  if (info.changes === 0) throw new Error(`no such friction resolution: ${key}`);
+  return { cleared: true, key };
 }
 
 // ---------- token savings report ----------

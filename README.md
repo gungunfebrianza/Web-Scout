@@ -172,6 +172,12 @@ The core discipline, nicknamed **"CRV"** in this codebase:
   it fails again; a session whose own recent action types match a recorded-but-never-run
   macro gets an `x-webscout-macro-match` nudge (recording a macro mid-session makes it
   immediately nudge-eligible for that same still-active session, not only future ones);
+  (round 2 of this system - see roadmap V40 - made the warning history origin-scoped, success-aware,
+  selector-normalized and live: this session's own failures count at once, it is said once and
+  escalates when ignored, and `friction resolve <type> <selector>` declares a selector fixed so
+  its old history stops counting; failed replies carry the error class and what worked before;
+  `analytics` drafts known-issue candidates and weights ranking by time wasted;)
+  `friction unresolve <type> <selector>` undoes it and `friction list` shows every declaration)
   and `session end` reports `emergentFriction` - a type/selector failing for the first
   time ever, flagged before it has accumulated enough history to rank in the global
   `topFrictionItems` digest. A saved/exported session report (`GET /sessions/:id/report`)

@@ -494,7 +494,10 @@ function readOpts(p) {
 }
 
 function sendCmd(type, params, agent, opts) {
-  return request('POST', '/command', { type, params, agent, opts });
+  // `ackRisk:true` in an action's params acknowledges an ESCALATED selector-risk warning on a
+  // relay running with WEBSCOUT_RISKY_BLOCK=1; it is a relay-level flag, never forwarded to the page.
+  const { ackRisk, ...pageParams } = params ?? {};
+  return request('POST', '/command', { type, params: params === undefined ? undefined : pageParams, agent, opts, ...(ackRisk === true ? { ackRisk: true } : {}) });
 }
 
 function toolInputSchema(tool) {
@@ -566,6 +569,11 @@ async function handleToolsCall(msg) {
     // than a CLI agent got for the identical failure.
     if (err.postTimeoutVerification) extraText.push(`[web-scout] Post-timeout verification (best-effort): ${JSON.stringify(err.postTimeoutVerification)}`);
     if (err.knownIssue) extraText.push(`[web-scout] Known issue: ${err.knownIssue.id}${err.knownIssue.description ? ` - ${err.knownIssue.description}` : ''}${err.knownIssue.remediation ? ` (remediation: ${err.knownIssue.remediation})` : ''}`);
+    if (err.selectorFriction) {
+      const f = err.selectorFriction;
+      extraText.push(`[web-scout] Friction: ${f.errorClass ?? 'unclassified'} failure, ${f.failuresThisSession}x this session, ${f.priorFailures}x in earlier sessions${f.workedBefore ? ` - ${f.workedBefore}` : f.advice ? ` - ${f.advice}` : ''}`);
+    }
+    for (const line of err.emergentFriction ?? []) extraText.push(`[web-scout] Emergent friction: ${line}`);
     if (err.knownIssuesCheckError) extraText.push(`[web-scout] known-issues.json could not be checked: ${err.knownIssuesCheckError}`);
     sendResult(msg.id, { content: [{ type: 'text', text: err.message }, ...extraText.map((t) => ({ type: 'text', text: t })), ...(err.notes ?? []).map((n) => ({ type: 'text', text: `[web-scout] ${n}` }))], isError: true });
   }

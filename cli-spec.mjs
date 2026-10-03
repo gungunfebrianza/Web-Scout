@@ -32,6 +32,9 @@ export const CLI_SPEC = [
   { cmd: 'dashboard', pos: [0, 0], mcp: 'webscout_meta.dashboard_url' },
   { cmd: 'analytics', pos: [0, 0], mcp: 'webscout_meta.analytics' },
   { cmd: 'search', pos: [1, Infinity], mcp: 'webscout_meta.search' },
+  { cmd: 'friction resolve', pos: [2, 2], val: ['--note'], mcp: null, mcpExempt: 'operator bookkeeping ("this selector is fixed as of now"), CLI-only for now - the MCP tool list is at its byte budget (schema-budget.test.mjs) and the relay route (POST /friction/resolve) is the same one an MCP caller could reach later' },
+  { cmd: 'friction unresolve', pos: [2, 2], mcp: null, mcpExempt: 'undoes "friction resolve"; same reason' },
+  { cmd: 'friction list', pos: [0, 0], mcp: null, mcpExempt: 'lists "friction resolve" declarations; same reason' },
   { cmd: 'token-report', pos: [0, 0], val: ['--session'], mcp: 'webscout_meta.token_report', params: { '--session': 'sessionId' } },
   { cmd: 'ask', pos: [1, Infinity], val: ['--session', '--agent'], mcp: 'webscout_session.ask', params: { '--session': 'sessionId' } },
   { cmd: 'db version-check', pos: [0, 0], val: ['--agent'], mcp: 'webscout_meta.db_version_check' },
@@ -190,8 +193,10 @@ export const CLI_SPEC = [
   { cmd: 'repair causal-diff', pos: [2, 2], mcp: 'webscout_repair.causal_diff' },
 ];
 
-// Output formatting, accepted by every command and never sent to the relay.
-export const UNIVERSAL_BOOL = new Set(['--pretty']);
+// Output formatting (--pretty), accepted by every command and never sent to the relay; and
+// --ack-risk, which acknowledges an escalated selector-risk warning on a relay running with
+// WEBSCOUT_RISKY_BLOCK=1 (sent as a request-level flag, never as a page param).
+export const UNIVERSAL_BOOL = new Set(['--pretty', '--ack-risk']);
 
 const BY_CMD = new Map(CLI_SPEC.map((s) => [s.cmd, s]));
 
