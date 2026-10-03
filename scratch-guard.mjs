@@ -7,6 +7,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isPidAlive, killTree, removeDirSync, PREFIXES } from './scratch.mjs';
 
+// --reap <dir>: a dir whose files stayed locked (AV scan, indexer) past the owner's own retries. Keep
+// trying in the background for up to two minutes instead of leaving it for the next sweep.
+if (process.argv[2] === '--reap') {
+  const target = process.argv[3];
+  const ok = target && PREFIXES.some((p) => path.basename(target).startsWith(p)) && (() => { try { return !fs.lstatSync(target).isSymbolicLink(); } catch { return false; } })();
+  if (!ok) process.exit(2);
+  const until = Date.now() + 120000;
+  const tick = () => {
+    if (removeDirSync(target, { attempts: 3, quiet: true }) || Date.now() > until) process.exit(0);
+    setTimeout(tick, 2000);
+  };
+  tick();
+} else {
 const [owner, browser, dir] = [Number(process.argv[2]), Number(process.argv[3]), process.argv[4]];
 const safe = dir && PREFIXES.some((p) => path.basename(dir).startsWith(p)) && (() => { try { return !fs.lstatSync(dir).isSymbolicLink(); } catch { return false; } })();
 if (!safe || !owner || !browser) process.exit(2);
@@ -21,3 +34,4 @@ const timer = setInterval(() => {
   removeDirSync(dir, { quiet: true });
   process.exit(0);
 }, 500);
+}

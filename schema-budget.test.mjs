@@ -24,7 +24,9 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 // agents[]/knownIssueMatches in crv_preflight (webscout_idb) - raised to 17450, same commit, same convention.
 // Measured 18,863 when the self-repair loop added webscout_repair (status/enable/disable/patch/
 // verify/causal_diff - see self-repair.mjs, webscout2.md) - raised to 18900, same commit, same convention.
-const MCP_TOTAL_MAX_BYTES = 18900;
+// Raised to 19250 in friction round 5 (session briefing, friction session/prune/cluster, autoRecover,
+// origin+path page targets - the one `friction` action grew by its new subs; nothing else was added).
+const MCP_TOTAL_MAX_BYTES = 19250;
 // Raised to 3550 when V38 added crv_preflight/crv_seed/crv_cleanup to webscout_idb (already the
 // biggest single tool, from crv_run) - same commit-with-the-text convention as above.
 // Raised to 3650 when V39 extended crv_preflight's one-line description (webscout_idb measured 3,606).
@@ -36,7 +38,8 @@ const MCP_TOOL_MAX_BYTES = 3650;
 // already-tightest ("session") group - same convention, same commit as the text.
 // Raised to 15800 when V39's "session start --if-stale-min" text landed in the same group (measured
 // 15,774) - same convention, same commit as the text.
-const HELP_GROUP_MAX_CHARS = 15800;
+// Raised to 15900 in friction round 5 (session start --auto-recover / frictionBriefing, measured 15,872) - same convention.
+const HELP_GROUP_MAX_CHARS = 15900;
 const HELP_INDEX_MAX_CHARS = 2200;
 
 let child;

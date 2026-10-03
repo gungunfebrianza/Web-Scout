@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { reapLeakedRelays } from './relay-control.mjs';
-import { removeDirSync, scratchStats, killTree, listBrowserProcesses } from './scratch.mjs';
+import { removeDirSync, PREFIXES, scratchStats, killTree, listBrowserProcesses } from './scratch.mjs';
 import { testRunFile } from './host-health.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -37,6 +37,9 @@ for (const n of fs.readdirSync(root).filter((f) => /^webscout-serve-\d+\.json$/.
 }
 if (reaped) { console.error(`run-tests: stopped ${reaped} detached helper process(es) the tests left running (leak - fix them).`); await new Promise((r) => setTimeout(r, 500)); }
 
+// A profile whose files are still locked by a scanner is not a leak yet: give it a real chance to release
+// before it counts (the failure this replaced was a 7s window under load).
+for (const n of fs.readdirSync(root).filter((f) => PREFIXES.some((p) => f.startsWith(p)))) removeDirSync(path.join(root, n), { attempts: 25, quiet: true });
 const leakedNames = fs.readdirSync(root).filter((n) => !IGNORED.some((p) => n.startsWith(p)));
 const left = leakedNames.length;
 // Browsers still pointing into the private root are leaks too: kill, then wipe.
@@ -50,8 +53,8 @@ console.error(`\nrun-tests: ${left} scratch entr${left === 1 ? 'y' : 'ies'} left
 try {
   fs.writeFileSync(testRunFile(), JSON.stringify({
     at: new Date().toISOString(), exitStatus: r.status ?? null, leakedEntries: leakedNames, leakedCount: left, helpersStopped: reaped,
-    orphansKilled: orphans.length, rootWiped: ok, realTempGained: grew, failed: grew > 0 || orphans.length > 0 || (r.status ?? 1) !== 0,
+    orphansKilled: orphans.length, rootWiped: ok, realTempGained: grew, failed: grew > 0 || orphans.length > 0 || left > 0 || (r.status ?? 1) !== 0,
   }));
 } catch { /* dashboard convenience only */ }
-if (grew > 0 || orphans.length) { console.error('run-tests: FAIL - the run leaked outside its private root or left a browser running.'); process.exit(1); }
+if (grew > 0 || orphans.length || left > 0) { console.error('run-tests: FAIL - the run leaked (' + (left ? 'entries left in its private root' : 'outside its private root or left a browser running') + ').'); process.exit(1); }
 process.exit(r.status ?? 1);

@@ -215,6 +215,8 @@ ensureColumn('sessions', 'token_budget', 'token_budget INTEGER');
 // `session start --lean`: reads in this session are shaped by default (rows as tables, repeats
 // as pointers/deltas, large bodies as their shape) instead of only when a call asks. NULL/0 = off.
 ensureColumn('sessions', 'lean', 'lean INTEGER');
+// `session start --auto-recover`: every click/fill/wait in the session behaves as if it passed --try-recovery.
+ensureColumn('sessions', 'auto_recover', 'auto_recover INTEGER');
 // `session start --strict-crv --crv-compact`: the auto before/after/diff block's own reply
 // includes a sampled preview of what changed (same shape "idb verify"'s pass branch already
 // uses) instead of only counts - sparing the separate `GET /state/diffs/:id` full-body fetch a
@@ -897,7 +899,7 @@ export function getSavingsTrend(days = 14) {
 
 // ---------- sessions ----------
 
-const stmtInsertSession = db.prepare('INSERT INTO sessions (goal, context, status, started_at, strict_crv, strict_crv_stores, tags, token_budget, lean, strict_crv_compact, agent_name, pinned_origin, allow_remote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+const stmtInsertSession = db.prepare('INSERT INTO sessions (goal, context, status, started_at, strict_crv, strict_crv_stores, tags, token_budget, lean, strict_crv_compact, agent_name, pinned_origin, allow_remote, auto_recover) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
 const stmtGetCurrentSession = db.prepare("SELECT * FROM sessions WHERE status = 'active' LIMIT 1");
 const stmtGetSession = db.prepare('SELECT * FROM sessions WHERE id = ?');
 const stmtEndSession = db.prepare("UPDATE sessions SET status = 'ended', ended_at = ? WHERE id = ? AND status = 'active'");
@@ -910,6 +912,7 @@ function hydrateSession(row) {
     strict_crv: !!row.strict_crv,
     strict_crv_compact: !!row.strict_crv_compact,
     lean: !!row.lean,
+    auto_recover: !!row.auto_recover,
     strict_crv_stores: row.strict_crv_stores ? JSON.parse(row.strict_crv_stores) : null,
     tags: row.tags ? JSON.parse(row.tags) : [],
     allow_remote: !!row.allow_remote,
@@ -948,7 +951,7 @@ function minutesSince(iso) {
 // ended. Younger than that - or of unknown age - still refuses exactly as without the flag: a session
 // that started recently is probably still in flight, so this fails closed instead of guessing it was
 // abandoned. Omitted = the pre-existing behavior, byte for byte.
-export function startSession({ goal, context, strictCrv, strictCrvStores, tags, tokenBudget, lean, strictCrvCompact, pinnedOrigin, agentName, allowRemote, ifStaleMin }) {
+export function startSession({ goal, context, strictCrv, strictCrvStores, tags, tokenBudget, lean, strictCrvCompact, pinnedOrigin, agentName, allowRemote, autoRecover, ifStaleMin }) {
   if (!goal || typeof goal !== 'string' || !goal.trim()) {
     throw new Error('a non-empty goal is required to start a session');
   }
@@ -977,7 +980,7 @@ export function startSession({ goal, context, strictCrv, strictCrvStores, tags, 
   }
   const startedAt = new Date().toISOString();
   const storesJson = Array.isArray(strictCrvStores) && strictCrvStores.length ? JSON.stringify(strictCrvStores) : null;
-  const info = stmtInsertSession.run(goal, context ?? null, 'active', startedAt, strictCrv ? 1 : 0, storesJson, JSON.stringify(tags ?? []), Number.isFinite(tokenBudget) ? Number(tokenBudget) : null, lean ? 1 : 0, strictCrvCompact ? 1 : 0, agentName ?? null, pinnedOrigin ?? null, allowRemote ? 1 : 0);
+  const info = stmtInsertSession.run(goal, context ?? null, 'active', startedAt, strictCrv ? 1 : 0, storesJson, JSON.stringify(tags ?? []), Number.isFinite(tokenBudget) ? Number(tokenBudget) : null, lean ? 1 : 0, strictCrvCompact ? 1 : 0, agentName ?? null, pinnedOrigin ?? null, allowRemote ? 1 : 0, autoRecover ? 1 : 0);
   const started = hydrateSession(stmtGetSession.get(Number(info.lastInsertRowid)));
   return autoEndedSession ? { ...started, autoEndedSession } : started;
 }
@@ -1542,8 +1545,19 @@ const stmtListAllActions = db.prepare('SELECT * FROM actions ORDER BY id ASC');
 // dumps / net.log entries here (previously: every one of them, cross-session,
 // unredacted - confirmed the one dedicated table-wide fetch with zero
 // redaction anywhere in the codebase) was pure waste with no consumer.
+// Same rows, from id >= minId only: lets a caller that already holds the older ones fetch just the new tail.
+const stmtCountActions = db.prepare('SELECT COUNT(*) AS n FROM actions');
+export function countActions() { return stmtCountActions.get().n; }
+const stmtListActionsFromId = db.prepare('SELECT * FROM actions WHERE id >= ? ORDER BY id ASC');
+export function listAllActionsFrom(minId) {
+  return hydrateAnalyticsActions(stmtListActionsFromId.all(Number(minId) || 0));
+}
+
 export function listAllActions() {
-  const rows = stmtListAllActions.all();
+  return hydrateAnalyticsActions(stmtListAllActions.all());
+}
+
+function hydrateAnalyticsActions(rows) {
   const actions = [];
   let skipped = 0;
   for (const r of rows) {
@@ -2204,6 +2218,12 @@ export function listFrictionKeyHistory(key, { excludeSessionId = -1, recoverySes
   return [...byId.values()].sort((a, b) => a.id - b.id);
 }
 
+// Every earlier-session action of one command type (just the columns the type tally reads), oldest first.
+const stmtTypeRows = db.prepare('SELECT id, session_id, type, ok, duration_ms, started_at FROM actions WHERE type = ? AND session_id != ? ORDER BY id ASC');
+export function listTypeHistory(type, excludeSessionId = -1) {
+  return stmtTypeRows.all(type, Number(excludeSessionId));
+}
+
 // Has any session other than `excludeSessionId` ever recorded a failure of this action type?
 export function typeEverFailed(type, excludeSessionId = -1) {
   return Boolean(stmtTypeEverFailed.get(type, Number(excludeSessionId)));
@@ -2239,6 +2259,45 @@ export function listFrictionSessionState(sessionId) {
 
 export function clearFrictionSessionState(sessionId) {
   stmtClearFrictionState.run(Number(sessionId));
+}
+
+// ---------- retention ----------
+
+const stmtOrphanFrictionState = db.prepare("DELETE FROM friction_session_state WHERE session_id NOT IN (SELECT id FROM sessions WHERE status = 'active')");
+// "Already said" state only matters while its session is live. A session that ended through a crash never
+// ran clearFrictionSessionState; this sweeps every row whose session is not the active one.
+export function pruneOrphanFrictionState() {
+  return stmtOrphanFrictionState.run().changes;
+}
+
+// Retention for the part of history that is only bulk: the stored result BODY of old actions. The row
+// itself (type, params, ok, error, duration, selector_key) stays, so failure history, friction ranking and
+// every "mark fixed" resolution are untouched; what goes is the payload nobody re-reads after a few weeks.
+// Blob refcounts are released and unreferenced blobs deleted, so the space is really freed. Never touches
+// the active session. dryRun reports what would go.
+export function pruneOldResults({ days, dryRun = true } = {}) {
+  const n = Number(days);
+  if (!Number.isFinite(n) || n < 7) throw new Error('days must be a number >= 7 (shorter would delete results from sessions still being worked on)');
+  const cutoff = new Date(Date.now() - n * 86400000).toISOString();
+  const where = "started_at < ? AND session_id NOT IN (SELECT id FROM sessions WHERE status = 'active') AND (result_json IS NOT NULL OR result_hash IS NOT NULL)";
+  const rows = db.prepare(`SELECT id, result_hash, LENGTH(result_json) AS own FROM actions WHERE ${where}`).all(cutoff);
+  const hashes = new Map();
+  let ownBytes = 0;
+  for (const r of rows) { ownBytes += r.own || 0; if (r.result_hash) hashes.set(r.result_hash, (hashes.get(r.result_hash) || 0) + 1); }
+  const blobBytes = (hash) => db.prepare('SELECT byte_length, ref_count FROM result_blobs WHERE hash = ?').get(hash);
+  let freedBlobBytes = 0;
+  for (const [hash, refs] of hashes) { const b = blobBytes(hash); if (b && b.ref_count - refs <= 0) freedBlobBytes += b.byte_length; }
+  const summary = { days: n, cutoff, actions: rows.length, bytes: ownBytes + freedBlobBytes, dryRun };
+  if (dryRun || !rows.length) return summary;
+  db.exec('BEGIN');
+  try {
+    const release = db.prepare('UPDATE result_blobs SET ref_count = ref_count - ? WHERE hash = ?');
+    for (const [hash, refs] of hashes) release.run(refs, hash);
+    db.prepare(`UPDATE actions SET result_json = NULL, result_hash = NULL WHERE ${where}`).run(cutoff);
+    db.exec('DELETE FROM result_blobs WHERE ref_count <= 0');
+    db.exec('COMMIT');
+  } catch (err) { db.exec('ROLLBACK'); throw err; }
+  return summary;
 }
 
 // ---------- token savings report ----------

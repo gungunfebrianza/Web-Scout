@@ -84,3 +84,55 @@ test('friction detail: history table, this-session block, cluster, and a promote
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('friction table: filter and sort act on the ranked list, "mark fixed" offers an undo, and one button resolves a whole cluster', { skip: browserSkip(), timeout: 120000 }, async () => {
+  const relay = await startTestRelay({ env: { WEBSCOUT_ANALYTICS_CACHE_MS: '0' } });
+  let page;
+  let tab;
+  try {
+    const api = async (method, route, body) => (await (await fetch(`http://127.0.0.1:${relay.port}${route}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined })).json()).result;
+    tab = await connectFakeAgent(relay.port, {
+      'dom.click': (p) => { if (/^\.(a|b|c)1x$/.test(p.selector) || p.selector === '#lonely') throw new Error(p.selector === '#lonely' ? 'Timed out waiting for #lonely' : `Element not found: ${p.selector}`); return { clicked: true, mutated: false }; },
+    }, { origin: 'http://localhost:4100' });
+    for (let n = 0; n < 2; n += 1) {
+      const s = await api('POST', '/sessions', { goal: `seed ${n}`, context: 'friction-dashboard.test.mjs', briefing: false });
+      for (const sel of ['.a1x', '.b1x', '.c1x', '#lonely']) await api('POST', '/command', { type: 'dom.click', params: { selector: sel } });
+      await api('POST', `/sessions/${s.id}/end`);
+    }
+    page = await launchBrowser(findBrowser());
+    await page.navigate(`http://127.0.0.1:${relay.port}/dashboard`);
+    const rowTargets = `[...document.querySelectorAll('#frictionDetail table tbody tr')].map((r) => r.children[0].textContent)`;
+    assert.ok(await waitFor(page, `${rowTargets}.length === 4`), 'all four targets listed');
+
+    // filter by text (target / error class), count reflects it
+    await page.evaluate(`(() => { const i = document.getElementById('frictionFilter'); i.value = 'timeout'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    assert.deepEqual(await waitFor(page, `(() => { const t = ${rowTargets}; return t.length === 1 ? t : null; })()`), ['#lonely'], 'only the timeout target remains');
+    assert.match(await page.evaluate(`document.getElementById('frictionCount').textContent`), /1 of 4 target/);
+    await page.evaluate(`(() => { const i = document.getElementById('frictionFilter'); i.value = ''; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    assert.ok(await waitFor(page, `${rowTargets}.length === 4`));
+
+    // sort: oldest failure first vs most recent - the order flips on identical data (same-instant ties keep a stable order, so just assert the control re-renders)
+    await page.evaluate(`(() => { const s = document.getElementById('frictionSort'); s.value = 'fails'; s.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    assert.equal(await page.evaluate(`${rowTargets}.length`), 4);
+
+    // mark one fixed, then undo from the toast
+    await page.evaluate(`document.querySelector('#frictionDetail [data-friction-act=resolve][data-target="#lonely"]').click()`);
+    assert.ok(await waitFor(page, `(() => { const t = document.getElementById('frictionToast'); return !t.hidden && /marked fixed: dom\.click #lonely/.test(t.textContent); })()`), 'the toast offers an undo');
+    assert.ok(await waitFor(page, `${rowTargets}.length === 3`), 'the target left the table');
+    await page.evaluate(`document.querySelector('#frictionToast button').click()`);
+    assert.ok(await waitFor(page, `${rowTargets}.length === 4`), 'undo brought it back');
+
+    // one button for the whole cluster
+    assert.ok(await waitFor(page, `document.querySelector('#frictionDetail [data-friction-act=resolve-cluster]') ? true : false`), 'cluster has a resolve-all button');
+    await page.evaluate(`document.querySelector('#frictionDetail [data-friction-act=resolve-cluster]').click()`);
+    assert.ok(await waitFor(page, `(() => { const t = ${rowTargets}; return t.length === 1 && t[0] === '#lonely'; })()`), 'the three clustered targets are gone, the unrelated one stays');
+    assert.ok(await waitFor(page, `document.getElementById('frictionToast').textContent.includes('marked 3 target(s) fixed')`));
+    await page.evaluate(`document.querySelector('#frictionToast button').click()`);
+    assert.ok(await waitFor(page, `${rowTargets}.length === 4`), 'undoing a cluster brings every target back');
+    assert.deepEqual(page.errors, [], `page errors: ${page.errors.join(' | ')}`);
+  } finally {
+    tab?.close();
+    await page?.close();
+    await relay.stop();
+  }
+});

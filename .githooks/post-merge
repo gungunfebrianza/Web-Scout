@@ -1,0 +1,6 @@
+#!/bin/sh
+# Opt in once per clone:  git config core.hooksPath .githooks
+# After a merge, run the whole suite so a red main is noticed now, not at the next unrelated change.
+echo "post-merge: running the suite (set WEBSCOUT_SKIP_POST_MERGE=1 to skip)"
+[ -n "$WEBSCOUT_SKIP_POST_MERGE" ] && exit 0
+node run-tests.mjs > .post-merge-test.log 2>&1 && echo "post-merge: suite green" || { echo "post-merge: SUITE RED - see .post-merge-test.log"; exit 0; }

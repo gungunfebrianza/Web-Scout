@@ -37,14 +37,14 @@
   const loadId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   // Hash of this file, sent on connect so the relay can tell a tab still running
   // an older inject.js from the one on disk. Restamp with `node build-id.mjs --stamp`.
-  const AGENT_BUILD = '7171d355525f';
+  const AGENT_BUILD = '5199ec145b0f';
   // Sent once per connect (same lifecycle as loadId - a real navigation only, never
   // an in-page reconnect) so the relay can pin a session to the origin it was started
   // against and warn/refuse when a later command targets a DIFFERENT origin under the
   // SAME agent name - confirmed real: an agent name silently served two different
   // IndexedDB origins (127.0.0.1 vs localhost) across a session with nothing detecting
   // the mismatch until many calls in. See relay.mjs's dispatchTracked.
-  const originParam = `&origin=${encodeURIComponent(location.origin)}`;
+  const originParam = `&origin=${encodeURIComponent(location.origin)}&path=${encodeURIComponent(location.pathname)}`;
   const RELAY_URL = agentName
     ? `ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(agentName)}&loadId=${loadId}&build=${AGENT_BUILD}${originParam}`
     : `ws://127.0.0.1:${port}/agent?loadId=${loadId}&build=${AGENT_BUILD}${originParam}`;
@@ -1792,9 +1792,9 @@
       const ctx = { avoidedBytes: 0 };
       try {
         const result = await handler(msg.params || {}, ctx);
-        ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: true, result, epoch: epochBefore, ...(ctx.avoidedBytes > 0 ? { avoided: ctx.avoidedBytes } : {}), ...(ctx.outlineOldBytes !== undefined ? { outlineOld: ctx.outlineOldBytes } : {}) }));
+        ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: true, result, epoch: epochBefore, path: location.pathname, ...(ctx.avoidedBytes > 0 ? { avoided: ctx.avoidedBytes } : {}), ...(ctx.outlineOldBytes !== undefined ? { outlineOld: ctx.outlineOldBytes } : {}) }));
       } catch (err) {
-        ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: false, error: err?.message || String(err) }));
+        ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: false, error: err?.message || String(err), path: location.pathname }));
       }
     });
     ws.addEventListener('close', scheduleReconnect);

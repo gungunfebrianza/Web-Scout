@@ -91,15 +91,29 @@ export function normalizeSelector(selector) {
 // Commands that aim at the PAGE rather than an element or a store (a reload, a settle, a screenshot, a
 // wait on the console/network). They have no selector to key on, so they fall back to the origin the
 // agent was connected from: "page.reload keeps timing out on this site" is as real as a bad selector.
-// Origin granularity, not path - the agent reports an origin only.
+// Granularity is the origin plus a normalized path ("http://localhost:3000/orders/:id"): a reload that
+// times out on one route is not evidence against the rest of the site. An agent that reports no path
+// (an older tab) falls back to the bare origin.
 export const PAGE_TYPES = new Set(['page.reload', 'page.hardReload', 'page.epoch', 'dom.settle', 'dom.screenshot', 'console.wait', 'net.wait', 'react.tree', 'idb.list']);
+
+// origin + path with the volatile parts removed: numeric, uuid and long-hex segments become :id, query and
+// hash are dropped, trailing slash is ignored. Idempotent, so a value typed on the CLI and one reported by
+// the page land on the same key. Anything that is not a URL is returned trimmed.
+export function normalizePageScope(value) {
+  const text = String(value ?? '').trim();
+  let url;
+  try { url = new URL(text); } catch { return text; }
+  if (!url.pathname || url.pathname === '/') return url.origin;
+  const segments = url.pathname.split('/').filter(Boolean).map((s) => (/^\d+$/.test(s) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s) || /^[0-9a-f]{16,}$/i.test(s) ? ':id' : s));
+  return `${url.origin}/${segments.join('/')}`;
+}
 
 export function frictionTarget(type, params, origin = null) {
   const selector = params?.selector;
   if (typeof selector === 'string' && selector) return { kind: 'selector', value: selector };
   const store = params?.store;
   if (typeof store === 'string' && store && /^idb\./.test(type)) return { kind: 'store', value: store };
-  if (typeof origin === 'string' && origin && PAGE_TYPES.has(type)) return { kind: 'page', value: origin };
+  if (typeof origin === 'string' && origin && PAGE_TYPES.has(type)) return { kind: 'page', value: normalizePageScope(origin) };
   return null;
 }
 
@@ -154,6 +168,10 @@ const CLASS_ADVICE = {
 
 const WAIT_TYPE = /^(?:dom|idb)\.(?:wait|clickWait)/;
 const RECOVERY_LOOKAHEAD = 6;
+// Recovery and retries are judged over each target's most recent failing sessions only. The per-command
+// lookup (db.listFrictionKeyHistory) loads the surroundings of exactly this many, so the project-wide scan
+// uses the same window - otherwise "worked 4 of 5" in the warning and "worked 5 of 8" in analytics.
+export const RECOVERY_SESSIONS = 5;
 const RETRY_WEIGHT = 0.5; // a failure that was immediately re-attempted cost an extra round trip
 
 function emptyBucket() {
@@ -212,6 +230,12 @@ export function buildSelectorFriction(actions, { matchKnownIssues = () => [], re
   // Per-session pass over each failure: was it retried (cost), and what did the SAME session do
   // right after it that then worked (recovery)? Recoveries are aggregated over EVERY failure, so
   // the warning can say "worked 4 of 5 times" instead of repeating whichever happened last.
+  const windows = new Map();
+  const recoveryWindow = (entry) => {
+    let w = windows.get(entry.key);
+    if (!w) { w = new Set([...entry.sessionIds].slice(-RECOVERY_SESSIONS)); windows.set(entry.key, w); }
+    return w;
+  };
   const bySession = new Map();
   for (const a of actions) {
     const list = bySession.get(a.session_id);
@@ -226,6 +250,7 @@ export function buildSelectorFriction(actions, { matchKnownIssues = () => [], re
       const key = targetKey(fail.type, failTarget);
       const entry = entries.get(key);
       if (!entry || isResolved(key, fail.started_at)) continue;
+      if (!recoveryWindow(entry).has(fail.session_id)) continue;
       entry.recoveryTrials += 1;
       let recoveryFound = false;
       let retried = false;
@@ -284,6 +309,37 @@ export function historyForOrigin(entry, origin) {
     if (b.lastSuccessAt && (!out.lastSuccessAt || b.lastSuccessAt > out.lastSuccessAt)) out.lastSuccessAt = b.lastSuccessAt;
   }
   return out;
+}
+
+// ---------- session-start briefing ----------
+
+const GOAL_STOPWORDS = new Set(['with', 'from', 'that', 'this', 'into', 'then', 'test', 'tests', 'page', 'check', 'make', 'when', 'have', 'does', 'only', 'about', 'after', 'before']);
+
+// The targets that are STILL failing and likely to matter to THIS session, ranked by relevance to its
+// declared goal and the origin it is pinned to, then by cost. Relevance: the target was seen on the
+// session's origin (+2) and each distinct goal word (4+ letters) found in its selector / last error (+1,
+// capped at 3). Entries that were fixed since (a success after the last failure on every origin) are
+// left out - a briefing about solved problems is noise. Nothing relevant? the costliest still-failing
+// targets are returned unmarked, so a fresh goal still sees the project's worst wall.
+export function buildSessionBriefing(selectorFriction, { goal = '', origin = null, limit = 5 } = {}) {
+  const words = [...new Set(String(goal).toLowerCase().match(/[a-z][a-z0-9_-]{3,}/g) ?? [])].filter((w) => !GOAL_STOPWORDS.has(w));
+  const rows = [];
+  for (const e of selectorFriction ?? []) {
+    const unresolved = Object.values(e.origins ?? {}).reduce((n, b) => n + (b.unresolved || 0), 0);
+    if (!unresolved) continue;
+    const originHit = Boolean(origin) && Object.keys(e.origins ?? {}).some((o) => o && (o === origin || o.startsWith(origin)));
+    const haystack = `${e.selector} ${e.lastError ?? ''}`.toLowerCase();
+    const goalHits = words.filter((w) => haystack.includes(w)).length;
+    const relevance = (originHit ? 2 : 0) + Math.min(goalHits, 3);
+    const topClass = Object.entries(e.errorClasses ?? {}).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+    const r = e.recovery;
+    rows.push({
+      key: e.key, type: e.type, kind: e.targetKind, target: e.selector, failCount: e.failCount, unresolved, errorClass: topClass, score: e.score, relevance, relevant: relevance > 0,
+      ...(r ? { worked: r.kind === 'alt-selector' ? `use "${r.selector}" instead (worked ${r.worked}/${r.of})` : `${r.type}${r.selector ? ` "${r.selector}"` : ''} first (worked ${r.worked}/${r.of})` } : {}),
+    });
+  }
+  rows.sort((a, b) => b.relevance - a.relevance || b.score - a.score);
+  return rows.slice(0, limit);
 }
 
 // ---------- live per-session tracker ----------
@@ -475,6 +531,22 @@ export function describeFailureContext(f) {
 // (computeAnalytics().failureRateByType). Flags a type whose failure rate THIS session is
 // SPIKE_FACTOR x its rate across every other session - the "same wall, much harder" case the
 // first-ever diff cannot see because the type already has history.
+// The one place per-command-type totals are counted. computeAnalytics (project-wide failureRateByType),
+// the live "failed for the first time ever" line and the session-end spike check all read this, so a type's
+// numbers cannot differ between the dashboard and what the agent was told. `counts(action)` lets the
+// caller drop actions declared fixed. Returns Map type -> { type, total, failed, wastedMs }.
+export function tallyTypeFailures(actions, { counts = () => true } = {}) {
+  const byType = new Map();
+  for (const a of actions) {
+    if (!counts(a)) continue;
+    const t = byType.get(a.type) ?? { type: a.type, total: 0, failed: 0, wastedMs: 0 };
+    t.total += 1;
+    if (!a.ok) { t.failed += 1; t.wastedMs += Number(a.duration_ms) || 0; }
+    byType.set(a.type, t);
+  }
+  return byType;
+}
+
 export function findRateSpikes(sessionActions, totalsByType) {
   const perType = new Map();
   for (const a of sessionActions) {
@@ -549,7 +621,15 @@ export function normalizeErrorText(text) {
   return firstLine.replace(/"[^"]*"|'[^']*'|#[\w-]+|\b0x[0-9a-f]+\b|\d+/gi, '*').replace(/\s+/g, ' ').trim();
 }
 
-export function buildFrictionClusters(entries, { minTargets = CLUSTER_MIN_TARGETS, limit = 5 } = {}) {
+// Short stable id for a cluster (same cause = same id across calls), so `friction resolve cluster <id>` can name it.
+const clusterId = (errorClass, signature) => {
+  let h = 5381;
+  for (const ch of `${errorClass}|${signature}`) h = ((h * 33) ^ ch.codePointAt(0)) >>> 0;
+  return h.toString(16).padStart(8, '0');
+};
+
+// targetLimit: how many targets each cluster lists (the digest shows 8; resolving a whole cluster needs all).
+export function buildFrictionClusters(entries, { minTargets = CLUSTER_MIN_TARGETS, limit = 5, targetLimit = 8 } = {}) {
   const groups = new Map();
   for (const e of entries) {
     if (!e.lastError) continue;
@@ -559,7 +639,7 @@ export function buildFrictionClusters(entries, { minTargets = CLUSTER_MIN_TARGET
     if (!signature) continue;
     const id = `${errorClass}|${signature}`;
     const g = groups.get(id) ?? { errorClass, signature, sample: e.lastError, targets: [], failCount: 0, wastedMs: 0, score: 0, origins: new Set(), types: new Set() };
-    g.targets.push({ key: e.key, selector: e.selector, targetKind: e.targetKind, failCount: e.failCount });
+    g.targets.push({ key: e.key, type: e.type, selector: e.selector, targetKind: e.targetKind, failCount: e.failCount });
     g.failCount += e.failCount;
     g.wastedMs += e.wastedMs;
     g.score += e.score;
@@ -570,6 +650,7 @@ export function buildFrictionClusters(entries, { minTargets = CLUSTER_MIN_TARGET
   return [...groups.values()]
     .filter((g) => g.targets.length >= minTargets)
     .map((g) => ({
+      id: clusterId(g.errorClass, g.signature),
       errorClass: g.errorClass,
       signature: g.signature,
       sample: g.sample.slice(0, 200),
@@ -579,8 +660,8 @@ export function buildFrictionClusters(entries, { minTargets = CLUSTER_MIN_TARGET
       score: Math.round(g.score * 10) / 10,
       types: [...g.types],
       origins: [...g.origins],
-      targets: g.targets.sort((a, b) => b.failCount - a.failCount).slice(0, 8),
-      summary: `one cause behind ${g.targets.length} targets (${g.failCount} failures): ${g.sample.slice(0, 100)}`,
+      targets: g.targets.sort((a, b) => b.failCount - a.failCount).slice(0, targetLimit),
+      summary: `one cause behind ${g.targets.length} targets (${g.failCount} failures): ${g.sample.slice(0, 100)} - all fixed? friction resolve cluster ${clusterId(g.errorClass, g.signature)}`,
     }))
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);

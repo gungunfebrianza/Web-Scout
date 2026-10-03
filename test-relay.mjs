@@ -164,9 +164,10 @@ export function spawnAsync(args, { env = {}, cwd, timeoutMs = 15000 } = {}) {
 // counter with `epoch: 0`: replies then carry `epoch: state.epoch`, `page.epoch`
 // answers it, and a test bumps `state.epoch` to simulate the page changing on
 // its own. `state.avoided = n` stamps n avoided bytes on the next reply only (`state.outlineOld` likewise stamps the size of the reply an outline replaced).
-export async function connectFakeAgent(port, handlers = {}, { name = 'default', epoch, build = currentInjectBuild(), origin } = {}) {
-  const state = { epoch, avoided: undefined, outlineOld: undefined };
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(name)}&loadId=fake-agent${build ? `&build=${build}` : ''}${origin ? `&origin=${encodeURIComponent(origin)}` : ''}`);
+export async function connectFakeAgent(port, handlers = {}, { name = 'default', epoch, build = currentInjectBuild(), origin, path: pagePath } = {}) {
+  // state.path is the route the fake tab is "on": reported at connect and stamped on every reply, like inject.js does
+  const state = { epoch, avoided: undefined, outlineOld: undefined, path: pagePath };
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/agent?name=${encodeURIComponent(name)}&loadId=fake-agent${build ? `&build=${build}` : ''}${origin ? `&origin=${encodeURIComponent(origin)}` : ''}${pagePath ? `&path=${encodeURIComponent(pagePath)}` : ''}`);
   const seen = [];
   ws.onmessage = async (ev) => {
     const msg = JSON.parse(ev.data);
@@ -180,9 +181,9 @@ export async function connectFakeAgent(port, handlers = {}, { name = 'default', 
       const outlineOld = state.outlineOld;
       state.avoided = undefined;
       state.outlineOld = undefined;
-      ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: true, result, ...(epochBefore !== undefined ? { epoch: epochBefore } : {}), ...(avoided ? { avoided } : {}), ...(outlineOld !== undefined ? { outlineOld } : {}) }));
+      ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: true, result, ...(state.path ? { path: state.path } : {}), ...(epochBefore !== undefined ? { epoch: epochBefore } : {}), ...(avoided ? { avoided } : {}), ...(outlineOld !== undefined ? { outlineOld } : {}) }));
     } catch (err) {
-      ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: false, error: err.message }));
+      ws.send(JSON.stringify({ kind: 'reply', id: msg.id, ok: false, error: err.message, ...(state.path ? { path: state.path } : {}) }));
     }
   };
   await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(new Error('fake agent could not connect')); });

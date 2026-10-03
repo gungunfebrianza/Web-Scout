@@ -37,6 +37,8 @@ export const CLI_SPEC = [
   { cmd: 'friction explain', pos: [2, 2], mcp: 'webscout_meta.friction' },
   { cmd: 'friction list', pos: [0, 0], mcp: 'webscout_meta.friction' },
   { cmd: 'friction config', pos: [0, 0], mcp: 'webscout_meta.friction' },
+  { cmd: 'friction session', pos: [0, 0], mcp: 'webscout_meta.friction' },
+  { cmd: 'friction prune', pos: [0, 0], bool: ['--confirm'], val: ['--days'], mcp: 'webscout_meta.friction', params: { '--days': 'days', '--confirm': 'confirm' } },
   {
     cmd: 'known-issues promote', pos: [1, 1], bool: ['--confirm'], val: ['--remediation', '--description', '--signature'], mcp: 'webscout_meta.friction',
     params: { '--confirm': 'confirm', '--remediation': 'remediation', '--description': 'description' },
@@ -57,9 +59,9 @@ export const CLI_SPEC = [
   { cmd: 'relay status', pos: [0, 0], mcp: null, mcpExempt: NOMCP_PROCESS },
 
   {
-    cmd: 'session start', pos: [1, 2], bool: ['--strict-crv', '--auto-snapshot', '--no-briefing', '--lean', '--crv-compact', '--allow-remote'], val: ['--tags', '--stores', '--token-budget', '--if-stale-min', '--agent'],
+    cmd: 'session start', pos: [1, 2], bool: ['--strict-crv', '--auto-snapshot', '--no-briefing', '--lean', '--crv-compact', '--allow-remote', '--auto-recover'], val: ['--tags', '--stores', '--token-budget', '--if-stale-min', '--agent'],
     mcp: 'webscout_session.start',
-    params: { '--strict-crv': 'strictCrv', '--stores': 'strictCrvStores', '--tags': 'tags', '--token-budget': 'tokenBudget', '--if-stale-min': 'ifStaleMin', '--no-briefing': 'noBriefing', '--lean': 'lean', '--crv-compact': 'crvCompact', '--allow-remote': 'allowRemote' },
+    params: { '--strict-crv': 'strictCrv', '--stores': 'strictCrvStores', '--tags': 'tags', '--token-budget': 'tokenBudget', '--if-stale-min': 'ifStaleMin', '--no-briefing': 'noBriefing', '--lean': 'lean', '--crv-compact': 'crvCompact', '--allow-remote': 'allowRemote', '--auto-recover': 'autoRecover' },
     cliOnly: { '--auto-snapshot': 'convenience wrapper - an MCP caller takes an explicit webscout_idb snapshot action' },
   },
   { cmd: 'session end', pos: [0, 1], bool: ['--trace', '--apply-suggestions'], mcp: 'webscout_session.end', params: { '--trace': 'trace', '--apply-suggestions': 'applySuggestions' } },
