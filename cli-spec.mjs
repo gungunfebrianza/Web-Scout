@@ -25,7 +25,7 @@ const SHAPE_PARAMS = { '--table': 'table', '--if-changed': 'ifChanged', '--delta
 const NOMCP_PROCESS = 'process control of the relay itself - not something an MCP tool call should be able to do to its own backend';
 
 export const CLI_SPEC = [
-  { cmd: 'help', pos: [0, 2], mcp: null, mcpExempt: 'slices usage.txt for a CLI caller; an MCP caller already has each action documented in its tool description' },
+  { cmd: 'help', pos: [0, 2], mcp: 'webscout_meta.describe' },
   { cmd: 'status', pos: [0, 0], mcp: 'webscout_meta.status' },
   { cmd: 'agents', pos: [0, 0], mcp: 'webscout_meta.agents' },
   { cmd: 'ping', pos: [0, 0], val: ['--agent'], mcp: 'webscout_meta.ping' },
@@ -42,7 +42,7 @@ export const CLI_SPEC = [
   { cmd: 'friction notices', pos: [0, 0], val: ['--session', '--since'], mcp: 'webscout_meta.friction', params: { '--session': 'session', '--since': 'since' } },
   { cmd: 'friction watch', pos: [0, 0], val: ['--for', '--count', '--session'], mcp: null, mcpExempt: 'an open-ended stream has no request/response shape - an MCP caller polls "friction notices" with the since cursor instead' },
   { cmd: 'friction regressions', pos: [0, 0], bool: ['--fail'], mcp: 'webscout_meta.friction', cliOnly: { '--fail': 'sets the exit status for CI - an MCP caller reads the count in the reply' } },
-  { cmd: 'friction prune', pos: [0, 0], bool: ['--confirm'], val: ['--days'], mcp: 'webscout_meta.friction', params: { '--days': 'days', '--confirm': 'confirm' } },
+  { cmd: 'friction prune', pos: [0, 0], bool: ['--confirm'], val: ['--days', '--notice-days', '--read-days'], mcp: 'webscout_meta.friction', params: { '--days': 'days', '--notice-days': 'noticeDays', '--read-days': 'readDays', '--confirm': 'confirm' } },
   {
     cmd: 'known-issues export', pos: [0, 0], val: ['--out'], mcp: 'webscout_meta.friction',
     cliOnly: { '--out': 'writes a local file - an MCP caller gets the entries inline' },

@@ -31,13 +31,16 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 // friction subs) - raised to 21350, same commit, same convention. Trimming descriptions is the next move.
 // Measured 21,738 in friction round 6 (friction targets/notices/regressions/issues subs, session replay, macro list risk) -
 // raised to 21750, same commit, same convention.
-const MCP_TOTAL_MAX_BYTES = 21750;
+// LOWERED to 15800 in round 7: the list became terse (each action line is its signature plus the first clause of what it
+// does) and the long form moved behind webscout_meta describe, which serves usage.txt. Measured 15,687 (was 21,738).
+const MCP_TOTAL_MAX_BYTES = 15800;
 // Raised to 3550 when V38 added crv_preflight/crv_seed/crv_cleanup to webscout_idb (already the
 // biggest single tool, from crv_run) - same commit-with-the-text convention as above.
 // Raised to 3650 when V39 extended crv_preflight's one-line description (webscout_idb measured 3,606).
 // Raised to 3720 when idb.seedTemplate's one-line description landed on the same tool (measured
 // 3,708) - same convention, same commit as the text.
-const MCP_TOOL_MAX_BYTES = 3720;
+// Lowered to 2500 in round 7 (webscout_idb, the biggest, measures about 2,300 in the terse form).
+const MCP_TOOL_MAX_BYTES = 2500;
 // The biggest slice of help (a whole group) and the index a bare `cli.mjs` prints.
 // Raised to 14300 when "session viz" (round-2 session-viz.mjs's own CLI access) was added to the
 // already-tightest group - same commit as the text, same convention as MCP_TOTAL_MAX_BYTES above.

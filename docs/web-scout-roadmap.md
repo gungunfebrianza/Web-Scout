@@ -3194,6 +3194,59 @@ API and CLI tests; the `replay` button is a form in the tools drawer, not a per-
 
 Tests: `surfaces.test.mjs`, `friction-round6.test.mjs`, one more browser test in `friction-dashboard.test.mjs`.
 
+## V45 - friction awareness, round 7: trust, cost, reach (implemented)
+
+A pass over what rounds 3-6 left expensive, unverified or half-reachable.
+
+**Trust.** A 4-run `flaky-sweep` of the suite found one real flake: `getHostHealth({force})` joined a scan already
+in flight, which had listed the directory *before* the caller's change, so "look now" returned a stale picture; a
+forced read now waits for the running scan and scans again. `.gitignore` finally exists (database files, the warn
+cache, local logs). `.github/workflows/ci.yml` runs the full suite on every push and pull request (written for a
+Windows runner; not exercised from the author's machine, so a red first run may be the runner image), plus an
+informational two-run sweep on push. Not reproduced: one sweep run exited 1 with no failing test (a leak report); the
+leak list was not kept - if it recurs `run-tests` prints it.
+
+**Cost.** The MCP tool list is paid for at every session start. Each action line is now its signature plus the first
+clause of what it does (the `friction` line keeps its sub list); everything longer is one call away:
+`webscout_meta describe {tool, action}` serves the CLI usage text for that action with the flag-to-param mapping
+(`describe {tool}` returns a whole tool's long form, `describe {}` an index). The list went from 21.7 KB to 15.7 KB
+(-28%) and the caps in `schema-budget.test.mjs` were *lowered*, not raised. `cli.mjs help` and `describe` are now one
+mirrored pair in `cli-spec.mjs`. `relay.mjs` shed its friction routes into `routes-friction.mjs` (a factory that
+receives what it needs from the relay); `surfaces.test.mjs` reads every `routes-*.mjs`. It is the first slice, not
+the whole split.
+
+**Exact, not approximate.** The analytics row cache re-read "the newest 200 ids" to catch rows touched after logging.
+It now reads exactly: rows logged since the last call, plus the ids `db.takeDirtyActionIds()` reports as updated
+(delivered bytes, intents) - a change feed, not a guess.
+
+**Reach.** MCP resources (`webscout://notices`, `regressions`, `targets`): readable without a tool call. The
+dashboard action log puts a *replay* button on a failed row that plans that session's replay in the Tools drawer; known
+issues import is exercised through the browser's file input; retention has all three knobs.
+
+**More from what is recorded.**
+- *Retention.* `friction prune` also takes `--notice-days` (>= 7, notices of ended sessions) and `--read-days`
+  (>= 90): old *successful* reads aimed at no friction target that no snapshot, diff or question references (a
+  success on a target changes what its old failures mean, so those stay). Failures and mutations are never touched;
+  blob refcounts are released.
+- *Why did it relapse.* `friction regressions` now says what was committed between the fix and the failure (from the
+  project's git history; `WEBSCOUT_GIT_DIR` to point elsewhere): the commits, or "nothing was committed - look at data or
+  environment", or no claim when there is no repository.
+- *A registry that is shared, not copied.* `WEBSCOUT_KNOWN_ISSUES_SHARED` (path-delimiter separated) is merged read-only
+  under the local registry (a local id wins, an unreadable file is reported by `GET /known-issues` and skipped, import
+  and promote still write only the local file).
+- *Stable selectors.* The alternative that reliably worked after a selector failed (>= 3 trials, >= 80%) is offered
+  where it helps: `crv preflight --plan` (`suggest` on a risky step), `crv preflight --selector` (`selectorSuggestion`) and
+  `macro record` (a recovery-based suggestion when no same-element evidence exists; the recorded step is still never
+  rewritten). One definition (`reliableAlternative`) serves these and `--try-recovery`.
+- *The map as a document.* `docs/web-scout-capabilities.md` is generated from `surfaces.mjs` and `cli-spec.mjs`
+  (`node surfaces.mjs --write`); a test fails when it is stale.
+
+Not done: the rest of the `relay.mjs` split (sessions, macros, state); a CI run on a hosted runner; the
+`describe` text is usage.txt (CLI flags) plus the flag-to-param map, not a separate MCP-only prose.
+
+Tests: `friction-round7.test.mjs`, one more browser test in `friction-dashboard.test.mjs`, the capabilities-doc test in
+`surfaces.test.mjs`.
+
 ## V40r - CRV workflow friction closed after a real P4.10 pass (implemented; numbered separately from V40-V43 above, merged from the distribution line)
 
 A real-browser CRV pass against a P4.10 (Capital Flow "limited authority pilot outcome

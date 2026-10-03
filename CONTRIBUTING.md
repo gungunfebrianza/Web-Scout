@@ -407,3 +407,12 @@ proportional gain in what it catches, so state up front which checks are which.
 
 MIT - see [`LICENSE`](./LICENSE). By contributing, you agree your
 contribution is licensed under the same terms.
+
+## Writing an MCP action description
+
+The MCP tool list is sent to the model at every session start, so `mcp-server.mjs` publishes each action line as its
+signature plus the first clause of what it does (`terseDescription`), and `webscout_meta describe {tool, action}`
+serves the long form from `usage.txt`. Put the one thing a caller needs to choose the action in the FIRST clause
+(before the first `; `, `. `, ` - ` or ` (`), keep the params in the `{...}` signature (the parity test reads them
+there), and write the detail in `usage.txt` where it already has to live. `schema-budget.test.mjs` fails when the
+list grows.

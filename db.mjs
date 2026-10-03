@@ -1026,11 +1026,22 @@ const stmtListActionsAsc = db.prepare('SELECT * FROM actions WHERE session_id = 
 const stmtListActionsLimit = db.prepare('SELECT * FROM actions WHERE session_id = ? ORDER BY id DESC LIMIT ?');
 const stmtGetActionById = db.prepare('SELECT * FROM actions WHERE id = ?');
 
+// Change feed: ids of action rows whose columns were updated AFTER they were logged (delivered bytes, intent).
+// The relay's cached analytics rows re-read exactly these - not "the newest N" - so the cache is exact without
+// scanning the table. takeDirtyActionIds() hands the pending ids over and clears them.
+const dirtyActionIds = new Set();
+export function takeDirtyActionIds() {
+  const ids = [...dirtyActionIds];
+  dirtyActionIds.clear();
+  return ids;
+}
+
 const stmtSetActionDelivered = db.prepare('UPDATE actions SET delivered_bytes = ? WHERE id = ?');
 // Records that the caller was handed `bytes` for this action instead of its full result.
 export function setActionDelivered(actionId, bytes) {
   if (actionId === undefined || actionId === null || !Number.isFinite(bytes)) return;
   stmtSetActionDelivered.run(Math.max(0, Math.round(bytes)), Number(actionId));
+  dirtyActionIds.add(Number(actionId));
 }
 
 export function logAction({ sessionId, type, params, result, ok, error, startedAt, endedAt, agentName, origin, errorClass }) {
@@ -1188,6 +1199,7 @@ export function setActionIntents(sessionId, items) {
       if (!text || !Number.isFinite(Number(item.actionId))) continue;
       const info = stmtSetActionIntent.run(text, item.source ?? 'transcript', item.callId ?? null, Number(item.actionId), Number(sessionId));
       written += Number(info.changes);
+      if (info.changes) dirtyActionIds.add(Number(item.actionId));
     }
     db.exec('COMMIT');
   } catch (err) {
@@ -1603,6 +1615,17 @@ export function countActions() { return stmtCountActions.get().n; }
 const stmtListActionsFromId = db.prepare('SELECT * FROM actions WHERE id >= ? ORDER BY id ASC');
 export function listAllActionsFrom(minId) {
   return hydrateAnalyticsActions(stmtListActionsFromId.all(Number(minId) || 0));
+}
+
+// The same rows for an explicit id list (the change feed above), in id order.
+export function listAllActionsByIds(ids) {
+  const out = [];
+  const list = [...new Set((ids ?? []).map(Number).filter(Number.isFinite))];
+  for (let i = 0; i < list.length; i += 500) {
+    const chunk = list.slice(i, i + 500);
+    out.push(...db.prepare(`SELECT * FROM actions WHERE id IN (${chunk.map(() => '?').join(',')}) ORDER BY id ASC`).all(...chunk));
+  }
+  return hydrateAnalyticsActions(out);
 }
 
 export function listAllActions() {
@@ -2393,6 +2416,53 @@ export function pruneOrphanFrictionState() {
 // every "mark fixed" resolution are untouched; what goes is the payload nobody re-reads after a few weeks.
 // Blob refcounts are released and unreferenced blobs deleted, so the space is really freed. Never touches
 // the active session. dryRun reports what would go.
+// Notices (what agents were told) of ended sessions older than `days` (>= 7). The live session's are never touched.
+export function pruneOldNotices({ days, dryRun = true } = {}) {
+  const n = Number(days);
+  if (!Number.isFinite(n) || n < 7) throw new Error('noticeDays must be a number >= 7');
+  const cutoff = new Date(Date.now() - n * 86400000).toISOString();
+  const where = "at < ? AND session_id NOT IN (SELECT id FROM sessions WHERE status = 'active')";
+  const count = db.prepare(`SELECT COUNT(*) AS n FROM session_notices WHERE ${where}`).get(cutoff).n;
+  if (!dryRun && count) db.prepare(`DELETE FROM session_notices WHERE ${where}`).run(cutoff);
+  return { days: n, cutoff, notices: count, dryRun };
+}
+
+// Old action ROWS, but only the ones nothing depends on: a successful read-only call of an ended session, older
+// than `days` (>= 90), that is aimed at no friction target (selector_key '' - a success on a target would change
+// what its old failures count as), and that no snapshot, diff or question points at. Failures, mutations and
+// every target-bearing row stay, so history, rankings and declarations are untouched. `types` is the caller's list
+// of read-only command types (the registry lives with the relay). Blob refcounts are released.
+export function pruneOldReadRows({ days, types, dryRun = true } = {}) {
+  const n = Number(days);
+  if (!Number.isFinite(n) || n < 90) throw new Error('readDays must be a number >= 90');
+  const list = (types ?? []).filter((t) => typeof t === 'string');
+  if (!list.length) return { days: n, rows: 0, dryRun, note: 'no read-only types given' };
+  const cutoff = new Date(Date.now() - n * 86400000).toISOString();
+  const marks = list.map(() => '?').join(',');
+  const where = `ok = 1 AND selector_key = '' AND type IN (${marks}) AND started_at < ?
+    AND session_id NOT IN (SELECT id FROM sessions WHERE status = 'active')
+    AND id NOT IN (SELECT action_id FROM state_snapshots WHERE action_id IS NOT NULL)
+    AND id NOT IN (SELECT action_id FROM state_diffs WHERE action_id IS NOT NULL)
+    AND id NOT IN (SELECT action_id FROM qa_log WHERE action_id IS NOT NULL)`;
+  const args = [...list, cutoff];
+  const rows = db.prepare(`SELECT id, result_hash, params_hash FROM actions WHERE ${where}`).all(...args);
+  const summary = { days: n, cutoff, rows: rows.length, dryRun };
+  if (dryRun || !rows.length) return summary;
+  const tally = (key) => { const m = new Map(); for (const r of rows) if (r[key]) m.set(r[key], (m.get(r[key]) || 0) + 1); return m; };
+  db.exec('BEGIN');
+  try {
+    const releaseResult = db.prepare('UPDATE result_blobs SET ref_count = ref_count - ? WHERE hash = ?');
+    for (const [hash, refs] of tally('result_hash')) releaseResult.run(refs, hash);
+    const releaseParams = db.prepare('UPDATE params_blobs SET ref_count = ref_count - ? WHERE hash = ?');
+    for (const [hash, refs] of tally('params_hash')) releaseParams.run(refs, hash);
+    db.prepare(`DELETE FROM actions WHERE ${where}`).run(...args);
+    db.exec('DELETE FROM result_blobs WHERE ref_count <= 0');
+    db.exec('DELETE FROM params_blobs WHERE ref_count <= 0');
+    db.exec('COMMIT');
+  } catch (err) { db.exec('ROLLBACK'); throw err; }
+  return summary;
+}
+
 export function pruneOldResults({ days, dryRun = true } = {}) {
   const n = Number(days);
   if (!Number.isFinite(n) || n < 7) throw new Error('days must be a number >= 7 (shorter would delete results from sessions still being worked on)');

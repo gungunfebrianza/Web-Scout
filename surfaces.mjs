@@ -57,3 +57,47 @@ export const SURFACES = [
 export const INTERNAL_ROUTES = {
   'POST /help-used': 'usage telemetry the CLI posts when a caller reads help',
 };
+
+// ---- the map as a document ----
+// docs/web-scout-capabilities.md is generated from SURFACES + cli-spec.mjs (the MCP action of a capability is the
+// mcp field of its CLI commands), and surfaces.test.mjs fails when the file is out of date. Regenerate with
+//   node surfaces.mjs --write
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { CLI_SPEC } from './cli-spec.mjs';
+
+export const CAPABILITIES_DOC = path.join(path.dirname(fileURLToPath(import.meta.url)), 'docs', 'web-scout-capabilities.md');
+
+export function renderCapabilitiesMarkdown() {
+  const cell = (list) => (list?.length ? list.map((x) => `\`${x}\``).join('<br>') : '-');
+  const mcpOf = (s) => [...new Set((s.cli ?? []).map((c) => CLI_SPEC.find((r) => r.cmd === c)?.mcp).filter(Boolean))];
+  const lines = [
+    '# Capabilities and where each is reachable',
+    '',
+    'Generated from `surfaces.mjs` and `cli-spec.mjs` by `node surfaces.mjs --write`; `surfaces.test.mjs` fails when this file is stale.',
+    'A `-` in the CLI or Dashboard column carries a reason in `surfaces.mjs` (`cliWhy` / `dashboardWhy`). MCP actions are those of the CLI commands.',
+    '',
+    '| Capability | HTTP | CLI | MCP | Dashboard |',
+    '|---|---|---|---|---|',
+  ];
+  for (const s of SURFACES) {
+    lines.push(`| ${s.id}${s.family ? ` _(${s.family})_` : ''} | ${cell(s.http)} | ${cell(s.cli)} | ${cell(mcpOf(s))} | ${cell(s.dashboard)} |`);
+  }
+  lines.push('');
+  const why = SURFACES.filter((s) => s.cliWhy || s.dashboardWhy);
+  if (why.length) {
+    lines.push('## Why a surface is empty', '');
+    for (const s of why) {
+      if (s.cliWhy) lines.push(`- **${s.id}** - no CLI command: ${s.cliWhy}`);
+      if (s.dashboardWhy) lines.push(`- **${s.id}** - no dashboard control: ${s.dashboardWhy}`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url) && process.argv.includes('--write')) {
+  fs.writeFileSync(CAPABILITIES_DOC, renderCapabilitiesMarkdown());
+  console.log(`wrote ${CAPABILITIES_DOC}`);
+}

@@ -74,6 +74,6 @@ test('nothing friction-related is frozen per session any more, and every resolve
   const relay = source('relay.mjs');
   assert.doesNotMatch(relay, /sessionFrictionSnapshot/, 'the macro nudge reads macroCandidates() on demand');
   assert.equal((relay.match(/dbApi\.markFrictionResolved\(/g) ?? []).length, 2, 'declareFrictionResolved is the only caller (its scope branch + its target branch)');
-  assert.match(relay, /declareFrictionResolved\(type, target\.value, target\.kind, body\.note\)/, '/friction/resolve goes through it');
+  assert.match(relay + source('routes-friction.mjs'), /declareFrictionResolved\(type, target\.value, target\.kind, body\.note\)/, '/friction/resolve goes through it');
   assert.match(relay, /declareFrictionResolved\(s\.type, s\.selector, s\.targetKind/, 'session end --apply-suggestions goes through it');
 });

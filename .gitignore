@@ -1,0 +1,13 @@
+# local state - never part of the source
+webscout.db
+webscout.db-shm
+webscout.db-wal
+.webscout-warn-cache.json
+.webscout-crv-manifest.json
+.post-merge-test.log
+.sweep.out
+.sweep.err
+.gate.log
+.t.log
+known-issues.json
+traces/auto/

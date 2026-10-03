@@ -10,7 +10,9 @@ import { SURFACES, INTERNAL_ROUTES } from './surfaces.mjs';
 import { CLI_SPEC } from './cli-spec.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
-const relaySource = fs.readFileSync(path.join(dir, 'relay.mjs'), 'utf8');
+// relay.mjs plus the route modules split out of it (routes-*.mjs)
+const routeFiles = fs.readdirSync(dir).filter((n) => n.startsWith('routes-') && n.endsWith('.mjs'));
+const relaySource = ['relay.mjs', ...routeFiles].map((n) => fs.readFileSync(path.join(dir, n), 'utf8')).join(String.fromCharCode(10));
 const dashboardSource = fs.readFileSync(path.join(dir, 'dashboard.html'), 'utf8');
 
 // "METHOD /path" with every numeric capture as :n, from the relay's own pattern literals.
@@ -109,4 +111,9 @@ test('capability ids are unique and no route is claimed twice', () => {
   assert.deepEqual(ids.filter((id, i) => ids.indexOf(id) !== i), []);
   const all = SURFACES.flatMap((s) => s.http ?? []);
   assert.deepEqual(all.filter((r, i) => all.indexOf(r) !== i), [], 'a route belongs to exactly one capability');
+});
+
+test('docs/web-scout-capabilities.md is the current rendering of the map (regenerate: node surfaces.mjs --write)', async () => {
+  const { renderCapabilitiesMarkdown, CAPABILITIES_DOC } = await import('./surfaces.mjs');
+  assert.equal(fs.readFileSync(CAPABILITIES_DOC, 'utf8'), renderCapabilitiesMarkdown());
 });

@@ -1064,16 +1064,26 @@ async function main() {
       let fail;
       ({ args: fargs, value: fail } = extractBooleanFlag(fargs, '--fail'));
       const out = await request('GET', '/friction/regressions');
-      for (const r of out.relapses) console.error(`REGRESSION: ${r.summary}`);
+      for (const r of out.relapses) {
+        console.error(`REGRESSION: ${r.summary}`);
+        if (Array.isArray(r.changedBetween)) {
+          console.error(r.changedBetween.length
+            ? `  committed between the fix and the relapse: ${r.changedBetween.slice(0, 3).map((c) => `${c.hash} ${c.subject}`).join('; ')}`
+            : '  nothing was committed between the fix and the relapse - look at data or environment, not code');
+        }
+      }
       printResult(out);
       if (fail && out.count > 0) process.exitCode = 1;
       return;
     }
     if (sub === 'prune') {
-      let days; let confirm;
+      let days; let noticeDays; let readDays; let confirm;
       ({ args: fargs, value: days } = extractFlag(fargs, '--days'));
+      ({ args: fargs, value: noticeDays } = extractFlag(fargs, '--notice-days'));
+      ({ args: fargs, value: readDays } = extractFlag(fargs, '--read-days'));
       ({ args: fargs, value: confirm } = extractBooleanFlag(fargs, '--confirm'));
-      printResult(await request('POST', '/friction/prune', { days: days !== undefined ? Number(days) : undefined, confirm: confirm === true }));
+      const num = (v) => (v !== undefined ? Number(v) : undefined);
+      printResult(await request('POST', '/friction/prune', { days: num(days), noticeDays: num(noticeDays), readDays: num(readDays), confirm: confirm === true }));
       return;
     }
     if (sub === 'resolve' || sub === 'unresolve' || sub === 'explain') {

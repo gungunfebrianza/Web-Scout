@@ -942,9 +942,11 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
   friction regressions [--fail]   targets declared fixed that have failed again since; --fail exits 1 if any
                                    (a CI / post-merge check)
   friction config                         the thresholds in effect (all WEBSCOUT_* env knobs)
-  friction prune [--days N] [--confirm]   retention, dry run unless --confirm: sweeps orphaned warning
-                                   state; with --days (>= 7) also drops the stored result BODIES of
-                                   older actions. History, rankings and declarations are kept.
+  friction prune [--days N] [--notice-days N] [--read-days N] [--confirm]
+                                   retention, dry run unless --confirm: sweeps orphaned warning state; --days (>= 7)
+                                   drops the stored result BODIES of older actions, --notice-days (>= 7) old notices,
+                                   --read-days (>= 90) old successful reads aimed at no friction target that no
+                                   snapshot or diff points at. Failures, history, rankings and declarations are kept.
   known-issues export [--out <file>]
                                    the registry as written (to a file, or on stdout) - to share with another checkout
   known-issues import <file> [--confirm]

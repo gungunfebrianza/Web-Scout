@@ -378,8 +378,9 @@ export function buildRelapses(resolutions, actions) {
   const note = (key, a) => {
     const r = cutoffs.get(key);
     if (!r || !a.started_at || a.started_at <= r.resolved_at) return;
-    const e = since.get(key) ?? { count: 0, lastFailedAt: null, lastError: null, sessions: new Set() };
+    const e = since.get(key) ?? { count: 0, firstFailedAt: null, lastFailedAt: null, lastError: null, sessions: new Set() };
     e.count += 1;
+    if (!e.firstFailedAt || a.started_at < e.firstFailedAt) e.firstFailedAt = a.started_at;
     e.sessions.add(a.session_id);
     if (!e.lastFailedAt || a.started_at >= e.lastFailedAt) { e.lastFailedAt = a.started_at; e.lastError = a.error ? String(a.error).slice(0, 200) : null; }
     since.set(key, e);
@@ -396,7 +397,7 @@ export function buildRelapses(resolutions, actions) {
     const r = cutoffs.get(key);
     return {
       key, type: r.type, selector: r.selector, resolvedAt: r.resolved_at, note: r.note ?? null,
-      failuresSince: e.count, sessionsSince: e.sessions.size, lastFailedAt: e.lastFailedAt, lastError: e.lastError,
+      failuresSince: e.count, sessionsSince: e.sessions.size, firstFailedAt: e.firstFailedAt, lastFailedAt: e.lastFailedAt, lastError: e.lastError,
       summary: `${r.type} ${r.selector} was declared fixed at ${r.resolved_at} and has failed ${e.count}x since${e.lastError ? ` (last: ${e.lastError})` : ''}`,
     };
   }).sort((a, b) => b.failuresSince - a.failuresSince);

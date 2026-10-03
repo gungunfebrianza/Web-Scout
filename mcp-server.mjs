@@ -38,6 +38,8 @@ import {
   manifestPath, readManifest, writeManifest,
 } from './client.mjs';
 import { describeFailureContext } from './friction.mjs';
+import { CLI_SPEC } from './cli-spec.mjs';
+import { parseUsage, helpTopic } from './help.mjs';
 
 const SERVER_NAME = 'web-scout';
 const SERVER_VERSION = '0.27.0'; // bumped alongside docs/web-scout-roadmap.md's V39 entry
@@ -92,9 +94,10 @@ const TOOLS = [
     description: 'Relay/session status and cross-session utilities.\n'
       + 'Actions:\n'
       + '  status {} - relay health, agents, active session, DB_VERSION drift\n'
+      + '  describe {tool?, action?} - the full help for one action (or a whole tool): usage text and the flag-to-param mapping\n'
       + '  agents {} - connected multi-tab agent names\n'
       + '  analytics {} - Friction Analytics: recurring failure patterns across ALL sessions\n'
-      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?, days?, filter?, sort?, limit?, session?, since?, entries?} - sub: explain (why it warns), resolve|unresolve (mark fixed; type may also be macro|verity|type|cluster, selector = its id/label/command), list, session, targets (ranked; filter text, sort cost|fails|wasted|tokens|recent|oldest), notices (what agents were told; since = last id seen), regressions (fixed, failing again), issues (known-issues.json; entries imports, confirm writes), config, prune (days; confirm applies), promote (candidate id; confirm writes). Page commands (page.reload...): selector = origin or origin+path\n'
+      + '  friction {sub, type?, selector?, store?, note?, id?, remediation?, description?, confirm?, days?, noticeDays?, readDays?, filter?, sort?, limit?, session?, since?, entries?} - sub: explain (why it warns), resolve|unresolve (mark fixed; type may also be macro|verity|type|cluster, selector = its id/label/command), list, session, targets (ranked; filter text, sort cost|fails|wasted|tokens|recent|oldest), notices (what agents were told; since = last id seen), regressions (fixed, failing again), issues (known-issues.json; entries imports, confirm writes), config, prune (days: result bodies; noticeDays; readDays; confirm applies), promote (candidate id; confirm writes). Page commands (page.reload...): selector = origin or origin+path\n'
       + '  search {q} - full-text search across every session\'s actions\n'
       + '  db_version_check {agent?, dbJsPath?} - js/db.js\'s DB_VERSION vs the tab\'s LIVE IndexedDB version; on drift also probes whether opening at the source version is blocked\n'
       + '  dashboard_url {} - the realtime dashboard URL (does not open a browser)\n'
@@ -106,6 +109,7 @@ const TOOLS = [
       ping: (p) => request('POST', '/ping', { agent: p?.agent }),
       token_report: (p) => request('GET', p?.sessionId ? `/sessions/${p.sessionId}/token-report` : '/token-report'),
       debug_state: (p) => sendCmd('debug.state', {}, p?.agent),
+      describe: (p) => describeAction(p),
       agents: () => request('GET', '/agents'),
       analytics: () => request('GET', '/analytics'),
       search: (p) => request('GET', `/search?q=${encodeURIComponent(requireField(p, 'q'))}`),
@@ -118,7 +122,7 @@ const TOOLS = [
         if (sub === 'notices') return request('GET', `/friction/notices?${new URLSearchParams({ ...(p.session !== undefined ? { session: String(p.session) } : {}), ...(p.since !== undefined ? { since: String(p.since) } : {}) })}`);
         if (sub === 'regressions') return request('GET', '/friction/regressions');
         if (sub === 'issues') return Array.isArray(p.entries) ? request('POST', '/known-issues/import', { entries: p.entries, confirm: p.confirm === true }) : request('GET', '/known-issues');
-        if (sub === 'prune') return request('POST', '/friction/prune', { days: p.days, confirm: p.confirm === true });
+        if (sub === 'prune') return request('POST', '/friction/prune', { days: p.days, noticeDays: p.noticeDays, readDays: p.readDays, confirm: p.confirm === true });
         if (sub === 'promote') {
           return request('POST', '/known-issues/promote', { id: requireField(p, 'id'), remediation: p.remediation, description: p.description, signature: p.signature, confirm: p.confirm === true });
         }
@@ -565,10 +569,58 @@ function toolInputSchema(tool) {
   };
 }
 
-function listToolDescriptors() {
-  const grouped = TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: toolInputSchema(t) }));
-  return [...grouped, { name: EVAL_TOOL.name, description: EVAL_TOOL.description, inputSchema: EVAL_TOOL.inputSchema }];
+// The tool list is paid for at every session start, so each action line is cut to its signature and the first clause of
+// what it does; everything longer is one call away ("webscout_meta describe {tool, action}"), which serves the CLI usage
+// text for that action. Non-action lines (the tool intro, shared notes) are kept, capped.
+function firstClause(text, max = 90) {
+  let cut = max > 200 ? text : text.split(/;\s|\.\s| - | \(/)[0].trim();
+  if (cut.length < 25) cut = text; // split at an abbreviation ("est. tokens") or an opening bracket: take the plain text instead
+  return cut.length <= max ? cut : `${cut.slice(0, max).replace(/\s+\S*$/, '')}...`;
 }
+export function terseDescription(full) {
+  const lines = full.split('\n').map((line) => {
+    const m = /^( {2}\w+ \{[^}]*\})(?: - (.*))?$/.exec(line);
+    if (!m) return line.length > 240 ? `${line.slice(0, 237)}...` : line;
+    // friction's sub list IS its documentation (one action, a dozen verbs), so it keeps a longer cut.
+    return m[2] ? `${m[1]} - ${firstClause(m[2], /^ {2}friction /.test(line) ? 480 : 90)}` : m[1];
+  });
+  return lines.join('\n');
+}
+
+let usageParsed = null;
+function describeAction(p) {
+  const tool = p?.tool ? String(p.tool) : '';
+  const action = p?.action ? String(p.action) : '';
+  const all = [...TOOLS, EVAL_TOOL];
+  if (!tool) return { tools: all.map((t) => ({ tool: t.name, actions: [...t.description.matchAll(/^ {2}(\w+) \{/gm)].map((m) => m[1]) })), usage: 'describe {tool} for the full long-form text of a tool, describe {tool, action} for one action' };
+  const found = all.find((t) => t.name === tool || t.name === `webscout_${tool}`);
+  if (!found) throw new Error(`unknown tool "${tool}" - one of: ${all.map((t) => t.name).join(', ')}`);
+  if (!action) return { tool: found.name, description: found.description };
+  const line = found.description.split('\n').find((l) => new RegExp(`^ {2}${action} \\{`).test(l));
+  const key = found.name === EVAL_TOOL.name ? found.name : `${found.name}.${action}`;
+  const rows = CLI_SPEC.filter((r) => r.mcp === key);
+  if (!line && !rows.length) throw new Error(`unknown action "${action}" on ${found.name}`);
+  usageParsed ??= parseUsage(fs.readFileSync(new URL('./usage.txt', import.meta.url), 'utf8'));
+  return {
+    tool: found.name, action, signature: line?.trim() ?? null,
+    commands: rows.map((r) => {
+      const [topic, sub] = r.cmd.split(' ');
+      return { cli: r.cmd, flagToParam: r.params ?? {}, help: helpTopic(usageParsed, topic, sub) };
+    }),
+  };
+}
+
+function listToolDescriptors() {
+  const grouped = TOOLS.map((t) => ({ name: t.name, description: terseDescription(t.description), inputSchema: toolInputSchema(t) }));
+  return [...grouped, { name: EVAL_TOOL.name, description: terseDescription(EVAL_TOOL.description), inputSchema: EVAL_TOOL.inputSchema }];
+}
+
+// ---------- resources: what agents were told, readable without a tool call ----------
+const RESOURCES = [
+  { uri: 'webscout://notices', name: 'Friction notices', description: 'what agents were told this session (warnings and nudges, each with its next steps), newest last', mimeType: 'application/json', route: '/friction/notices' },
+  { uri: 'webscout://regressions', name: 'Regressions', description: 'targets declared fixed that have failed again', mimeType: 'application/json', route: '/friction/regressions' },
+  { uri: 'webscout://targets', name: 'Friction targets', description: 'the ranked list of recurring failures', mimeType: 'application/json', route: '/friction/targets?limit=20' },
+];
 
 async function callTool(name, args) {
   if (name === EVAL_TOOL.name) return EVAL_TOOL.call(args ?? {});
@@ -589,7 +641,7 @@ function handleInitialize(msg) {
   const protocolVersion = msg.params?.protocolVersion || '2025-06-18';
   sendResult(msg.id, {
     protocolVersion,
-    capabilities: { tools: {} },
+    capabilities: { tools: {}, resources: {} },
     serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
   });
 }
@@ -634,6 +686,16 @@ async function handleMessage(msg) {
   if (msg.method === 'notifications/initialized') return; // no response for a notification
   if (msg.method === 'tools/list') { handleToolsList(msg); return; }
   if (msg.method === 'tools/call') { await handleToolsCall(msg); return; }
+  if (msg.method === 'resources/list') { sendResult(msg.id, { resources: RESOURCES.map(({ route, ...r }) => r) }); return; }
+  if (msg.method === 'resources/read') {
+    const res = RESOURCES.find((r) => r.uri === msg.params?.uri);
+    if (!res) { sendError(msg.id, -32602, `unknown resource: ${msg.params?.uri}`); return; }
+    try {
+      const body = await request('GET', res.route);
+      sendResult(msg.id, { contents: [{ uri: res.uri, mimeType: res.mimeType, text: JSON.stringify(body) }] });
+    } catch (err) { sendError(msg.id, -32603, err.message); }
+    return;
+  }
   if (msg.method === 'ping') { sendResult(msg.id, {}); return; }
   sendError(msg.id, -32601, `method not found: ${msg.method}`);
 }

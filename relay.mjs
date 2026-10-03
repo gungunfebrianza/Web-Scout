@@ -29,7 +29,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { exec, execSync } from 'node:child_process';
+import { exec, execSync, spawnSync } from 'node:child_process';
 import * as dbApi from './db.mjs';
 import { buildPrompt, askAI, DEFAULT_BACKEND_URL } from './ai.mjs';
 import { buildReportMarkdown, buildReportJson } from './report.mjs';
@@ -54,6 +54,7 @@ import * as repairApi from './self-repair.mjs';
 import * as hostHealth from './host-health.mjs';
 import * as friction from './friction.mjs';
 import * as notices from './notices.mjs';
+import { frictionRoutes } from './routes-friction.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
@@ -968,6 +969,14 @@ function frictionFactsFor(sessionId, type, params, agentName, originOverride) {
 const RECOVERY_RETRY_TYPES = new Set(['dom.click', 'dom.clickWait', 'dom.fill', 'dom.wait']);
 const RECOVERY_MIN_TRIALS = 3;
 const RECOVERY_MIN_RATE = 0.8;
+// The selector that has repeatedly been what worked after this one failed (>= RECOVERY_MIN_TRIALS trials, >= RECOVERY_MIN_RATE of
+// them), as a suggestion with its evidence - or null. `recovery` is a friction entry's .recovery.
+function reliableAlternative(recovery, ownSelector) {
+  if (!recovery || recovery.kind !== 'alt-selector' || !recovery.selector || recovery.of < RECOVERY_MIN_TRIALS || recovery.worked / recovery.of < RECOVERY_MIN_RATE) return null;
+  if (ownSelector && friction.normalizeSelector(recovery.selector) === friction.normalizeSelector(ownSelector)) return null;
+  return { selector: recovery.selector, worked: recovery.worked, of: recovery.of, evidence: `after this failed, "${recovery.selector}" worked ${recovery.worked} of ${recovery.of} times` };
+}
+
 function recoveryRetryFor(sessionId, type, params, agentName, err) {
   if (!RECOVERY_RETRY_TYPES.has(type) || typeof params?.selector !== 'string') return null;
   if (friction.classifyError(err?.message) === 'eval-throw') return null;
@@ -995,7 +1004,10 @@ function planFrictionReport(plan, agentName) {
     if (!facts) return;
     checked += 1;
     const { assessment } = friction.evaluateSelectorRisk({ type: step.type, selector: facts.target.value, targetKind: facts.target.kind, entry: facts.entry, live: facts.live, state: null, origin: facts.origin });
-    if (assessment) risky.push({ step: index + 1, type: step.type, target: facts.target, key: facts.key, level: assessment.level, message: assessment.message });
+    if (assessment) {
+      const alt = facts.target.kind === 'selector' ? reliableAlternative(facts.entry?.recovery, facts.target.value) : null;
+      risky.push({ step: index + 1, type: step.type, target: facts.target, key: facts.key, level: assessment.level, message: assessment.message, ...(alt ? { suggest: alt } : {}) });
+    }
   });
   return { checked, risky };
 }
@@ -1176,7 +1188,6 @@ function buildMacroSelectorSuggestions(sessionId, steps, actions) {
       if (!selectorsByElement.has(key)) selectorsByElement.set(key, new Set());
       selectorsByElement.get(key).add(a.params.selector);
     }
-    if (!selectorsByElement.size) return [];
     const suggestions = [];
     steps.forEach((step, stepIndex) => {
       const selector = step.params?.selector;
@@ -1193,6 +1204,9 @@ function buildMacroSelectorSuggestions(sessionId, steps, actions) {
         });
         return;
       }
+      // No same-element evidence in this session: fall back to what history says worked after this selector failed.
+      const alt = reliableAlternative(hit.recovery, selector);
+      if (alt) suggestions.push({ stepIndex, type: step.type, selector, failCount: hit.failCount, sessionCount: hit.sessionCount, alternative: alt.selector, element: null, source: 'recovery', evidence: alt.evidence });
     });
     return suggestions;
   } catch { return []; /* best-effort - a suggestion bug must never fail the macro recording itself */ }
@@ -1356,17 +1370,46 @@ function compileSignature(signature) {
 
 // null = no file (inert, not an error). Throws on an unreadable/unparseable/non-array file so the
 // caller can say "could not check" instead of pretending nothing matched.
+// WEBSCOUT_KNOWN_ISSUES_SHARED: one or more files (path-delimiter separated) of the same shape, read-only, merged UNDER
+// the local registry (a local id wins). A team keeps one in a shared location; nobody copies files by hand, and this
+// tool never writes to them. An unreadable shared file is skipped (reported by GET /known-issues), never fatal.
+function sharedKnownIssueFiles() {
+  return (process.env.WEBSCOUT_KNOWN_ISSUES_SHARED || '').split(path.delimiter).map((p) => p.trim()).filter(Boolean);
+}
+function readSharedKnownIssues() {
+  return sharedKnownIssueFiles().map((file) => {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return Array.isArray(parsed) ? { file, entries: parsed } : { file, entries: [], error: 'not a JSON array' };
+    } catch (err) { return { file, entries: [], error: err.message }; }
+  });
+}
+function sharedKnownIssueEntries(localEntries) {
+  const have = new Set(localEntries.map((e) => e?.id));
+  const out = [];
+  for (const s of readSharedKnownIssues()) {
+    for (const e of s.entries) {
+      if (!e || typeof e.id !== 'string' || have.has(e.id)) continue;
+      have.add(e.id);
+      out.push({ ...e, shared: s.file });
+    }
+  }
+  return out;
+}
+
 function loadKnownIssues() {
   let raw;
   try {
     raw = fs.readFileSync(KNOWN_ISSUES_PATH, 'utf8');
   } catch (err) {
-    if (err.code === 'ENOENT') return null;
-    throw new Error(`known-issues file unreadable: ${err.message}`);
+    if (err.code !== 'ENOENT') throw new Error(`known-issues file unreadable: ${err.message}`);
+    if (!sharedKnownIssueFiles().length) return null;
+    raw = '[]'; // no local file, but shared ones: they still apply
   }
   let parsed;
   try { parsed = JSON.parse(raw); } catch (err) { throw new Error(`known-issues file is not valid JSON: ${err.message}`); }
   if (!Array.isArray(parsed)) throw new Error('known-issues file must be a JSON array of { id, signature, description, remediation }');
+  parsed = [...parsed, ...sharedKnownIssueEntries(parsed)];
   const issues = [];
   const warnings = [];
   parsed.forEach((entry, i) => {
@@ -1684,6 +1727,18 @@ function allFrictionTargets() {
   return list;
 }
 
+// What changed between a fix and the failure that followed it: the commits made in that window, from the project's own
+// git history (WEBSCOUT_GIT_DIR, default this directory). null = no git here / git unavailable; [] = git says nothing
+// was committed in between (so the relapse is probably not a code change: data, environment, a flaky page).
+function commitsBetween(since, until) {
+  if (!since || !until) return null;
+  try {
+    const r = spawnSync('git', ['-C', process.env.WEBSCOUT_GIT_DIR || __dirname, 'log', `--since=${since}`, `--until=${until}`, '--format=%h\t%s', '-n', '8'], { encoding: 'utf8', timeout: 3000, windowsHide: true });
+    if (r.status !== 0 || r.error) return null;
+    return r.stdout.split('\n').filter(Boolean).map((l) => { const [hash, ...rest] = l.split('\t'); return { hash, subject: rest.join('\t').slice(0, 120) }; });
+  } catch { return null; }
+}
+
 // known-issues.json as written (not compiled): what export hands out and import merges into.
 function readKnownIssuesRaw() {
   try {
@@ -1760,23 +1815,26 @@ async function gatherReportBundle(sessionId) {
 // session, so friction is visible the moment someone opens the dashboard,
 // not only after it gets hit again and complained about. See
 // docs/web-scout-roadmap.md's V7 entry.
-// Every action ever recorded, without re-reading and re-parsing the whole table on each analytics call:
-// rows below the "hot tail" are kept from the last call and only the newest ACTION_TAIL_REFRESH ids are
-// re-read (a row is touched again for a moment after it is logged: delivered bytes, intent). Rows are
-// append-only, so nothing older can change except through pruneOldResults, which drops this cache.
-const ACTION_TAIL_REFRESH = 200;
+// Every action ever recorded, without re-reading and re-parsing the whole table on each analytics call. Rows are
+// append-only, so the cache is exact with two cheap reads: the rows logged since the last call (id above the newest
+// cached one) and the rows the db reports as updated since (its change feed, takeDirtyActionIds - delivered bytes,
+// intents). Nothing is guessed about "recent" rows. pruneOldResults / pruneOldReadRows drop the cache.
 let actionsMemo = null; // action rows, id ascending, result bodies dropped (analytics never reads them; keeping them would pin the whole history in memory)
 // Only a golden diff's summary is read from a result (the "still dirty" panel); every other body is dropped.
 const slimAction = (a) => ({ ...a, result: a.type === 'idb.diff' && a.result ? { summary: a.result.summary } : null, result_json: null });
 function allActionsIncremental() {
-  const lastId = actionsMemo?.length ? actionsMemo[actionsMemo.length - 1].id : 0;
   if (!actionsMemo) {
     actionsMemo = dbApi.listAllActions().actions.map(slimAction);
+    dbApi.takeDirtyActionIds(); // everything was just read fresh
   } else {
-    const keepBelow = Math.max(0, lastId - ACTION_TAIL_REFRESH);
-    let kept = actionsMemo.length;
-    while (kept > 0 && actionsMemo[kept - 1].id > keepBelow) kept -= 1;
-    actionsMemo = actionsMemo.slice(0, kept).concat(dbApi.listAllActionsFrom(keepBelow + 1).actions.map(slimAction));
+    const lastId = actionsMemo.length ? actionsMemo[actionsMemo.length - 1].id : 0;
+    const dirty = dbApi.takeDirtyActionIds().filter((id) => id <= lastId);
+    if (dirty.length) {
+      const fresh = new Map(dbApi.listAllActionsByIds(dirty).map((row) => [row.id, slimAction(row)]));
+      actionsMemo = actionsMemo.map((row) => fresh.get(row.id) ?? row);
+    }
+    const added = dbApi.listAllActionsFrom(lastId + 1).actions.map(slimAction);
+    if (added.length) actionsMemo = actionsMemo.concat(added);
   }
   return { actions: actionsMemo, skipped: Math.max(0, dbApi.countActions() - actionsMemo.length) };
 }
@@ -3811,6 +3869,12 @@ const routes = [
         try {
           const query = await dispatchCommand('dom.query', { selector }, BRIEFING_TIMEOUT_MS, agentName);
           report.selectorPresent = !!query?.found;
+          try {
+            const facts = frictionFactsFor(dbApi.getCurrentSession()?.id ?? -1, 'dom.click', { selector }, agentName);
+            const verdict = facts?.entry ? friction.evaluateSelectorRisk({ type: 'dom.click', selector, targetKind: 'selector', entry: facts.entry, live: facts.live, state: null, origin: facts.origin }) : null;
+            const alt = verdict?.assessment ? reliableAlternative(facts.entry.recovery, selector) : null;
+            if (alt) report.selectorSuggestion = { selector, alternative: alt.selector, evidence: alt.evidence, warning: verdict.assessment.message };
+          } catch { /* advisory only */ }
         } catch (err) {
           report.selectorPresent = null;
           report.selectorCheckError = err.message;
@@ -4208,224 +4272,12 @@ const routes = [
   // why it's cached.
   { method: 'GET', pattern: /^\/analytics$/, handler: async () => getAnalytics() },
 
-  // ---- "Mark fixed": declare a selector's friction resolved as of now. Analytics then counts
-  // only failures AFTER that instant (the selector's old history stops ranking and stops
-  // warning), and a relapse after the fix is visible as fresh failures. type+selector are
-  // normalized exactly like the pre-action warn (friction.frictionKey), so "dom.clickWait" and
-  // "#row-41" resolve the same entry the warn matched.
-  {
-    method: 'POST',
-    pattern: /^\/friction\/resolve$/,
-    handler: async (req) => {
-      const body = await readJsonBody(req);
-      if (body.type === 'cluster') return resolveFrictionCluster(body, true);
-      const { type, target } = frictionTargetFromBody(body);
-      const resolution = declareFrictionResolved(type, target.value, target.kind, body.note);
-      analyticsCache = null;
-      broadcastUpdate('analytics', null);
-      return resolution;
-    },
-  },
-  { method: 'GET', pattern: /^\/friction\/resolutions$/, handler: async () => dbApi.listFrictionResolutions() },
-  {
-    method: 'POST',
-    pattern: /^\/friction\/unresolve$/,
-    handler: async (req) => {
-      const body = await readJsonBody(req);
-      if (body.type === 'cluster') return resolveFrictionCluster(body, false);
-      const { key } = frictionTargetFromBody(body);
-      const result = dbApi.clearFrictionResolved(key);
-      analyticsCache = null;
-      broadcastUpdate('analytics', null);
-      return result;
-    },
-  },
-
-  // ---- "Why did / didn't it warn": everything friction awareness knows about one target, built by
-  // the same frictionFactsFor() the pre-action header and the failure's error body use, plus the
-  // decision's reason and the thresholds it was judged against. Side-effect free (it never
-  // consumes the once-per-session warning). ?type=&selector= (or &store=), optional &session=&agent=.
-  {
-    method: 'GET',
-    pattern: /^\/friction\/explain$/,
-    handler: async (req) => {
-      const q = new URL(req.url, `http://${HOST}`).searchParams;
-      const { type, target } = frictionTargetFromBody({ type: q.get('type'), selector: q.get('selector') ?? undefined, store: q.get('store') ?? undefined }, { allowScopes: false });
-      const params = target.kind === 'page' ? {} : target.kind === 'store' ? { store: target.value } : { selector: target.value };
-      const sessionId = Number(q.get('session')) || dbApi.getCurrentSession()?.id || -1;
-      const facts = frictionFactsFor(sessionId, type, params, q.get('agent') || DEFAULT_AGENT, target.kind === 'page' ? target.value : undefined);
-      const e = facts.entry;
-      return {
-        type: friction.typeFamily(type),
-        target: facts.target,
-        key: facts.key,
-        sessionId: sessionId === -1 ? null : sessionId,
-        origin: facts.origin,
-        wouldWarn: Boolean(facts.evaluation.assessment),
-        decision: facts.evaluation.reason,
-        ...(facts.evaluation.assessment ? { message: facts.evaluation.assessment.message, level: facts.evaluation.assessment.level } : {}),
-        numbers: facts.evaluation.facts,
-        history: e ? {
-          failCount: e.failCount, sessionCount: e.sessionCount, retries: e.retries, wastedMs: e.wastedMs, score: e.score,
-          lastFailedAt: e.lastFailedAt, lastSuccessAt: e.lastSuccessAt, errorClasses: e.errorClasses, lastError: e.lastError,
-          perOrigin: e.origins, recoveries: e.recoveries, knownIssues: e.knownIssues,
-        } : null,
-        thisSession: facts.live ? { ...facts.live } : null,
-        resolution: facts.resolution ? { resolvedAt: facts.resolution.resolved_at, note: facts.resolution.note } : null,
-        failureContext: facts.context,
-        cluster: (() => { try { return getAnalytics().frictionClusters.find((c) => c.targets.some((t) => t.key === facts.key)) ?? null; } catch { return null; } })(),
-        config: friction.frictionConfig(),
-      };
-    },
-  },
-  // ---- Retention: sweep orphaned "already said" state and (with days) drop the stored result BODIES of
-  // old actions. History, rankings and "mark fixed" declarations are kept. Dry run unless confirm:true.
-  {
-    method: 'POST',
-    pattern: /^\/friction\/prune$/,
-    handler: async (req) => {
-      const body = await readJsonBody(req);
-      const confirm = body.confirm === true;
-      const orphanState = confirm ? dbApi.pruneOrphanFrictionState() : null;
-      if (confirm) actionsMemo = null; // result bodies are about to change under the memo
-      let oldResults = null;
-      if (body.days !== undefined && body.days !== null) {
-        try { oldResults = dbApi.pruneOldResults({ days: body.days, dryRun: !confirm }); } catch (err) { throw new HttpError(400, err.message); }
-      }
-      return {
-        dryRun: !confirm,
-        ...(orphanState !== null ? { orphanStateRowsRemoved: orphanState } : {}),
-        ...(oldResults ? { oldResults } : { note: 'pass days (>= 7) to also drop the result bodies of actions older than that' }),
-        ...(confirm ? {} : { hint: 'dry run - repeat with confirm:true to apply' }),
-      };
-    },
-  },
-  // ---- The ranked target list with the same filter / sort / limit everywhere. ?q= filters (target, type,
-  // origin, error class, last error), ?sort= is cost|fails|wasted|tokens|recent|oldest, ?limit= caps.
-  {
-    method: 'GET',
-    pattern: /^\/friction\/targets$/,
-    handler: async (req) => {
-      const q = new URL(req.url, `http://${HOST}`).searchParams;
-      const sort = q.get('sort') || 'cost';
-      if (!friction.TARGET_SORTS[sort]) throw new HttpError(400, `sort must be one of ${Object.keys(friction.TARGET_SORTS).join('|')}`);
-      const all = allFrictionTargets();
-      const targets = friction.viewFrictionTargets(all, { q: q.get('q') ?? '', sort, limit: Number(q.get('limit')) || 0 });
-      return { total: all.length, shown: targets.length, sort, q: q.get('q') ?? '', targets };
-    },
-  },
-
-  // ---- What agents were told: the kept notices (notices.mjs), newest last. ?session=<id>|all (default: the
-  // active session, else all), ?since=<last id seen> makes it a cursor, ?limit=.
-  {
-    method: 'GET',
-    pattern: /^\/friction\/notices$/,
-    handler: async (req) => {
-      const q = new URL(req.url, `http://${HOST}`).searchParams;
-      const wanted = q.get('session');
-      const sessionId = wanted === 'all' ? null : wanted ? Number(wanted) : (dbApi.getCurrentSession()?.id ?? null);
-      const list = dbApi.listNotices({ sessionId, sinceId: Number(q.get('since')) || 0, limit: Number(q.get('limit')) || 200 });
-      return { sessionId, notices: list, next: list.length ? list[list.length - 1].id : (Number(q.get('since')) || 0) };
-    },
-  },
-
-  // ---- Declared fixed, failing again.
-  { method: 'GET', pattern: /^\/friction\/regressions$/, handler: async () => { const list = friction.buildRelapses(dbApi.listFrictionResolutions(), allActionsIncremental().actions); return { count: list.length, relapses: list }; } },
-
-  { method: 'GET', pattern: /^\/friction\/config$/, handler: async () => friction.frictionConfig() },
-
-  // ---- What THIS session has run into so far, from the same live tracker the pre-action warning reads
-  // (so a human watching sees what the agent was told). Targets that never failed are left out.
-  {
-    method: 'GET',
-    pattern: /^\/friction\/session$/,
-    handler: async () => {
-      const session = dbApi.getCurrentSession();
-      if (!session) return { session: null, targets: [] };
-      ensureFrictionSession(session.id);
-      const targets = frictionTracker.keys(session.id)
-        .map((key) => ({ key, e: frictionTracker.get(session.id, key), warned: frictionTracker.warnState(session.id, key) }))
-        .filter(({ e }) => e && e.fails > 0)
-        .map(({ key, e, warned }) => ({
-          key, ...(e.target ?? {}), fails: e.fails, unresolved: e.unresolved, errorClass: e.errorClass, lastError: e.lastError,
-          lastFailedAt: e.lastFailedAt, lastOkAt: e.lastOkAt, wastedMs: e.wastedMs, warned: warned ? { atLive: warned.atLive, count: warned.count } : null,
-        }))
-        .sort((a, b) => b.unresolved - a.unresolved || b.fails - a.fails);
-      return { session: { id: session.id, goal: session.goal }, targets };
-    },
-  },
-
-  // ---- The registry as written, for sharing between checkouts. Import merges by id: an id already present is
-  // reported and left alone, an invalid entry (no id/signature, a signature that does not compile) is refused
-  // with the reason; nothing is written unless confirm:true.
-  { method: 'GET', pattern: /^\/known-issues$/, handler: async () => ({ file: KNOWN_ISSUES_PATH, entries: readKnownIssuesRaw() }) },
-  {
-    method: 'POST',
-    pattern: /^\/known-issues\/import$/,
-    handler: async (req) => {
-      const body = await readJsonBody(req);
-      if (!Array.isArray(body.entries)) throw new HttpError(400, 'entries (an array of { id, signature, description, remediation }) is required - e.g. the output of "known-issues export"');
-      const current = readKnownIssuesRaw();
-      const have = new Set(current.map((e) => e?.id));
-      const add = [];
-      const skipped = [];
-      for (const entry of body.entries) {
-        if (!entry || typeof entry.id !== 'string' || !entry.id || typeof entry.signature !== 'string' || !entry.signature) { skipped.push({ id: entry?.id ?? null, reason: 'needs a string id and a non-empty string signature' }); continue; }
-        if (have.has(entry.id)) { skipped.push({ id: entry.id, reason: 'an entry with this id already exists (left unchanged)' }); continue; }
-        try { compileSignature(entry.signature); } catch (err) { skipped.push({ id: entry.id, reason: `signature does not compile: ${err.message}` }); continue; }
-        if (entry.remediation === undefined || entry.remediation === null || entry.remediation === '') { skipped.push({ id: entry.id, reason: 'remediation is required - an entry without a fix is not worth sharing' }); continue; }
-        have.add(entry.id);
-        add.push({ id: entry.id, signature: entry.signature, description: entry.description ?? null, remediation: entry.remediation });
-      }
-      if (body.confirm !== true) return { written: false, wouldAdd: add, skipped, file: KNOWN_ISSUES_PATH, note: 'dry run - repeat with confirm:true (CLI: --confirm) to append them' };
-      if (add.length) {
-        fs.writeFileSync(KNOWN_ISSUES_PATH, `${JSON.stringify([...current, ...add], null, 2)}\n`);
-        analyticsCache = null;
-        broadcastUpdate('analytics', null);
-      }
-      return { written: add.length > 0, added: add, skipped, file: KNOWN_ISSUES_PATH };
-    },
-  },
-
-  // ---- Promote a known-issue candidate (analytics.knownIssueCandidates) into known-issues.json.
-  // Without confirm:true this only returns the entry it WOULD write (a review step); with it, the
-  // entry is appended - never overwriting an existing id, and never with a "TODO" remediation, so a
-  // draft cannot be promoted without a human supplying the one thing a draft cannot know.
-  {
-    method: 'POST',
-    pattern: /^\/known-issues\/promote$/,
-    handler: async (req) => {
-      const body = await readJsonBody(req);
-      if (typeof body.id !== 'string' || !body.id) throw new HttpError(400, 'id is required: a candidate id from analytics.knownIssueCandidates[].draft.id');
-      const candidate = computeAnalytics().knownIssueCandidates.find((c) => c.draft.id === body.id);
-      if (!candidate) throw new HttpError(404, `no known-issue candidate "${body.id}" (candidates are listed by "analytics")`);
-      const text = (v, fallback) => (typeof v === 'string' && v.trim() ? v.trim() : fallback);
-      const entry = {
-        id: text(body.newId, candidate.draft.id),
-        signature: text(body.signature, candidate.draft.signature),
-        description: text(body.description, candidate.draft.description),
-        remediation: text(body.remediation, ''),
-      };
-      if (!entry.remediation) {
-        const suggested = candidate.suggestedRemediation;
-        if (suggested && body.confirm !== true) {
-          return { written: false, needsRemediation: true, wouldWrite: { ...entry, remediation: suggested }, suggestedFrom: candidate.suggestedFrom, file: KNOWN_ISSUES_PATH, note: 'dry run - the remediation is a SUGGESTION drawn from this project\'s own history; confirm it by repeating with --remediation "<text>" --confirm' };
-        }
-        throw new HttpError(400, `remediation is required - a candidate does not know the fix. Review it, then promote with e.g. --remediation "..." (draft: ${JSON.stringify(entry)}${suggested ? `, suggested: ${JSON.stringify(suggested)}` : ''})`);
-      }
-      if (/^TODO/i.test(entry.description)) throw new HttpError(400, `description still starts with TODO - say what the root cause is (--description "...")`);
-      let existing = [];
-      try { existing = loadKnownIssues()?.issues ?? []; } catch (err) { throw new HttpError(409, `known-issues.json is unreadable, refusing to touch it: ${err.message}`); }
-      if (existing.some((i) => i.id === entry.id)) throw new HttpError(409, `known-issues.json already has an entry with id "${entry.id}"`);
-      if (body.confirm !== true) return { written: false, wouldWrite: entry, file: KNOWN_ISSUES_PATH, note: 'dry run - repeat with confirm:true (CLI: --confirm) to append it' };
-      let current = [];
-      try { current = JSON.parse(fs.readFileSync(KNOWN_ISSUES_PATH, 'utf8')); } catch (err) { if (err.code !== 'ENOENT') throw new HttpError(409, `known-issues.json could not be read: ${err.message}`); }
-      fs.writeFileSync(KNOWN_ISSUES_PATH, `${JSON.stringify([...current, entry], null, 2)}\n`);
-      analyticsCache = null;
-      broadcastUpdate('analytics', null);
-      return { written: true, entry, file: KNOWN_ISSUES_PATH };
-    },
-  },
+  // Friction routes live in routes-friction.mjs (mark fixed, explain, targets, notices, regressions, prune, known-issues).
+  ...frictionRoutes({
+    allActionsIncremental, allFrictionTargets, broadcastUpdate, COMMAND_TYPES, commitsBetween, compileSignature, computeAnalytics, dbApi, declareFrictionResolved, DEFAULT_AGENT, ensureFrictionSession, frictionFactsFor, frictionTargetFromBody, frictionTracker, getAnalytics, HOST, HttpError, KNOWN_ISSUES_PATH, loadKnownIssues, readJsonBody, readKnownIssuesRaw, readSharedKnownIssues, resolveFrictionCluster,
+    dropAnalyticsCache: () => { analyticsCache = null; },
+    dropActionsMemo: () => { actionsMemo = null; },
+  }),
 
   // ---- Host health (dashboard panels): scratch dirs/MB, owners, orphan browsers, free disk, trend, per-session
   // cost, footprint log, last test run. Cleanup/kill actions re-derive what is safe to touch server-side

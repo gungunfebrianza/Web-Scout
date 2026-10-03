@@ -731,7 +731,7 @@
   <div id="frictionDetail"></div>
   <details id="frictionTools"><summary>Tools: thresholds, retention, known issues, replay</summary>
     <div class="friction-tool"><h3>Thresholds in effect</h3><button class="friction-act" data-friction-act="show-config">show</button><pre id="frictionConfigOut" class="friction-pre" hidden></pre></div>
-    <div class="friction-tool"><h3>Retention</h3><label>drop stored result bodies older than <input id="pruneDays" type="number" min="7" value="30"> days</label>
+    <div class="friction-tool"><h3>Retention</h3><label>drop stored result bodies older than <input id="pruneDays" type="number" min="7" value="30"> days</label> <label>notices older than <input id="pruneNoticeDays" type="number" min="7" placeholder="off"> days</label> <label>old successful reads (nothing depends on) older than <input id="pruneReadDays" type="number" min="90" placeholder="off"> days</label>
       <button class="friction-act" data-friction-act="prune-preview">preview</button> <button class="friction-act" data-friction-act="prune-apply">apply</button><pre id="pruneOut" class="friction-pre" hidden></pre></div>
     <div class="friction-tool"><h3>Known issues</h3><button class="friction-act" data-friction-act="issues-export">export</button>
       <input id="issuesFile" type="file" accept=".json,application/json"> <button class="friction-act" data-friction-act="issues-import-preview">preview import</button> <button class="friction-act" data-friction-act="issues-import-apply">import</button><pre id="issuesOut" class="friction-pre" hidden></pre></div>
@@ -1990,11 +1990,12 @@ function appendActionRow(a, body, scrollTops) {
   const gap = actionGapMs.get(a.id);
   const tok = rowTokens(a);
   const tokHtml = tok.n >= 20 ? `<span class="tok-badge${tok.n >= 1000 ? ' tok-heavy' : ''}" title="estimated tokens an agent reads for this result (chars/4)${tok.lower ? ' - lower bound, heavy payload redacted from this list' : ''}">~${tok.n}${tok.lower ? '+' : ''} tok</span>` : '';
-  const errHtml = a.ok ? '' : `<div class="act-err" title="${esc(a.error)}">${esc(clip(a.error, 60))}</div>`;
+  const errHtml = a.ok ? '' : `<div class="act-err" title="${esc(a.error)}">${esc(clip(a.error, 60))} <button type="button" class="friction-act act-replay" title="plan a replay of this session up to its first failure (a dry run; nothing is touched until you confirm)">replay</button></div>`;
   const durMs = a.duration_ms;
   const durPct = durMs != null && actionDurP95 > 0 ? Math.min(100, Math.round((durMs / actionDurP95) * 100)) : 0;
   const durSlow = durMs != null && actionDurP95 > 0 && durMs >= actionDurP95 && durMs >= 500;
   tr.innerHTML = `<td class="${actionTypeAccentClass(a.type)}" title="${esc(fmtAgo(a.started_at))}"><span class="chevron">&#9656;</span>${fmtTime(a.started_at)}${gap >= 1000 ? `<span class="act-gap" title="idle since the previous action finished">+${esc(fmtDur(gap))}</span>` : ''}</td><td>${agentChipHtml(a.agent_name)}</td><td>${esc(a.type)}</td>${showWhy ? `<td class="col-why" data-why-for="${a.id}">${whyCellHtml(a)}</td>` : ''}<td class="act-result"><span class="badge ${a.ok ? 'badge-ok' : 'badge-fail'}">${a.ok ? 'ok' : 'fail'}</span>${target ? `<span class="act-target" title="${esc(target)}">${esc(clip(target, 120))}</span>` : ''}${tokHtml}${errHtml}</td><td><div class="dur-cell${durSlow ? ' dur-slow' : ''}" ${durMs != null ? `title="${durSlow ? 'at or above this session\'s p95' : 'bar = share of this session\'s p95'} (${esc(fmtDur(actionDurP95))})"` : ''}><span class="dur-fill" style="width:${durPct}%"></span><span class="dur-num">${durMs ?? ''}</span></div></td>`;
+  tr.querySelector('.act-replay')?.addEventListener('click', (e) => { e.stopPropagation(); openReplayFor(currentSessionId); });
   tr.addEventListener('click', async () => {
     kbdFocusKey = tr.dataset.kbd;
     const existing = tr.nextElementSibling;
@@ -4223,7 +4224,8 @@ async function renderFrictionRegressions() {
   try {
     const out = await api('GET', '/friction/regressions');
     if (!out.count) { box.innerHTML = ''; return; }
-    const items = out.relapses.slice(0, 6).map((r) => `<li>${esc(r.summary)} <button class="friction-act" data-friction-act="explain" data-type="${esc(r.type)}" data-target="${esc(r.selector)}" data-kind="${/^idb./.test(r.type) ? 'store' : 'selector'}">why</button></li>`).join('');
+    const between = (r) => (r.changedBetween === null || r.changedBetween === undefined ? '' : r.changedBetween.length ? ` <small>- committed since the fix: ${r.changedBetween.slice(0, 3).map((c) => `${esc(c.hash)} ${esc(c.subject)}`).join('; ')}</small>` : ' <small>- nothing was committed between the fix and the relapse (look at data or environment)</small>');
+    const items = out.relapses.slice(0, 6).map((r) => `<li>${esc(r.summary)}${between(r)} <button class="friction-act" data-friction-act="explain" data-type="${esc(r.type)}" data-target="${esc(r.selector)}" data-kind="${/^idb./.test(r.type) ? 'store' : 'selector'}">why</button></li>`).join('');
     box.innerHTML = `<h3>Declared fixed, failing again (${out.count})</h3><ul>${items}</ul>`;
   } catch { /* best-effort */ }
 }
@@ -4240,8 +4242,8 @@ async function frictionToolAction(btn) {
   } else if (act === 'show-config') {
     showPre('frictionConfigOut', JSON.stringify(await api('GET', '/friction/config'), null, 2));
   } else if (act === 'prune-preview' || act === 'prune-apply') {
-    const days = Number(el('pruneDays').value) || undefined;
-    showPre('pruneOut', JSON.stringify(await api('POST', '/friction/prune', { days, confirm: act === 'prune-apply' }), null, 2));
+    const num = (id) => Number(el(id).value) || undefined;
+    showPre('pruneOut', JSON.stringify(await api('POST', '/friction/prune', { days: num('pruneDays'), noticeDays: num('pruneNoticeDays'), readDays: num('pruneReadDays'), confirm: act === 'prune-apply' }), null, 2));
   } else if (act === 'issues-export') {
     const reg = await api('GET', '/known-issues');
     const a = document.createElement('a');
@@ -4263,6 +4265,16 @@ async function frictionToolAction(btn) {
     showPre('replayOut', `${out.verdict ? out.verdict + '\n' : ''}${JSON.stringify(out, null, 2)}`);
   }
 }
+// A failed row in the action log hands its session to the Tools drawer's replay form and plans it (a dry run).
+async function openReplayFor(sessionId) {
+  const tools = el('frictionTools');
+  if (!tools || !sessionId) return;
+  tools.open = true;
+  el('replayId').value = sessionId;
+  tools.scrollIntoView?.({ block: 'nearest' });
+  try { await frictionToolAction({ dataset: { frictionAct: 'replay-plan' } }); } catch (err) { window.alert('friction: ' + err.message); }
+}
+
 for (const id of ['frictionTools', 'frictionNotices', 'frictionRegressions']) {
   el(id)?.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-friction-act]');

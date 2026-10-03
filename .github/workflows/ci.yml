@@ -1,0 +1,24 @@
+# Runs the whole suite on every push and pull request, then checks that nothing declared fixed is failing again.
+# Not verified on a hosted runner from the author's machine (the suite is developed on Windows): if this job is
+# red for a reason that is not a test, the runner image is the first suspect. Browser tests skip themselves
+# when no Chromium/Edge binary is found.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  suite:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Full suite (leaks fail the run)
+        run: node run-tests.mjs
+      - name: Flaky sweep (two extra runs, informational)
+        if: github.event_name == 'push'
+        continue-on-error: true
+        run: node flaky-sweep.mjs 2

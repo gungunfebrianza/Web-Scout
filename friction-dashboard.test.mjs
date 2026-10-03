@@ -202,3 +202,53 @@ test('friction panels: what the agent was told (with its next step), declared-fi
     await relay.stop();
   }
 });
+
+test('a failed action row plans a replay of its session, known issues import through the file chooser, and retention has all three knobs', { skip: browserSkip(), timeout: 120000 }, async () => {
+  const dir = tmpDir('webscout-friction-dash7-');
+  const registry = path.join(dir, 'known-issues.json');
+  const relay = await startTestRelay({ env: { WEBSCOUT_ANALYTICS_CACHE_MS: '0', WEBSCOUT_KNOWN_ISSUES: registry } });
+  let page;
+  let tab;
+  try {
+    const api = async (method, route, body) => (await (await fetch(`http://127.0.0.1:${relay.port}${route}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined })).json()).result;
+    tab = await connectFakeAgent(relay.port, {
+      'dom.click': (p) => { if (p.selector === '#broken') throw new Error('Element not found: #broken'); return { clicked: true, mutated: false }; },
+    }, { origin: 'http://localhost:4100' });
+    const s = await api('POST', '/sessions', { goal: 'replay from the log', context: 'friction-dashboard.test.mjs', briefing: false });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#fine' } });
+    await api('POST', '/command', { type: 'dom.click', params: { selector: '#broken' } });
+
+    page = await launchBrowser(findBrowser());
+    await page.navigate(`http://127.0.0.1:${relay.port}/dashboard`);
+
+    // the replay button on the failed row
+    assert.ok(await waitFor(page, `document.querySelector('#actionsTable .act-replay') ? true : false`), 'the failed row has a replay button');
+    await page.evaluate(`document.querySelector('#actionsTable .act-replay').click()`);
+    assert.ok(await waitFor(page, `(() => { const o = document.getElementById('replayOut'); return !o.hidden && /"isTheFailure": true/.test(o.textContent); })()`), 'the plan is shown');
+    assert.equal(await page.evaluate(`document.getElementById('replayId').value`), String(s.id));
+    assert.equal(await page.evaluate(`document.getElementById('frictionTools').open`), true, 'the drawer opened for it');
+
+    // import through the file input (a File assigned the way a chooser would)
+    await page.evaluate(`(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([JSON.stringify([{ id: 'dash-import', signature: 'boom', description: 'from the dashboard', remediation: 'restart it' }])], 'shared.json', { type: 'application/json' }));
+      document.getElementById('issuesFile').files = dt.files;
+      document.querySelector('[data-friction-act=issues-import-preview]').click();
+    })()`);
+    assert.ok(await waitFor(page, `/"wouldAdd"/.test(document.getElementById('issuesOut').textContent)`), 'a preview of what would be added');
+    assert.equal(fs.existsSync(registry), false, 'a preview writes nothing');
+    await page.evaluate(`document.querySelector('[data-friction-act=issues-import-apply]').click()`);
+    for (let n = 0; n < 40 && !fs.existsSync(registry); n += 1) await sleep(250);
+    assert.deepEqual(JSON.parse(fs.readFileSync(registry, 'utf8')).map((e) => e.id), ['dash-import']);
+
+    // retention: all three knobs reach the request
+    await page.evaluate(`document.getElementById('pruneDays').value = '30'; document.getElementById('pruneNoticeDays').value = '30'; document.getElementById('pruneReadDays').value = '120'; document.querySelector('[data-friction-act=prune-preview]').click()`);
+    assert.ok(await waitFor(page, `(() => { const t = document.getElementById('pruneOut').textContent; return /"oldResults"/.test(t) && /"oldNotices"/.test(t) && /"oldReads"/.test(t); })()`), 'result bodies, notices and reads are all previewed');
+    assert.deepEqual(page.errors, [], `page errors: ${page.errors.join(' | ')}`);
+  } finally {
+    tab?.close();
+    await page?.close();
+    await relay.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

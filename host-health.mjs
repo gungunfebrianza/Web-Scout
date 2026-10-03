@@ -197,6 +197,9 @@ export async function computeHostHealth() {
 
 export async function getHostHealth({ force = false } = {}) {
   if (!force && cache && Date.now() - cache.at < CACHE_MS) return cache.data;
+  // A forced read means "look NOW": a scan already in flight may have listed the directory before the caller's
+  // change, so let it finish and scan again instead of handing back its stale picture.
+  if (force && inflight) { try { await inflight; } catch { /* the scan below reports its own failure */ } }
   if (!inflight) {
     inflight = computeHostHealth().then((data) => { cache = { at: Date.now(), data }; recordSample(data); return data; }).finally(() => { inflight = null; });
   }
