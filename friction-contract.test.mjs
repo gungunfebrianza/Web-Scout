@@ -71,7 +71,7 @@ test('the dashboard panel and its counters read selectorFriction, the list the w
 });
 
 test('nothing friction-related is frozen per session any more, and every resolve scope shares one writer', () => {
-  const relay = source('relay.mjs');
+  const relay = `${source('relay.mjs')} ${source('routes-sessions.mjs')}`;
   assert.doesNotMatch(relay, /sessionFrictionSnapshot/, 'the macro nudge reads macroCandidates() on demand');
   assert.equal((relay.match(/dbApi\.markFrictionResolved\(/g) ?? []).length, 2, 'declareFrictionResolved is the only caller (its scope branch + its target branch)');
   assert.match(relay + source('routes-friction.mjs'), /declareFrictionResolved\(type, target\.value, target\.kind, body\.note\)/, '/friction/resolve goes through it');

@@ -172,7 +172,7 @@ test('a warning is a stored notice: header, GET /friction/notices with a cursor,
     assert.equal(risk.kind, 'selector-risk');
     assert.equal(risk.key, 'dom.click::.a1x');
     assert.equal(risk.message, third.res.headers.get('x-webscout-selector-risk'), 'the legacy header says the same thing');
-    assert.deepEqual(risk.next.map((c) => c.label), ['why'], 'a target still failing is not offered "mark fixed"');
+    assert.deepEqual(risk.next.map((c) => c.label), ['why', 'snooze 1d'], 'a target still failing is not offered "mark fixed"');
     assert.equal(risk.next[0].http, 'GET /friction/explain?type=dom.click&selector=.a1x');
 
     const stored = await api('GET', '/friction/notices');
@@ -207,7 +207,7 @@ test('one notice, three dialects: the same warning reaches HTTP, the CLI and MCP
     const viaCli = await cli('dom', 'click', '.b1x');
     assert.notEqual(viaCli.status, 0, 'the click itself still fails');
     assert.match(viaCli.stderr, /selector ".b1x" \(dom\.click\) has failed 2x already this session/);
-    assert.match(viaCli.stderr, /\[why: friction explain dom\.click ".b1x"\]/, 'the CLI line is a command you can paste');
+    assert.match(viaCli.stderr, /\[why: friction explain dom\.click ".b1x"; snooze 1d: friction snooze dom\.click ".b1x" --for 1d\]/, 'the CLI line is a command you can paste');
 
     await withMcp(relay, async (callTool) => {
       const viaMcp = await callTool('webscout_dom', { action: 'click', params: { selector: '.c1x' } });

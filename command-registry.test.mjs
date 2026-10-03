@@ -54,7 +54,7 @@ test('relay.mjs derives its sets from the registry instead of redeclaring them',
 });
 
 test('every cleanup kind in the registry has a branch in relay.mjs cleanup tracking', () => {
-  const relay = fs.readFileSync(path.join(__dirname, 'relay.mjs'), 'utf8');
+  const relay = ['relay.mjs', 'routes-sessions.mjs'].map((f) => fs.readFileSync(path.join(__dirname, f), 'utf8')).join(' ');
   for (const kind of new Set(Object.values(COMMAND_TYPES).map((m) => m.cleanup).filter(Boolean))) {
     assert.match(relay, new RegExp(`kind === '${kind}'`), `cleanup kind '${kind}' has no branch in relay.mjs`);
   }

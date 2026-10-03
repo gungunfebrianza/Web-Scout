@@ -186,8 +186,8 @@ test('friction next lists a notice\'s steps, runs a read at once and holds a wri
     await run('dom.click', { selector: '.n1x' }); // warned from history
     const listed = await api('GET', '/friction/next');
     assert.equal(listed.notice.kind, 'selector-risk');
-    assert.deepEqual(listed.steps.map((s) => s.label), ['why', 'mark fixed']);
-    assert.deepEqual(listed.steps.map((s) => s.mutating), [false, true]);
+    assert.deepEqual(listed.steps.map((s) => s.label), ['why', 'mark fixed', 'snooze 1d']);
+    assert.deepEqual(listed.steps.map((s) => s.mutating), [false, true, true]);
 
     const why = await api('POST', '/friction/next', { step: 1 });
     assert.equal(why.ran, true, 'a read runs without asking');
@@ -226,7 +226,7 @@ test('friction trend: one target over sessions, the project-wide movers, explain
 
     const why = await api('GET', `/friction/explain?type=dom.click&selector=${encodeURIComponent('#t1x')}`);
     assert.equal(why.trend.direction, 'improving');
-    assert.deepEqual(why.next.map((c) => c.label), ['mark fixed', 'trend'], 'explain offers its own next steps');
+    assert.deepEqual(why.next.map((c) => c.label), ['mark fixed', 'trend', 'snooze 1d'], 'explain offers its own next steps');
     assert.equal(why.next[1].http, `GET /friction/trend?type=dom.click&selector=${encodeURIComponent('#t1x')}`);
 
     await withMcp(relay, async ({ callTool }) => {
