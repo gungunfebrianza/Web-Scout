@@ -99,3 +99,60 @@ test('the friction reads return the same answer over HTTP, the CLI and MCP', asy
     });
   } finally { await tab.close(); await relay.stop(); }
 });
+
+// Every spec row that declares `read: '<route>'` is run the same way: HTTP, the real CLI and the real MCP server must
+// agree. Friction and known-issue reads that take no argument must either declare one or be listed here with a reason,
+// so a new read cannot ship without being compared.
+// Clocks differ between three calls made a few hundred ms apart; the answer is what is compared.
+const VOLATILE = /^(msSince.*|uptimeMs|exportedAt|today|ageMs)$/;
+const steady = (v) => JSON.parse(JSON.stringify(v, (k, x) => (VOLATILE.test(k) ? undefined : x)));
+
+const NOT_A_PLAIN_READ = {
+  'friction watch': 'a stream, not a reply',
+  'friction prune': 'a write (dry run unless confirm)',
+  'friction explain': 'needs a target; covered by the friction reads test',
+  'friction resolve': 'a write', 'friction unresolve': 'a write', 'friction snooze': 'a write', 'friction unsnooze': 'a write', 'friction import': 'a write',
+  'known-issues export': 'prints the registry through a different MCP sub and a --out file',
+  'known-issues import': 'a write', 'known-issues promote': 'a write', 'known-issues renew': 'a write', 'known-issues retire': 'a write',
+};
+
+test('every spec row that declares a plain read returns the same answer over HTTP, the CLI and MCP', async () => {
+  const rows = CLI_SPEC.filter((r) => r.read);
+  const undeclared = CLI_SPEC.filter((r) => /^(friction|known-issues) /.test(r.cmd) && r.pos[1] === 0 && !r.read && !(r.cmd in NOT_A_PLAIN_READ)).map((r) => r.cmd);
+  assert.deepEqual(undeclared, [], 'declare read: "<route>" on these rows (or list them in NOT_A_PLAIN_READ with the reason)');
+  assert.ok(rows.length >= 15, `only ${rows.length} rows declare a read`);
+
+  const relay = await startTestRelay({ env: { WEBSCOUT_ANALYTICS_CACHE_MS: '0', WEBSCOUT_NO_AUTOSTART: '1' } });
+  const tab = await connectFakeAgent(relay.port, { 'dom.click': (p) => { if (p.selector === '.rt2x') throw new Error('Element not found: .rt2x'); return { clicked: true, mutated: false }; } }, { origin: 'http://localhost:4100' });
+  try {
+    const http = async (method, route, body) => {
+      const json = await (await fetch(`http://127.0.0.1:${relay.port}${route}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined })).json();
+      if (!json.ok) throw new Error(json.error);
+      return json.result;
+    };
+    const one = await http('POST', '/sessions', { goal: 'roundtrip reads', context: 'surface-roundtrip.test.mjs', briefing: false });
+    for (let n = 0; n < 3; n += 1) await http('POST', '/command', { type: 'dom.click', params: { selector: '.rt2x' } }).catch(() => {});
+    await http('POST', '/command', { type: 'dom.click', params: { selector: '#fine' } });
+    await http('POST', '/macros', { name: 'rt2', sessionId: one.id });
+    await http('POST', '/friction/snooze', { type: 'dom.click', selector: '.rt2x', for: '1d' });
+    await http('POST', `/sessions/${one.id}/end`);
+    const viaCli = (args) => spawnSync(process.execPath, [path.join(dir, 'cli.mjs'), ...args], { encoding: 'utf8', env: { ...process.env, ...relay.env, WEBSCOUT_NO_AUTOSTART: '1' }, timeout: 30000 });
+    await withMcp(relay, async ({ tool }) => {
+      const checked = [];
+      for (const row of rows) {
+        let direct;
+        try { direct = await http('GET', row.read); } catch { continue; } // e.g. "next" before any notice: an error is the same error everywhere
+        const words = row.cmd.split(' ');
+        const r = viaCli(words);
+        // "friction check" and "regressions" are allowed to exit 1 when the answer says so; the answer is what is compared
+        assert.ok(r.status === 0 || (r.status === 1 && /^friction (check|regressions)$/.test(row.cmd)), `${row.cmd}: ${r.stderr}`);
+        assert.deepEqual(steady(JSON.parse(r.stdout)), steady(direct), `${row.cmd}: CLI equals HTTP`);
+        const [toolName, action] = row.mcp.split('.');
+        const params = action === 'friction' ? { sub: words[words.length - 1] } : {};
+        assert.deepEqual(steady(await tool(toolName, { action, params })), steady(direct), `${row.cmd}: MCP equals HTTP`);
+        checked.push(row.cmd);
+      }
+      assert.ok(checked.length >= 12, `only ${checked.length} reads were comparable: ${checked.join(', ')}`);
+    });
+  } finally { await tab.close(); await relay.stop(); }
+});

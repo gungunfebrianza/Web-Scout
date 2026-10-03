@@ -230,3 +230,59 @@ test('export / import carries fixed and snoozed state: a dry run first, existing
     assert.equal((await api('GET', '/friction/snoozes')).count, 1);
   });
 });
+
+// ---------- the ends of the loop ----------
+
+test('session end hands back next steps; session start mentions known issues past their review date', async () => {
+  const d = tmpDir('webscout-round9-ends-');
+  const local = path.join(d, 'local.json');
+  fs.writeFileSync(local, JSON.stringify([{ id: 'late', signature: 'zzz', remediation: 'x', reviewBy: '2020-01-01' }]));
+  await withRelay(async ({ api, start, run, cli }) => {
+    const s = await api('POST', '/sessions', { goal: 'round9 ends', context: 'friction-round9.test.mjs', briefing: false });
+    assert.equal(s.reviewNotice.kind, 'review-due');
+    assert.match(s.reviewNotice.message, /late/);
+    assert.equal(s.reviewNotice.next[0].cli, 'known-issues review');
+    await run('dom.click', { selector: '.ok9' });
+    const ended = await api('POST', `/sessions/${s.id}/end`);
+    assert.deepEqual(ended.next.map((c) => c.label), ['read the report', 'run the gate']);
+    assert.equal(ended.next[0].http, `GET /sessions/${s.id}/report`);
+
+    // the CLI prints the same steps
+    const second = await start('round9 ends cli');
+    const viaCli = cli('session', 'end', String(second.id));
+    assert.match(viaCli.stderr, /Next: read the report: session report \d+; run the gate: friction check/);
+  }, { envOverride: { WEBSCOUT_KNOWN_ISSUES: local } });
+});
+
+test('a macro step that fails says why, offers the resume, and the steps are runnable', async () => {
+  let broken = false;
+  await withRelay(async ({ api, start, run }) => {
+    const rec = await start('round9 heal flow');
+    await run('dom.click', { selector: '.h9a' });
+    await run('dom.click', { selector: '.h9b' });
+    await api('POST', `/sessions/${rec.id}/end`);
+    const macro = await api('POST', '/macros', { name: 'heal-flow', sessionId: rec.id });
+    await start('round9 heal flow');
+    broken = true;
+    const out = await api('POST', `/macros/${macro.id}/run`, { confirm: true });
+    assert.equal(out.heal.step, 2);
+    assert.equal(out.heal.errorClass, 'not-found');
+    assert.deepEqual(out.heal.next.map((c) => c.label), ['why', 'resume from step 2']);
+    assert.equal(out.heal.next[1].body.fromStep, 1);
+    assert.equal(out.results.length, 2);
+    // a resume is a step the relay can run (POST, so it needs confirm; the dry-run rule applies like any write)
+    broken = false;
+    const resumed = await api('POST', `/macros/${macro.id}/run`, out.heal.next[1].body);
+    assert.equal(resumed.heal, undefined);
+    assert.equal(resumed.ranSteps, 1);
+  }, { handlers: { 'dom.click': (p) => { if (broken && p.selector === '.h9b') throw new Error('Element not found: .h9b'); return { clicked: true, mutated: false }; } } });
+});
+
+test('macroSwapCommand rewrites one step and nothing else', async () => {
+  const { macroSwapCommand } = await import('./notices.mjs');
+  const steps = [{ type: 'dom.click', params: { selector: '#a' } }, { type: 'dom.click', params: { selector: '#b', x: 1 } }];
+  const swap = macroSwapCommand(7, steps, 1, '#b', '#c');
+  assert.equal(swap.http, 'PUT /macros/7/steps');
+  assert.deepEqual(swap.body.steps, [{ type: 'dom.click', params: { selector: '#a' } }, { type: 'dom.click', params: { selector: '#c', x: 1 } }]);
+  assert.deepEqual(steps[1].params, { selector: '#b', x: 1 }, 'the original is untouched');
+});

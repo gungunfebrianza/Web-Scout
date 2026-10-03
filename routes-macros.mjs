@@ -1,6 +1,7 @@
 // The macro (record/replay) family of HTTP routes, split out of relay.mjs. Everything the handlers need arrives in `d`.
 // surfaces.test.mjs reads this file too.
 import * as friction from './friction.mjs';
+import * as notices from './notices.mjs';
 
 export function macroRoutes(d) {
   const { allActionsIncremental, broadcastUpdate, bumpMutationCounter, buildMacroRiskPreview, buildMacroSelectorSuggestions, COMMAND_TIMEOUT_MS, dbApi, DEFAULT_AGENT, DEFAULT_MACRO_TYPES, dispatchCommand, frictionFactsFor, frictionTracker, getAnalytics, goalWordSet, HOST, HttpError, jaccardSimilarity, LONG_POLL_TYPES, lookupReadCache, MACRO_CONTEXT_SIMILARITY_THRESHOLD, matchKnownIssueForError, MUTATING_TYPES, noteCacheHit, noteScopedRead, readCacheKey, readJsonBody, requireActiveSession, SNAPSHOT_TIMEOUT_MS, storeReadCache, withLoggedAction } = d;
@@ -222,6 +223,25 @@ export function macroRoutes(d) {
           if (!continueOnError) break;
         }
       }
+      // A failed step says what to do about it: why it fails, a swap for the selector when history knows what worked
+      // after this failure, and the resume. Each is a notice step, so every surface can run it (a write needs confirm).
+      let heal = null;
+      const failedAt = results.findIndex((r) => !r.ok);
+      if (failedAt !== -1) {
+        const index = fromStep + failedAt;
+        const step = macro.steps[index];
+        const steps = [];
+        try {
+          const target = friction.frictionTarget(step.type, step.params ?? {}, null);
+          if (target?.kind === 'selector') {
+            steps.push(notices.whyCommand(friction.typeFamily(step.type), target.value));
+            const recovery = frictionFactsFor(session.id, step.type, step.params ?? {}, agentName)?.entry?.recovery;
+            if (recovery?.kind === 'alt-selector' && recovery.selector && recovery.selector !== target.value) steps.push(notices.macroSwapCommand(macro.id, macro.steps, index, target.value, recovery.selector));
+          }
+        } catch { /* best-effort - the resume step below still helps */ }
+        steps.push(notices.macroResumeCommand(macro.id, index));
+        heal = { step: index + 1, type: step.type, error: results[failedAt].error, errorClass: friction.classifyError(results[failedAt].error), next: steps };
+      }
       broadcastUpdate('action', session.id);
       broadcastUpdate('macro', null); // this run changed the macro's own record: the nudge must not keep quoting the old one
       const skippedCount = results.filter((r) => r.skipped).length;
@@ -249,6 +269,7 @@ export function macroRoutes(d) {
         totalSteps: macro.steps.length,
         skippedCount,
         results: compactResults,
+        ...(heal ? { heal } : {}),
         ...(frictionWarnings.length ? { frictionWarnings } : {}),
         ...(riskPreview.length ? { riskPreview } : {}),
         ...(priorNeverSucceeding

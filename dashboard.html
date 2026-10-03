@@ -2969,6 +2969,7 @@ async function runMacro(macroId, extraBody) {
   try {
     const result = await api('POST', `/macros/${macroId}/run`, extraBody);
     macroLastRun.set(macroId, Date.now());
+    if (result.heal) showHeal(result.heal);
     return result;
   } catch (err) {
     if (err.message.startsWith('cross-context replay guard:') && confirm(`${err.message}\n\nRun anyway?`)) {
@@ -4313,6 +4314,15 @@ async function renderFrictionRegressions() {
 
 // One renderer for "everything known about a target": the decision, the trend sparkline, the suggested next steps as
 // buttons (each is an HTTP request the relay also hands to the CLI and MCP), and the raw facts underneath.
+// A macro step failed: what to do about it, with the same step buttons a warning gets.
+function showHeal(heal) {
+  const out = el('frictionExplainOut');
+  if (!out) return;
+  const steps = (heal.next || []).map((c) => '<button class="friction-act" data-friction-act="step-run" data-http="' + esc(c.http) + '" data-body="' + esc(JSON.stringify(c.body || {})) + '" title="' + esc(c.cli) + '">' + esc(c.label) + '</button>').join(' ');
+  out.hidden = false;
+  out.innerHTML = '<div><b>macro step ' + esc(heal.step) + ' (' + esc(heal.type) + ') failed</b> [' + esc(heal.errorClass) + '] ' + esc(heal.error) + '</div><div>' + steps + '</div>';
+  out.scrollIntoView?.({ block: 'nearest' });
+}
 function showExplain(why) {
   const out = el('frictionExplainOut');
   if (!out) return;

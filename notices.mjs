@@ -122,6 +122,46 @@ export function reviewCommand() {
   };
 }
 
+export function reportCommand(sessionId) {
+  return {
+    label: 'read the report',
+    cli: `session report ${sessionId}`,
+    mcp: { tool: 'webscout_session', action: 'report', params: { id: sessionId } },
+    http: `GET /sessions/${sessionId}/report`,
+  };
+}
+
+export function checkCommand() {
+  return {
+    label: 'run the gate',
+    cli: 'friction check',
+    mcp: { tool: 'webscout_meta', action: 'friction', params: { sub: 'check' } },
+    http: 'GET /friction/check',
+  };
+}
+
+// Swap one step's selector in a macro: the whole PUT /macros/:id/steps request, so a surface can run it (dry-run rules apply).
+export function macroSwapCommand(id, steps, stepIndex, from, to) {
+  const next = steps.map((s, i) => (i === stepIndex ? { ...s, params: { ...(s.params ?? {}), selector: to } } : s));
+  return {
+    label: `swap in ${quote(to)}`,
+    cli: `macro update ${id} '${JSON.stringify(next)}'`,
+    mcp: { tool: 'webscout_macro', action: 'update', params: { id, steps: next } },
+    http: `PUT /macros/${id}/steps`,
+    body: { steps: next },
+  };
+}
+
+export function macroResumeCommand(id, stepIndex) {
+  return {
+    label: `resume from step ${stepIndex + 1}`,
+    cli: `macro run ${id} --from-step ${stepIndex}`,
+    mcp: { tool: 'webscout_macro', action: 'run', params: { id, fromStep: stepIndex } },
+    http: `POST /macros/${id}/run`,
+    body: { fromStep: stepIndex },
+  };
+}
+
 export function regressionsCommand() {
   return {
     label: 'see them',

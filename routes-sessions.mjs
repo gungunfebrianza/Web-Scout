@@ -1,8 +1,10 @@
 // The /sessions/* family of HTTP routes (create/end/list/get, trace, actions, token-report, snapshots, diffs, viz,
 // intents/import, replay, qa, console, net, verity-runs, report, cleanup, assert), split out of relay.mjs.
 // Everything the handlers need arrives in `d`. surfaces.test.mjs reads this file too.
+import * as notices from './notices.mjs';
+
 export function sessionsRoutes(d) {
-  const { LONG_POLL_TYPES, DEFAULT_MACRO_TYPES, MUTATING_TYPES, COMMAND_TYPES, dropAnalyticsCache, setMacroCandidateCache, BUDGET_STRICT_PCT, BUDGET_TIGHTEN_PCT, COMMAND_TIMEOUT_MS, DEFAULT_AGENT, HOST, HttpError, LEAN_GUARD_TOKENS, SNAPSHOT_TIMEOUT_MS, __dirname, agents, broadcastUpdate, buildBriefing, buildMacroCandidates, buildMacroRiskPreview, buildReportJson, buildReportMarkdown, buildSessionViz, bumpMutationCounter, computeAnalytics, computeDiff, dbApi, declareFrictionResolved, decorateEntriesWithKnownIssue, discoverTranscripts, dispatchCommand, dispatchTracked, dropSessionMemory, emergentFrictionForSession, exportTrace, friction, gatherReportBundle, http, importIntents, log, maybeAutoCalibrate, openDashboardInBrowser, path, pending, readJsonBody, readTranscriptFile, requireActiveSession, resolveSuggestionsForSession, sessionRunningTokens, sessionSavingsTally, summarizeByStore, withCamelAliases, withLoggedAction, writeTrace } = d;
+  const { knownIssuesDue, LONG_POLL_TYPES, DEFAULT_MACRO_TYPES, MUTATING_TYPES, COMMAND_TYPES, dropAnalyticsCache, setMacroCandidateCache, BUDGET_STRICT_PCT, BUDGET_TIGHTEN_PCT, COMMAND_TIMEOUT_MS, DEFAULT_AGENT, HOST, HttpError, LEAN_GUARD_TOKENS, SNAPSHOT_TIMEOUT_MS, __dirname, agents, broadcastUpdate, buildBriefing, buildMacroCandidates, buildMacroRiskPreview, buildReportJson, buildReportMarkdown, buildSessionViz, bumpMutationCounter, computeAnalytics, computeDiff, dbApi, declareFrictionResolved, decorateEntriesWithKnownIssue, discoverTranscripts, dispatchCommand, dispatchTracked, dropSessionMemory, emergentFrictionForSession, exportTrace, friction, gatherReportBundle, http, importIntents, log, maybeAutoCalibrate, openDashboardInBrowser, path, pending, readJsonBody, readTranscriptFile, requireActiveSession, resolveSuggestionsForSession, sessionRunningTokens, sessionSavingsTally, summarizeByStore, withCamelAliases, withLoggedAction, writeTrace } = d;
   return [
   {
     method: 'POST',
@@ -71,7 +73,9 @@ export function sessionsRoutes(d) {
       const leanNote = session.lean
         ? { note: `lean session: reads come back as tables, a repeat of a result you already hold as a one-line pointer (or only what changed), and a body over ~${LEAN_GUARD_TOKENS} tokens as its shape (repeat the call to get it, from cache). --no-guard on a call gives the body as it is. Only rely on "unchanged"/deltas while the earlier result is still in your context.` }
         : undefined;
-      return { ...session, ...(briefing ? { briefing } : {}), ...(budget ? { budget } : {}), ...(leanNote ? { leanProfile: leanNote } : {}), ...(macroAdoptionNote ? { macroAdoptionNote } : {}), ...(frictionNote ? { frictionNote } : {}), ...(frictionBriefing.length ? { frictionBriefing } : {}) };
+      const reviewDue = knownIssuesDue();
+      const reviewNotice = reviewDue.length ? notices.makeNotice({ kind: 'review-due', level: 'warn', message: `${reviewDue.length} known issue(s) are past their review date: ${reviewDue.slice(0, 5).join(', ')}`, next: [notices.reviewCommand()] }) : null;
+      return { ...session, ...(reviewNotice ? { reviewNotice } : {}), ...(briefing ? { briefing } : {}), ...(budget ? { budget } : {}), ...(leanNote ? { leanProfile: leanNote } : {}), ...(macroAdoptionNote ? { macroAdoptionNote } : {}), ...(frictionNote ? { frictionNote } : {}), ...(frictionBriefing.length ? { frictionBriefing } : {}) };
     },
   },
   {
@@ -109,7 +113,14 @@ export function sessionsRoutes(d) {
       const savingsReceipt = { ...(sessionSavingsTally.get(sessionId) ?? { scopedCalls: 0, avoidedBytes: 0, cacheHits: 0, cacheBytes: 0, shapedCalls: 0, shapedBytes: 0 }), deliveredEstTokens };
       sessionSavingsTally.delete(sessionId);
       broadcastUpdate('session', null);
-      return { ...session, replayableActionCount, savingsReceipt, ...(emergentFriction.length ? { emergentFriction } : {}), ...(resolveSuggestions.length ? { resolveSuggestions } : {}), ...(appliedResolutions.length ? { appliedResolutions } : {}) };
+      // The end of a session is when the person has the most to act on: what to save, what to mark fixed, what to read.
+      const next = [
+        ...(replayableActionCount >= 5 ? [notices.macroRecordCommand(sessionId)] : []),
+        ...resolveSuggestions.slice(0, 3).map((x) => notices.fixedCommand(x.type, x.selector)),
+        notices.reportCommand(sessionId),
+        notices.checkCommand(),
+      ];
+      return { ...session, replayableActionCount, savingsReceipt, ...(emergentFriction.length ? { emergentFriction } : {}), ...(resolveSuggestions.length ? { resolveSuggestions } : {}), ...(appliedResolutions.length ? { appliedResolutions } : {}), next };
     },
   },
   { method: 'GET', pattern: /^\/sessions$/, handler: async () => dbApi.listSessions() },

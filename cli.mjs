@@ -18,7 +18,7 @@ import {
 import { validateArgs, findMsysMangledArgs, findSpec } from './cli-spec.mjs';
 import { parseUsage, helpTopic, helpMissing } from './help.mjs';
 import { describeFailureContext } from './friction.mjs';
-import { renderNotice } from './notices.mjs';
+import { renderNotice, renderSteps } from './notices.mjs';
 import { resolveRelayPid, stopRelay, startRelay, restartRelay, RELAY_SOURCE_FILES } from './relay-control.mjs';
 import { sweepStale, formatSweep, scratchStats } from './scratch.mjs';
 
@@ -230,6 +230,7 @@ async function handleSession(sub, rawArgs) {
     if (session.frictionNote) {
       console.error(`NOTE: ${session.frictionNote}`);
     }
+    if (session.reviewNotice) console.error(`NOTE: ${renderNotice(session.reviewNotice, 'cli')}`);
     if (strictCrv && !storesValue) {
       console.error('WARNING: --strict-crv with no --stores auto-snapshots the WHOLE db on every dom.click/fill/eval/idb.put/idb.delete - this WILL time out (60s) against a real-size production IndexedDB. Pass --stores a,b,c to scope it.');
     }
@@ -292,6 +293,7 @@ async function handleSession(sub, rawArgs) {
       for (const line of ended.emergentFriction) console.error(`NOTE: emergent friction - ${line}`);
     }
     for (const suggestion of ended.resolveSuggestions ?? []) console.error(`NOTE: mark fixed? ${suggestion.hint} (or end with --apply-suggestions)`);
+    if (ended.next?.length) console.error(`Next: ${renderSteps({ next: ended.next }, 'cli')}`);
     for (const applied of ended.appliedResolutions ?? []) console.error(`NOTE: marked fixed: ${applied.type} ${JSON.stringify(applied.selector)} (undo: friction unresolve ${applied.type} ${JSON.stringify(applied.selector)})`);
     // One-line cost receipt at the natural end-of-session checkpoint -
     // catches waste the same day it happened instead of only on a later,
@@ -649,6 +651,7 @@ async function handleMacro(sub, rawArgs) {
     if (result.warning) {
       console.error(`WARNING: ${result.warning}`);
     }
+    if (result.heal) console.error(`HEAL: step ${result.heal.step} (${result.heal.type}) failed [${result.heal.errorClass}]. Next: ${renderSteps({ next: result.heal.next }, 'cli')}`);
     printResult(result);
     // Same exit-code gap as session assert: the relay's own route never
     // throws on a failing step (only on the cross-context guard), so a

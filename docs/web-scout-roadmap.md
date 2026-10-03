@@ -3302,6 +3302,39 @@ exercise); `flaky-sweep.mjs` itself was not run end to end after the forensics c
 Tests: `friction-round8.test.mjs`, `surface-roundtrip.test.mjs`, `sweep-forensics.test.mjs`, one more set of assertions in
 `friction-dashboard.test.mjs`.
 
+## V47 - friction awareness, round 9: the loop closed (implemented)
+
+Round 8 made every suggestion runnable. This round gives each loop an end: a warning you can quiet without lying, a gate CI
+can trust, a workaround that has to be looked at again, a baseline a team can share, and a failure that says how to heal.
+
+**Snooze is not "fixed".** `friction snooze <type> <selector> [--for 30m|12h|2d|1w|date]` (`POST /friction/snooze`,
+`friction {sub:"snooze"}`) silences the pre-action warning until the time passes (`friction_snoozes`, max 90 days). Counts, trends
+and the gate still see the target and "mark fixed" is untouched - a snooze never resets history. `unsnooze` and `snoozes` undo and
+list; the selector-risk notice and `friction explain` offer the step; the dashboard lists the live ones.
+
+**The gate.** `friction check [--fail-on worsening,review,relapse]` (`GET /friction/check`) is ok:false while a target fails more
+often than before (snoozed ones excluded), a known issue is past `reviewBy`, or a declared fix relapsed. The CLI exits 1; the dashboard
+shows the same answer as a badge with a step per problem.
+
+**Known issues get looked at again.** `known-issues review` (`GET /known-issues/review`) lists the entries past `reviewBy` (and those due
+within 14 days) with renew (still true) and retire (no longer true); both write `known-issues.json`, so they are dry runs unless
+`--confirm`. `session start` carries a `review-due` notice when any entry is overdue.
+
+**A shareable baseline.** `friction export` / `friction import <file> [--confirm]` carry the decisions - "mark fixed" declarations and live
+snoozes - as one document; import adds what is missing and leaves what is there. Trends and rankings are derived and not exported.
+
+**The ends of the loop.** `session end` returns `next` (record the macro when the session repeated, mark the suggested targets fixed, read
+the report, run the gate) and the CLI prints it. A failed macro step returns `heal`: why it fails, a swap for the selector when history
+knows what worked after this failure (a complete `PUT /macros/:id/steps` request), and the resume from that step.
+
+**Coherence, enforced.** Every spec row that declares `read: '<route>'` in `cli-spec.mjs` is run over HTTP, the real CLI and the real MCP
+server and must return the same answer (`surface-roundtrip.test.mjs`); a friction or known-issue read with no declaration fails the build.
+The README command reference is generated from `cli-spec.mjs` (`node surfaces.mjs --write`, with a stale check). The dashboard shows
+error notices as a toast with their steps, refreshes the check/trend/regression panels on `notice` and `analytics` events, and renders a
+replay diff as a table. The explain panel's step buttons had no click handler; they do now. The `/sessions/*` routes moved out of
+`relay.mjs` into `routes-sessions.mjs`. CI: `run-tests` prints the names of leaked files, the ignore list is per platform
+(`leak-ignore.mjs`), and `node ci-status.mjs [--wait]` reports the hosted run for HEAD.
+
 ## V40r - CRV workflow friction closed after a real P4.10 pass (implemented; numbered separately from V40-V43 above, merged from the distribution line)
 
 A real-browser CRV pass against a P4.10 (Capital Flow "limited authority pilot outcome

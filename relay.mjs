@@ -1754,6 +1754,14 @@ function commitsBetween(since, until) {
   } catch { return null; }
 }
 
+// The ids of known issues whose reviewBy has passed; a session start mentions them so the date does not go unseen.
+function knownIssuesDue() {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    return readKnownIssuesRaw().filter((e) => e && typeof e === 'object' && e.reviewBy && String(e.reviewBy) <= today).map((e) => e.id);
+  } catch { return []; }
+}
+
 // known-issues.json as written (not compiled): what export hands out and import merges into.
 function readKnownIssuesRaw() {
   try {
@@ -2750,7 +2758,7 @@ const routes = [
   { method: 'GET', pattern: /^\/dashboard$/, isHtml: true, handler: async () => fs.readFileSync(path.join(__dirname, 'dashboard.html'), 'utf8') },
 
   // /sessions/* routes live in routes-sessions.mjs.
-  ...sessionsRoutes({ LONG_POLL_TYPES, DEFAULT_MACRO_TYPES, MUTATING_TYPES, COMMAND_TYPES, dropAnalyticsCache: () => { analyticsCache = null; }, setMacroCandidateCache: (v) => { macroCandidateCache = v; }, BUDGET_STRICT_PCT, BUDGET_TIGHTEN_PCT, COMMAND_TIMEOUT_MS, DEFAULT_AGENT, HOST, HttpError, LEAN_GUARD_TOKENS, SNAPSHOT_TIMEOUT_MS, __dirname, agents, broadcastUpdate, buildBriefing, buildMacroCandidates, buildMacroRiskPreview, buildReportJson, buildReportMarkdown, buildSessionViz, bumpMutationCounter, computeAnalytics, computeDiff, dbApi, declareFrictionResolved, decorateEntriesWithKnownIssue, discoverTranscripts, dispatchCommand, dispatchTracked, dropSessionMemory, emergentFrictionForSession, exportTrace, friction, gatherReportBundle, http, importIntents, log, maybeAutoCalibrate, openDashboardInBrowser, path, pending, readJsonBody, readTranscriptFile, requireActiveSession, resolveSuggestionsForSession, sessionRunningTokens, sessionSavingsTally, summarizeByStore, withCamelAliases, withLoggedAction, writeTrace }),
+  ...sessionsRoutes({ knownIssuesDue, LONG_POLL_TYPES, DEFAULT_MACRO_TYPES, MUTATING_TYPES, COMMAND_TYPES, dropAnalyticsCache: () => { analyticsCache = null; }, setMacroCandidateCache: (v) => { macroCandidateCache = v; }, BUDGET_STRICT_PCT, BUDGET_TIGHTEN_PCT, COMMAND_TIMEOUT_MS, DEFAULT_AGENT, HOST, HttpError, LEAN_GUARD_TOKENS, SNAPSHOT_TIMEOUT_MS, __dirname, agents, broadcastUpdate, buildBriefing, buildMacroCandidates, buildMacroRiskPreview, buildReportJson, buildReportMarkdown, buildSessionViz, bumpMutationCounter, computeAnalytics, computeDiff, dbApi, declareFrictionResolved, decorateEntriesWithKnownIssue, discoverTranscripts, dispatchCommand, dispatchTracked, dropSessionMemory, emergentFrictionForSession, exportTrace, friction, gatherReportBundle, http, importIntents, log, maybeAutoCalibrate, openDashboardInBrowser, path, pending, readJsonBody, readTranscriptFile, requireActiveSession, resolveSuggestionsForSession, sessionRunningTokens, sessionSavingsTally, summarizeByStore, withCamelAliases, withLoggedAction, writeTrace }),
   {
     // savings is cross-session/global by nature (a macro or a golden-diff
     // pair is reused across sessions, not scoped to one) - only surfaced on

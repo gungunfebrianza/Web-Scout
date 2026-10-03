@@ -15,6 +15,9 @@
 // mcp: 'tool.action' | null. mcpExempt (required when mcp is null): why.
 // params: { '--flag': 'mcpParamName' }. cliOnly: { '--flag': 'why' }.
 // lenient: true = an unknown --flag is treated as data (eval's expression).
+// read: the HTTP route (GET, no arguments) whose answer this command prints unchanged. surface-roundtrip.test.mjs runs every
+// such row over HTTP, the real CLI and the real MCP server and requires the same answer, and fails for a friction read
+// that declares neither read nor a reason in its exempt list.
 
 // Reply shaping every cacheable read accepts (see read-pipeline.mjs): rows as
 // {columns, rows}, a pointer/delta instead of a repeat body, a shape-only peek, and
@@ -27,7 +30,7 @@ const NOMCP_PROCESS = 'process control of the relay itself - not something an MC
 export const CLI_SPEC = [
   { cmd: 'help', pos: [0, 2], mcp: 'webscout_meta.describe' },
   { cmd: 'status', pos: [0, 0], mcp: 'webscout_meta.status' },
-  { cmd: 'agents', pos: [0, 0], mcp: 'webscout_meta.agents' },
+  { cmd: 'agents', read: '/agents', pos: [0, 0], mcp: 'webscout_meta.agents' },
   { cmd: 'ping', pos: [0, 0], val: ['--agent'], mcp: 'webscout_meta.ping' },
   { cmd: 'dashboard', pos: [0, 0], mcp: 'webscout_meta.dashboard_url' },
   { cmd: 'analytics', pos: [0, 0], mcp: 'webscout_meta.analytics' },
@@ -35,23 +38,23 @@ export const CLI_SPEC = [
   { cmd: 'friction resolve', pos: [2, 2], val: ['--note'], mcp: 'webscout_meta.friction', params: { '--note': 'note' } },
   { cmd: 'friction unresolve', pos: [2, 2], mcp: 'webscout_meta.friction' },
   { cmd: 'friction explain', pos: [2, 2], mcp: 'webscout_meta.friction' },
-  { cmd: 'friction list', pos: [0, 0], mcp: 'webscout_meta.friction' },
-  { cmd: 'friction config', pos: [0, 0], mcp: 'webscout_meta.friction' },
-  { cmd: 'friction session', pos: [0, 0], mcp: 'webscout_meta.friction' },
-  { cmd: 'friction targets', pos: [0, 0], val: ['--filter', '--sort', '--limit'], mcp: 'webscout_meta.friction', params: { '--filter': 'filter', '--sort': 'sort', '--limit': 'limit' } },
-  { cmd: 'friction notices', pos: [0, 0], val: ['--session', '--since'], mcp: 'webscout_meta.friction', params: { '--session': 'session', '--since': 'since' } },
-  { cmd: 'friction next', pos: [0, 0], bool: ['--confirm'], val: ['--notice', '--step'], mcp: 'webscout_meta.friction', params: { '--notice': 'notice', '--step': 'step', '--confirm': 'confirm' } },
-  { cmd: 'friction trend', pos: [0, 2], val: ['--sessions'], mcp: 'webscout_meta.friction', params: { '--sessions': 'sessions' } },
+  { cmd: 'friction list', read: '/friction/resolutions', pos: [0, 0], mcp: 'webscout_meta.friction' },
+  { cmd: 'friction config', read: '/friction/config', pos: [0, 0], mcp: 'webscout_meta.friction' },
+  { cmd: 'friction session', read: '/friction/session', pos: [0, 0], mcp: 'webscout_meta.friction' },
+  { cmd: 'friction targets', read: '/friction/targets', pos: [0, 0], val: ['--filter', '--sort', '--limit'], mcp: 'webscout_meta.friction', params: { '--filter': 'filter', '--sort': 'sort', '--limit': 'limit' } },
+  { cmd: 'friction notices', read: '/friction/notices', pos: [0, 0], val: ['--session', '--since'], mcp: 'webscout_meta.friction', params: { '--session': 'session', '--since': 'since' } },
+  { cmd: 'friction next', read: '/friction/next', pos: [0, 0], bool: ['--confirm'], val: ['--notice', '--step'], mcp: 'webscout_meta.friction', params: { '--notice': 'notice', '--step': 'step', '--confirm': 'confirm' } },
+  { cmd: 'friction trend', read: '/friction/trend', pos: [0, 2], val: ['--sessions'], mcp: 'webscout_meta.friction', params: { '--sessions': 'sessions' } },
   { cmd: 'friction snooze', pos: [2, 2], val: ['--for', '--note'], mcp: 'webscout_meta.friction', params: { '--for': 'for', '--note': 'note' } },
   { cmd: 'friction unsnooze', pos: [2, 2], mcp: 'webscout_meta.friction' },
-  { cmd: 'friction snoozes', pos: [0, 0], mcp: 'webscout_meta.friction' },
-  { cmd: 'friction check', pos: [0, 0], val: ['--fail-on'], mcp: 'webscout_meta.friction', params: { '--fail-on': 'failOn' } },
-  { cmd: 'friction export', pos: [0, 0], val: ['--out'], mcp: 'webscout_meta.friction', cliOnly: { '--out': 'writes a local file - an MCP caller gets the document inline' } },
+  { cmd: 'friction snoozes', read: '/friction/snoozes', pos: [0, 0], mcp: 'webscout_meta.friction' },
+  { cmd: 'friction check', read: '/friction/check', pos: [0, 0], val: ['--fail-on'], mcp: 'webscout_meta.friction', params: { '--fail-on': 'failOn' } },
+  { cmd: 'friction export', read: '/friction/export', pos: [0, 0], val: ['--out'], mcp: 'webscout_meta.friction', cliOnly: { '--out': 'writes a local file - an MCP caller gets the document inline' } },
   { cmd: 'friction import', pos: [1, 1], bool: ['--confirm'], mcp: 'webscout_meta.friction', params: { '--confirm': 'confirm' } },
   { cmd: 'friction watch', pos: [0, 0], val: ['--for', '--count', '--session'], mcp: null, mcpExempt: 'an open-ended stream has no request/response shape - an MCP caller polls "friction notices" with the since cursor instead' },
-  { cmd: 'friction regressions', pos: [0, 0], bool: ['--fail'], mcp: 'webscout_meta.friction', cliOnly: { '--fail': 'sets the exit status for CI - an MCP caller reads the count in the reply' } },
+  { cmd: 'friction regressions', read: '/friction/regressions', pos: [0, 0], bool: ['--fail'], mcp: 'webscout_meta.friction', cliOnly: { '--fail': 'sets the exit status for CI - an MCP caller reads the count in the reply' } },
   { cmd: 'friction prune', pos: [0, 0], bool: ['--confirm'], val: ['--days', '--notice-days', '--read-days'], mcp: 'webscout_meta.friction', params: { '--days': 'days', '--notice-days': 'noticeDays', '--read-days': 'readDays', '--confirm': 'confirm' } },
-  { cmd: 'known-issues review', pos: [0, 0], mcp: 'webscout_meta.friction' },
+  { cmd: 'known-issues review', read: '/known-issues/review', pos: [0, 0], mcp: 'webscout_meta.friction' },
   { cmd: 'known-issues renew', pos: [1, 1], bool: ['--confirm'], val: ['--review-by'], mcp: 'webscout_meta.friction', params: { '--confirm': 'confirm', '--review-by': 'reviewBy' } },
   { cmd: 'known-issues retire', pos: [1, 1], bool: ['--confirm'], mcp: 'webscout_meta.friction', params: { '--confirm': 'confirm' } },
   {
@@ -88,7 +91,7 @@ export const CLI_SPEC = [
   },
   { cmd: 'session end', pos: [0, 1], bool: ['--trace', '--apply-suggestions'], mcp: 'webscout_session.end', params: { '--trace': 'trace', '--apply-suggestions': 'applySuggestions' } },
   { cmd: 'session current', pos: [0, 0], mcp: 'webscout_session.current' },
-  { cmd: 'session list', pos: [0, 0], mcp: 'webscout_session.list' },
+  { cmd: 'session list', read: '/sessions', pos: [0, 0], mcp: 'webscout_session.list' },
   { cmd: 'session show', pos: [1, 1], mcp: 'webscout_session.show' },
   {
     cmd: 'session report', pos: [1, 1], val: ['--format', '--out', '--verity'], mcp: 'webscout_session.report',
@@ -230,7 +233,7 @@ export const CLI_SPEC = [
   { cmd: 'eval', pos: [0, Infinity], val: ['--file', '--timeout', '--agent'], lenient: true, mcp: 'webscout_eval', params: { '--file': 'filePath', '--timeout': 'timeoutMs' } },
 
   { cmd: 'macro record', pos: [2, 2], bool: ['--all'], mcp: 'webscout_macro.record', params: { '--all': 'all' } },
-  { cmd: 'macro list', pos: [0, 0], bool: ['--risk', '--health'], mcp: 'webscout_macro.list', params: { '--risk': 'risk', '--health': 'health' } },
+  { cmd: 'macro list', read: '/macros', pos: [0, 0], bool: ['--risk', '--health'], mcp: 'webscout_macro.list', params: { '--risk': 'risk', '--health': 'health' } },
   { cmd: 'macro show', pos: [1, 1], mcp: 'webscout_macro.show' },
   {
     cmd: 'macro run', pos: [1, 1], bool: ['--continue-on-error', '--confirm', '--full'], val: ['--from-step'], mcp: 'webscout_macro.run',

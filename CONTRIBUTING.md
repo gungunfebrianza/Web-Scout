@@ -53,7 +53,7 @@ where the person reaches it from, or why they do not. The CLI and the MCP action
 write the message once and attach the next steps; the CLI, the MCP server and the dashboard render them. A refusal the caller can act on gets the same treatment: add its message pattern to `errorNotice()` in
 `notices.mjs` and the relay sends the way out with the error. A step that writes must say so (a non-GET `http`), because
 `friction next` and the dashboard hold it for confirmation. `surface-roundtrip.test.mjs` runs a read over HTTP, the CLI and
-MCP and fails if the answers differ - a new friction read belongs in its case list.
+MCP and fails if the answers differ: declare `read: '<route>'` on its `cli-spec.mjs` row and it is compared automatically (a friction read with no declaration fails the build). The command reference in the README is generated - run `node surfaces.mjs --write` after changing `cli-spec.mjs` or `surfaces.mjs`.
 Wire names are camelCase (`ackRisk`, `tryRecovery`, `strictCrv`); the snake_case spellings older callers send
 are still accepted for the same fields.
 
