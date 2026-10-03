@@ -94,7 +94,10 @@ test('--peek returns the shape, books the saving, and declines when the result i
   assert.equal(r.mode, 'peek');
   assert.equal(r.out.arrays.rows.count, 120);
   assert.equal(h.keys()[0], 'peek');
-  assert.ok(Array.isArray(r.out.estTokensBand) && r.out.estTokensBand[0] <= r.out.estTokens && r.out.estTokens <= r.out.estTokensBand[1] * 2);
+  // estTokens is the chars/4 ledger unit; the band is what that figure could really be, so with a
+  // committed calibration it need not bracket it - only be a well-formed range.
+  const [low, high] = r.out.estTokensBand;
+  assert.ok(Number.isFinite(low) && Number.isFinite(high) && low > 0 && low <= high);
   const tiny = h.call({ full: { count: 1, rows: [{ id: 1 }] }, opts: { peek: true } });
   assert.equal(tiny.mode, 'full');
 });
