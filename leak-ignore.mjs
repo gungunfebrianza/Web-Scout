@@ -3,7 +3,7 @@
 // ignores a Windows-only name.
 export const COMMON_IGNORED = ['node-compile-cache', 'webscout-relays.jsonl', 'webscout-scratch-log.jsonl', 'webscout-scratch-ledger.jsonl', 'webscout-host-samples.jsonl', 'webscout-warn-cache-']; // shared-by-design files
 export const PLATFORM_IGNORED = {
-  win32: ['msedge_', 'cv_debug.log', '__PSScriptPolicyTest_'], // __PSScriptPolicyTest_*: PowerShell's own policy probe (seen on the hosted runner), not ours
+  win32: ['msedge_', 'cv_debug.log', '__PSScriptPolicyTest_', 'Importer_'], // Importer_*: seen once on the hosted runner right after the tests that call PowerShell (host-health, scratch), nothing in this repo creates that name; __PSScriptPolicyTest_*: PowerShell's own policy probe (seen on the hosted runner), not ours
 };
 export const isIgnoredLeak = (name, platform = process.platform) =>
   [...COMMON_IGNORED, ...(PLATFORM_IGNORED[platform] || [])].some((p) => name.startsWith(p));
