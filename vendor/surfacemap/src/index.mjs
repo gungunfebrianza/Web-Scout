@@ -7,6 +7,8 @@ export { createGraph, nodeId } from './graph.mjs';
 export { detectDrift } from './drift.mjs';
 export { buildGraph } from './build.mjs';
 export { renderHtml } from './render.mjs';
+export { startMapServer } from './serve.mjs';
+export { probeTargets, probeOne, runProbes, summarize } from './live.mjs';
 export { defineConfig, loadConfig, findConfig } from './config.mjs';
 
 // The two files a build owns: <out>.html (the map) and <out>.json (the same graph for other tools).

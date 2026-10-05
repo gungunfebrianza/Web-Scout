@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { findConfig, loadConfig } from '../src/config.mjs';
-import { renderOutputs, writeOutputs, staleOutputs } from '../src/index.mjs';
+import { renderOutputs, writeOutputs, staleOutputs, startMapServer } from '../src/index.mjs';
 
 const USAGE = `surfacemap - a living map of how a project's surfaces connect
 
@@ -10,9 +10,12 @@ const USAGE = `surfacemap - a living map of how a project's surfaces connect
   surfacemap build                 write <out>.html and <out>.json
   surfacemap check                 fail (exit 1) when the files are stale or findings reach --fail-on
   surfacemap findings              print the drift findings, change nothing
+  surfacemap serve                 serve the map rebuilt on each load; with a live target it probes the running service
 
   --config <file>     config file (default: surfacemap.config.mjs in the current folder)
   --fail-on <levels>  check: comma list of error,warn (default from config, else error)
+  --target <url>      serve: the running service to probe (default: live.target in the config)
+  --port <n>          serve: port to listen on (default 4310)
 `;
 
 const STARTER = `import { defineConfig } from 'surfacemap';
@@ -30,10 +33,12 @@ export default defineConfig({
 `;
 
 function parse(argv) {
-  const out = { command: argv[0], config: null, failOn: null };
+  const out = { command: argv[0], config: null, failOn: null, target: null, port: 4310 };
   for (let i = 1; i < argv.length; i++) {
     if (argv[i] === '--config') out.config = argv[++i];
     else if (argv[i] === '--fail-on') out.failOn = (argv[++i] ?? '').split(',').filter(Boolean);
+    else if (argv[i] === '--target') out.target = argv[++i];
+    else if (argv[i] === '--port') out.port = Number(argv[++i]);
     else throw new Error(`unknown argument "${argv[i]}"`);
   }
   return out;
@@ -55,10 +60,19 @@ async function main() {
     return 0;
   }
 
-  if (!['build', 'check', 'findings'].includes(args.command)) { console.error(`unknown command "${args.command}"\n\n${USAGE}`); return 2; }
+  if (!['build', 'check', 'findings', 'serve'].includes(args.command)) { console.error(`unknown command "${args.command}"\n\n${USAGE}`); return 2; }
   const file = args.config ?? findConfig(process.cwd());
   if (!file) { console.error('no surfacemap.config.mjs here; run "surfacemap init" or pass --config'); return 2; }
   const config = await loadConfig(file);
+
+  if (args.command === 'serve') {
+    if (!Number.isInteger(args.port) || args.port < 0 || args.port > 65535) { console.error('--port must be a number from 0 to 65535'); return 2; }
+    const target = args.target ?? config.live?.target ?? null;
+    const { url } = await startMapServer({ config, target, port: args.port });
+    console.log(`serving ${url}${target ? ` - live against ${target}` : ' - no live target (set live.target or pass --target)'}`);
+    return new Promise(() => {}); // keep running until Ctrl+C
+  }
+
   const outputs = await renderOutputs(config);
   const { graph } = outputs;
 

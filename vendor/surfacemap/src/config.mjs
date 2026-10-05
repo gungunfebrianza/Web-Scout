@@ -28,6 +28,7 @@ export async function loadConfig(file) {
     purpose: raw.purpose ?? '',
     kinds: raw.kinds ?? {},
     adapters: raw.adapters,
+    live: raw.live ?? null,
     failOn: raw.failOn ?? ['error'],
     root: path.resolve(dir, raw.root ?? '.'),
     out: path.resolve(dir, raw.out ?? 'docs/surfacemap'),

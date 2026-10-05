@@ -8,19 +8,19 @@
 :root {
   --bg: #f6f7f9; --panel: #ffffff; --ink: #1b1f27; --muted: #5d6675; --line: #d9dde4;
   --accent: #2457d6; --accent-soft: #e4ebfc; --warn: #b45309; --warn-soft: #fdf0dc; --error: #b42318; --error-soft: #fde8e6;
-  --edge: #6b7686;
+  --edge: #6b7686; --ok: #15803d;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #12151b; --panel: #1b2029; --ink: #e6e9ef; --muted: #9aa4b4; --line: #2d3441;
     --accent: #7ea2ff; --accent-soft: #1f2c4a; --warn: #f0b35a; --warn-soft: #3a2c14; --error: #ff8a80; --error-soft: #411d1a;
-    --edge: #8c97a9;
+    --edge: #8c97a9; --ok: #5fd38d;
   }
 }
 :root[data-theme="dark"] {
   --bg: #12151b; --panel: #1b2029; --ink: #e6e9ef; --muted: #9aa4b4; --line: #2d3441;
   --accent: #7ea2ff; --accent-soft: #1f2c4a; --warn: #f0b35a; --warn-soft: #3a2c14; --error: #ff8a80; --error-soft: #411d1a;
-  --edge: #8c97a9;
+  --edge: #8c97a9; --ok: #5fd38d;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
@@ -68,6 +68,11 @@ aside p { margin: 4px 0; }
 .finding.warn { background: var(--warn-soft); border-color: var(--warn); }
 .finding.error { background: var(--error-soft); border-color: var(--error); }
 .finding code { font-size: 11.5px; opacity: .8; }
+.dot { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--muted); }
+.dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.down { background: var(--error); }
+.cnt { margin-left: 6px; color: var(--muted); font-weight: 400; }
+.ghost.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.livestat { color: var(--muted); font-size: 12.5px; }
 .empty { color: var(--muted); padding: 14px; }
 .sr { position: absolute; left: -9999px; }
 </style>
@@ -85,6 +90,8 @@ aside p { margin: 4px 0; }
     <button class="tab" role="tab" id="tab-findings" aria-selected="false">Findings <span class="badge" id="fcount"></span></button>
   </div>
   <button class="ghost" id="clear" hidden>Show everything</button>
+  <button class="ghost" id="live" hidden aria-pressed="false">Go live</button>
+  <span class="livestat" id="livestat" role="status"></span>
 </div>
 <div class="legend" id="legend"></div>
 <main>
@@ -105,7 +112,7 @@ aside p { margin: 4px 0; }
   var flags = {};
   G.findings.forEach(function (f) { f.nodes.forEach(function (id) { (flags[id] = flags[id] || []).push(f); }); });
 
-  var state = { selected: null, query: '', tab: 'map' };
+  var state = { selected: null, query: '', tab: 'map', live: null, buttons: {} };
 
   // ---- header ----
   $('title').textContent = G.project + ' surface map';
@@ -150,7 +157,7 @@ aside p { margin: 4px 0; }
         if (node.kind !== kind) return;
         if (visible && !visible[node.id]) return;
         if (q && node.label.toLowerCase().indexOf(q) === -1 && node.id !== state.selected) return;
-        var li = el('li'); var b = el('button', 'node', node.label); b.type = 'button'; b.title = node.key;
+        var li = el('li'); var b = el('button', 'node'); b.type = 'button'; b.title = node.key; b.appendChild(el('span', 'lbl', node.label));
         var f = flags[node.id]; if (f) b.className += f.some(function (x) { return x.level === 'error'; }) ? ' error' : ' warn';
         b.setAttribute('aria-pressed', node.id === state.selected ? 'true' : 'false');
         b.addEventListener('click', function () { select(node.id === state.selected ? null : node.id); });
@@ -159,8 +166,9 @@ aside p { margin: 4px 0; }
       h.appendChild(el('span', null, '(' + n + ')'));
       col.appendChild(h); col.appendChild(ul); board.appendChild(col);
     });
-    if (!shown) { var none = el('p', 'empty', 'Nothing matches that filter.'); $('view').replaceChildren(none); return; }
+    if (!shown) { state.buttons = {}; var none = el('p', 'empty', 'Nothing matches that filter.'); $('view').replaceChildren(none); return; }
     $('view').replaceChildren(scroller);
+    state.buttons = buttons; paintLive();
     if (state.selected) requestAnimationFrame(function () { drawEdges(board, svg, buttons); });
   }
   function drawEdges(board, svg, buttons) {
@@ -196,6 +204,59 @@ aside p { margin: 4px 0; }
     $('view').replaceChildren(wrap);
   }
 
+  // ---- live mode ----
+  // The server probes the running service (GET only); the page only asks it what it found. A capability shows the
+  // worst answer among the routes it exposes.
+  var RANK = { ok: 0, warn: 1, down: 2 };
+  function health(r) { if (!r) return null; if (r.error || r.status >= 500) return 'down'; if (r.status >= 400) return 'warn'; return 'ok'; }
+  function liveOf(id) {
+    var L = state.live; if (!L) return null;
+    var n = byId[id];
+    if (n.kind === 'http') return L.results[id] ? { own: L.results[id], level: health(L.results[id]) } : null;
+    var worst = null, seen = 0;
+    Object.keys(adj[id]).forEach(function (m) {
+      var r = byId[m].kind === 'http' && L.results[m]; if (!r) return;
+      seen++; var h = health(r); if (worst === null || RANK[h] > RANK[worst]) worst = h;
+    });
+    return seen ? { own: null, level: worst, routes: seen } : null;
+  }
+  function paintLive() {
+    Object.keys(state.buttons).forEach(function (id) {
+      var b = state.buttons[id];
+      Array.prototype.slice.call(b.querySelectorAll('.dot, .cnt')).forEach(function (x) { x.remove(); });
+      var info = liveOf(id); if (!info) return;
+      b.insertBefore(el('span', 'dot ' + info.level), b.firstChild);
+      if (info.own && info.own.count !== undefined) b.appendChild(el('span', 'cnt', String(info.own.count)));
+    });
+  }
+  function describe(r) {
+    if (r.error) return 'no answer: ' + r.error;
+    var s = r.status + ' in ' + r.ms + ' ms';
+    if (r.streaming) s += ' (a stream, not read)';
+    if (r.count !== undefined) s += ' - ' + r.count + ' ' + r.countOf;
+    if (r.truncated) s += ' (body cut off at 512 KB)';
+    if (r.partial) s += ' (body did not finish)';
+    return s;
+  }
+  var timer = null;
+  function poll() {
+    fetch('/__live', { cache: 'no-store' }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(function (L) {
+      state.live = L; paintLive(); drawDetail();
+      var down = Object.keys(L.results).filter(function (k) { return health(L.results[k]) === 'down'; }).length;
+      $('livestat').textContent = Object.keys(L.results).length + ' routes probed at ' + L.checkedAt.slice(11, 19) + ' UTC' + (down ? ' - ' + down + ' not answering' : '');
+    }).catch(function (e) { $('livestat').textContent = 'live check failed: ' + e.message; });
+  }
+  function setLive(on) {
+    $('live').setAttribute('aria-pressed', on ? 'true' : 'false'); $('live').className = 'ghost' + (on ? ' on' : ''); $('live').textContent = on ? 'Live: on' : 'Go live';
+    clearInterval(timer); timer = null;
+    if (on) { $('livestat').textContent = 'probing ' + G.live.target + ' ...'; poll(); timer = setInterval(poll, Math.max(2, G.live.interval || 5) * 1000); }
+    else { state.live = null; $('livestat').textContent = ''; paintLive(); drawDetail(); }
+  }
+  if (G.live) {
+    $('live').hidden = false;
+    $('live').addEventListener('click', function () { setLive(!timer); });
+  }
+
   // ---- detail panel ----
   function drawDetail() {
     var d = $('detail'); d.replaceChildren();
@@ -216,6 +277,15 @@ aside p { margin: 4px 0; }
       var v = n.meta[k]; add(k, typeof v === 'string' ? v : JSON.stringify(v));
     });
     d.appendChild(kv);
+    if (state.live) {
+      var info = liveOf(n.id), skip = state.live.skipped[n.id];
+      if (info || skip) {
+        d.appendChild(el('h4', null, 'Live - ' + state.live.target));
+        if (info && info.own) d.appendChild(el('p', null, describe(info.own)));
+        else if (info) d.appendChild(el('p', null, info.routes + ' of its routes probed, worst answer: ' + (info.level === 'ok' ? 'all answering' : info.level === 'warn' ? 'a client error' : 'not answering')));
+        else d.appendChild(el('p', null, 'Not probed: ' + skip + '.'));
+      }
+    }
     (flags[n.id] || []).forEach(function (f) { var p = el('div', 'finding ' + f.level); p.appendChild(el('code', null, f.code)); p.appendChild(el('div', null, f.message)); d.appendChild(p); });
     G.columns.forEach(function (kind) {
       var ids = Object.keys(adj[n.id]).filter(function (id) { return byId[id].kind === kind; }).sort();
