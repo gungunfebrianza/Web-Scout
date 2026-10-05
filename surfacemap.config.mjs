@@ -12,7 +12,7 @@ export default defineConfig({
   project: 'Web-Scout',
   purpose: 'Every way to reach a Web-Scout feature - CLI, MCP, HTTP and the dashboard - and how they are wired. Pick a command, route or capability to see what it connects to. A colored edge marks drift: something declared that the code does not have, or the reverse.',
   out: 'docs/surfacemap',
-  live: { target: `http://127.0.0.1:${process.env.WEBSCOUT_PORT || 8973}` },
+  live: { timeoutMs: 10000, target: `http://127.0.0.1:${process.env.WEBSCOUT_PORT || 8973}` },
   adapters: [
     routes({ files: ['relay.mjs', 'routes-*.mjs'], extract: extractors.methodPattern, internal: INTERNAL_ROUTES }),
     clientCalls({ files: ['dashboard.html'], extract: (source) => [...extractors.apiCalls(source), ...extractors.fetchCalls(source)] }),
