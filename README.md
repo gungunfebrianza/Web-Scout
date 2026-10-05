@@ -1095,6 +1095,9 @@ Every command, its flags and the MCP action that mirrors it. `usage.txt` (or `he
 - [`docs/web-scout-architecture.md`](./docs/web-scout-architecture.md) -
   internals, every command's design rationale, dashboard implementation
   history, known gaps
+- [`docs/surfacemap.html`](./docs/surfacemap.html) - an interactive map of how every command, MCP action, HTTP
+  route, capability and dashboard call connects. Generated from the code (`vendor/surfacemap/`), so it cannot
+  go stale: `surfacemap.test.mjs` fails when it is out of date
 - [`docs/web-scout-roadmap.md`](./docs/web-scout-roadmap.md) -
   version-by-version history of every round of changes
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) - how to propose a fork idea, code
