@@ -38,6 +38,7 @@ export const SURFACES = [
   { id: 'state', http: ['POST /state/snapshot', 'POST /state/diff', 'POST /state/verify', 'POST /state/restore'], cli: ['idb snapshot', 'idb diff', 'idb diff-golden', 'idb verify', 'idb restore'], dashboard: ['POST /state/snapshot', 'POST /state/diff'] },
   { id: 'crv', http: ['POST /crv/preflight', 'POST /crv/run'], cli: ['crv preflight', 'crv run'], dashboard: null, dashboardWhy: 'a CRV pass is driven by an agent; its outcome shows in the session views' },
   { id: 'repair', http: ['GET /repair/config', 'PUT /repair/config', 'GET /repair/activity', 'GET /repair/causal-diff', 'POST /repair/patch', 'POST /repair/verify'], cli: ['repair status', 'repair enable', 'repair disable', 'repair patch', 'repair verify', 'repair causal-diff'], dashboard: ['GET /repair/config', 'PUT /repair/config', 'GET /repair/activity', 'GET /repair/causal-diff'] },
+  { id: 'surfacemap', http: null, httpWhy: 'a maintainer tool run on the checkout, not served by the relay', cli: ['surfacemap build', 'surfacemap check', 'surfacemap serve'], dashboard: null, dashboardWhy: 'it is a separate page (docs/surfacemap.html), generated from the code' },
   { id: 'host', http: ['GET /host/health', 'GET /host/trend', 'GET /host/sessions', 'GET /host/footprint', 'GET /host/test-run', 'POST /host/cleanup', 'POST /host/kill-orphans'], cli: ['scratch status', 'scratch cleanup'], dashboard: ['GET /host/health', 'POST /host/cleanup', 'POST /host/kill-orphans'] },
   { id: 'analytics', http: ['GET /analytics'], cli: ['analytics'], dashboard: ['GET /analytics'] },
 

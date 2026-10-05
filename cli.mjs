@@ -10,6 +10,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import {
   request, BASE, HOST, PORT, netHistory, consoleHistory, verityHistory, pageFresh, buildVerityScenarioStub, runSuite, dbVersionCheck, waitForReconnect, snapshotSince, ensureFreshRelayForNewSession,
@@ -958,6 +960,16 @@ async function main() {
 
   if (command === 'relay') {
     await handleRelay(rest[0]);
+    return;
+  }
+
+  if (command === 'surfacemap') {
+    // Runs the vendored generator against this checkout's surfacemap.config.mjs, so nobody types the long path.
+    const bin = fileURLToPath(new URL('./vendor/surfacemap/bin/surfacemap.mjs', import.meta.url));
+    const config = fileURLToPath(new URL('./surfacemap.config.mjs', import.meta.url));
+    if (!['build', 'check', 'serve'].includes(rest[0])) throw new Error('surfacemap supports: build, check, serve [--target <url>] [--port <n>]');
+    const child = spawn(process.execPath, [bin, rest[0], '--config', config, ...rest.slice(1)], { stdio: 'inherit' });
+    await new Promise((resolve) => child.on('exit', (code) => { process.exitCode = code ?? 1; resolve(); }));
     return;
   }
 

@@ -999,6 +999,9 @@ Every command, its flags and the MCP action that mirrors it. `usage.txt` (or `he
 | `db version-check` | `--agent <v>` | `webscout_meta.db_version_check` |
 | `scratch cleanup` | `--dry-run` `--include-wl` `--confirm` `--min-age-min <v>` | - |
 | `scratch status` | - | - |
+| `surfacemap build` | - | - |
+| `surfacemap check` | - | - |
+| `surfacemap serve` | `--target <v>` `--port <v>` | - |
 | `relay start` | - | - |
 | `relay stop` | - | - |
 | `relay restart` | - | - |

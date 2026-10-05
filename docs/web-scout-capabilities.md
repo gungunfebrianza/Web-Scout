@@ -29,6 +29,7 @@ A `-` in the CLI or Dashboard column carries a reason in `surfaces.mjs` (`cliWhy
 | state | `POST /state/snapshot`<br>`POST /state/diff`<br>`POST /state/verify`<br>`POST /state/restore` | `idb snapshot`<br>`idb diff`<br>`idb diff-golden`<br>`idb verify`<br>`idb restore` | `webscout_idb.snapshot`<br>`webscout_idb.diff`<br>`webscout_idb.diff_golden`<br>`webscout_idb.verify`<br>`webscout_idb.restore` | `POST /state/snapshot`<br>`POST /state/diff` |
 | crv | `POST /crv/preflight`<br>`POST /crv/run` | `crv preflight`<br>`crv run` | `webscout_idb.crv_preflight`<br>`webscout_idb.crv_run` | - |
 | repair | `GET /repair/config`<br>`PUT /repair/config`<br>`GET /repair/activity`<br>`GET /repair/causal-diff`<br>`POST /repair/patch`<br>`POST /repair/verify` | `repair status`<br>`repair enable`<br>`repair disable`<br>`repair patch`<br>`repair verify`<br>`repair causal-diff` | `webscout_repair.status`<br>`webscout_repair.enable`<br>`webscout_repair.disable`<br>`webscout_repair.patch`<br>`webscout_repair.verify`<br>`webscout_repair.causal_diff` | `GET /repair/config`<br>`PUT /repair/config`<br>`GET /repair/activity`<br>`GET /repair/causal-diff` |
+| surfacemap | - | `surfacemap build`<br>`surfacemap check`<br>`surfacemap serve` | - | - |
 | host | `GET /host/health`<br>`GET /host/trend`<br>`GET /host/sessions`<br>`GET /host/footprint`<br>`GET /host/test-run`<br>`POST /host/cleanup`<br>`POST /host/kill-orphans` | `scratch status`<br>`scratch cleanup` | - | `GET /host/health`<br>`POST /host/cleanup`<br>`POST /host/kill-orphans` |
 | analytics | `GET /analytics` | `analytics` | `webscout_meta.analytics` | `GET /analytics` |
 | friction-resolve _(friction)_ | `POST /friction/resolve`<br>`POST /friction/unresolve`<br>`GET /friction/resolutions` | `friction resolve`<br>`friction unresolve`<br>`friction list` | `webscout_meta.friction` | `POST /friction/resolve`<br>`POST /friction/unresolve` |
@@ -56,3 +57,4 @@ A `-` in the CLI or Dashboard column carries a reason in `surfaces.mjs` (`cliWhy
 - **session-cleanup** - no dashboard control: deleting rows a session wrote is a deliberate CLI step with a dry run
 - **session-assert** - no dashboard control: assertions are evaluated by the agent driving the page
 - **crv** - no dashboard control: a CRV pass is driven by an agent; its outcome shows in the session views
+- **surfacemap** - no dashboard control: it is a separate page (docs/surfacemap.html), generated from the code

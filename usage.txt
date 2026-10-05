@@ -21,6 +21,13 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    --include-wl also sweeps wl-browser-/wl-story-/wl-anchor- dirs
                                    (not created by web-scout). --min-age-min lowers the 24h age at which a
                                    marker-less (pre-marker) dir counts as stale, e.g. 60. Runs automatically before each launch.
+  surfacemap build                regenerate docs/surfacemap.html and .json from the code (the interactive map of how
+                                   every command, route and capability connects)
+  surfacemap check                exit 1 when the map is stale or has error-level findings (what the test suite runs)
+  surfacemap serve [--target <url>] [--port <n>]
+                                   serve the map, rebuilt on each page load, on 127.0.0.1:<port> (default 4310). The
+                                   page's "Go live" button probes the relay (default http://127.0.0.1:$WEBSCOUT_PORT or
+                                   8973, GET only) for a status dot and count per route. --target probes another relay.
   relay start                     launch the relay detached (log: <tmpdir>/webscout-relay-<port>.log)
   relay stop                      signal the relay's pid (from its pidfile; for a relay started
                                    before pidfiles existed, asks the OS which process LISTENS on the

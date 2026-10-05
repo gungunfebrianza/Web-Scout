@@ -451,6 +451,21 @@
       "meta": {}
     },
     {
+      "id": "capability:surfacemap",
+      "kind": "capability",
+      "key": "surfacemap",
+      "label": "surfacemap",
+      "origins": [
+        "declared"
+      ],
+      "meta": {
+        "gaps": {
+          "http": "a maintainer tool run on the checkout, not served by the relay",
+          "dashboard": "it is a separate page (docs/surfacemap.html), generated from the code"
+        }
+      }
+    },
+    {
       "id": "capability:token-report",
       "kind": "capability",
       "key": "token-report",
@@ -1761,6 +1776,45 @@
         "code"
       ],
       "meta": {}
+    },
+    {
+      "id": "cli:surfacemap build",
+      "kind": "cli",
+      "key": "surfacemap build",
+      "label": "surfacemap build",
+      "origins": [
+        "code",
+        "declared"
+      ],
+      "meta": {
+        "mcpExempt": "regenerates docs/surfacemap.html in this checkout - a maintainer task, not something an agent calls"
+      }
+    },
+    {
+      "id": "cli:surfacemap check",
+      "kind": "cli",
+      "key": "surfacemap check",
+      "label": "surfacemap check",
+      "origins": [
+        "code",
+        "declared"
+      ],
+      "meta": {
+        "mcpExempt": "CI-style staleness check of docs/surfacemap.html in this checkout - not an agent capability"
+      }
+    },
+    {
+      "id": "cli:surfacemap serve",
+      "kind": "cli",
+      "key": "surfacemap serve",
+      "label": "surfacemap serve",
+      "origins": [
+        "code",
+        "declared"
+      ],
+      "meta": {
+        "mcpExempt": "starts a local web server that runs until Ctrl+C - a person looks at it, an agent has no use for it"
+      }
     },
     {
       "id": "cli:token-report",
@@ -5416,6 +5470,21 @@
     {
       "from": "capability:state",
       "to": "http:POST /state/verify",
+      "kind": "exposes"
+    },
+    {
+      "from": "capability:surfacemap",
+      "to": "cli:surfacemap build",
+      "kind": "exposes"
+    },
+    {
+      "from": "capability:surfacemap",
+      "to": "cli:surfacemap check",
+      "kind": "exposes"
+    },
+    {
+      "from": "capability:surfacemap",
+      "to": "cli:surfacemap serve",
       "kind": "exposes"
     },
     {
