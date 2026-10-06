@@ -21,6 +21,10 @@ import path from 'node:path';
 // one private root so a single delete reclaims everything.
 export const scratchRoot = () => process.env.WEBSCOUT_TMPDIR || os.tmpdir();
 export const MARKER = '.webscout-owner.json';
+// Bumped whenever the scratch/harness lifecycle changes in a way an older vendored copy lacks. Stamped into every
+// marker and ledger event, so a leaked dir names the copy that made it ("harness 0 / no marker" = a pre-marker copy).
+export const HARNESS_VERSION = 2;
+export const HARNESS_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const PREFIXES = [
   'webscout-browser-profile-',
   'webscout-crv-tab-profile-',
@@ -85,7 +89,7 @@ export function removeDirSync(dir, { attempts = 12, quiet = false } = {}) {
 function isSymlink(p) { try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; } }
 
 function writeMarker(dir, pid) {
-  fs.writeFileSync(path.join(dir, MARKER), JSON.stringify({ pid, createdAt: Date.now(), creator: process.pid }));
+  fs.writeFileSync(path.join(dir, MARKER), JSON.stringify({ pid, createdAt: Date.now(), creator: process.pid, harness: HARNESS_VERSION, source: HARNESS_DIR }));
 }
 export function readMarker(dir) {
   try {
@@ -116,6 +120,11 @@ function ledger(event) {
     fs.appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), ...event })}
 `);
   } catch { /* observability only */ }
+}
+// One line per implicit sweep that actually reclaimed something, so a leak shows up as a trend in the ledger.
+export function recordSweep(result, via) {
+  if (!result || result.dryRun || !result.removed.length) return;
+  ledger({ ev: 'sweep', via, removed: result.removed.length, freedBytes: result.freedBytes, failed: result.failed.length, unmarked: result.unmarked ?? 0, harness: HARNESS_VERSION, from: HARNESS_DIR });
 }
 const ledgered = new Set(); // marked dirs this process created: the only ones whose dispose is ledgered
 const live = new Map(); // dir -> { pids:Set<number> }
@@ -151,7 +160,7 @@ export function createScratchDir(prefix, { dir, ownerPid = process.pid, baseDir 
   if (marker) {
     writeMarker(target, ownerPid);
     ledgered.add(target);
-    ledger({ ev: 'create', dir: path.basename(target), source: PREFIXES.find((p) => path.basename(target).startsWith(p)) ?? prefix, owner: ownerPid });
+    ledger({ ev: 'create', dir: path.basename(target), source: PREFIXES.find((p) => path.basename(target).startsWith(p)) ?? prefix, owner: ownerPid, harness: HARNESS_VERSION, from: HARNESS_DIR });
   }
   return target;
 }
@@ -251,7 +260,7 @@ export function isStale(dir, { now = Date.now(), staleUnownedMs = STALE_UNOWNED_
 // Options: prefixes, includeForeign (wl-*), browserNames (tests inject 'node.exe').
 export function sweepStale({ dryRun = false, markerOnly = false, baseDir = scratchRoot(), prefixes = PREFIXES, includeForeign = false, browserNames = BROWSER_NAMES, now = Date.now(), staleUnownedMs = STALE_UNOWNED_MS, only = null } = {}) {
   const active = includeForeign ? [...prefixes, ...FOREIGN_PREFIXES] : prefixes;
-  const result = { dryRun, scanned: 0, removed: [], skippedLive: 0, failed: [], killedProcesses: [], freedBytes: 0 };
+  const result = { dryRun, scanned: 0, removed: [], skippedLive: 0, failed: [], killedProcesses: [], freedBytes: 0, unmarked: 0 };
   let names = [];
   try { names = fs.readdirSync(baseDir); } catch { return result; }
   const stale = [];
@@ -263,7 +272,7 @@ export function sweepStale({ dryRun = false, markerOnly = false, baseDir = scrat
     if (!isRealDir(full)) continue; // files, symlinks, junctions: never touched
     if (markerOnly && !readMarker(full)) continue; // implicit sweeps only reclaim dirs that prove they are ours
     result.scanned += 1;
-    if (isStale(full, { now, staleUnownedMs })) stale.push(full);
+    if (isStale(full, { now, staleUnownedMs })) { stale.push(full); if (!readMarker(full)) result.unmarked += 1; }
     else if (!readMarker(full)) unmarked.push(full);
     else result.skippedLive += 1;
   }
@@ -273,7 +282,7 @@ export function sweepStale({ dryRun = false, markerOnly = false, baseDir = scrat
     procs = listBrowserProcesses(browserNames);
     const named = (c) => { const m = /--user-data-dir=(?:"([^"]+)"|(\S+))/.exec(c); return m ? norm(m[1] ?? m[2]) : null; };
     const orphaned = new Set(procs.filter((v) => !/--type=/.test(v.commandLine) && /--headless/.test(v.commandLine) && !isPidAlive(v.ppid)).map((v) => named(v.commandLine)).filter(Boolean));
-    for (const d of unmarked) { if (orphaned.has(norm(d))) stale.push(d); else result.skippedLive += 1; }
+    for (const d of unmarked) { if (orphaned.has(norm(d))) { stale.push(d); result.unmarked += 1; } else result.skippedLive += 1; }
   }
   if (!stale.length) return result;
   const staleSet = new Set(stale.map(norm));
@@ -302,11 +311,46 @@ export function formatSweep(r) {
   return `${verb} ${r.removed.length} dir(s), ${mb} MB; ${r.killedProcesses.length} orphan browser process(es) ${r.dryRun ? 'would be killed' : 'killed'}; ${r.skippedLive} dir(s) kept (owner alive / too new); ${r.failed.length} failed (locked)`;
 }
 
+// --- test fixtures --------------------------------------------------------------------
+// Dirs and files the test suite (and old copies of it) create under the temp dir with no owner marker: fixtures,
+// per-run databases, relay/serve logs. Each is tiny, but a dev machine accumulates thousands. Only ever swept by age
+// (never while newer than STALE_UNOWNED_MS), never when a live relay still owns the name, never through a symlink.
+export const FIXTURE_DIR_PREFIXES = [
+  'webscout-known-issues-analytics-', 'webscout-events-', 'webscout-autostart-', 'webscout-crv-manifest-',
+  'webscout-friction-', 'webscout-mcp-known-issue-', 'webscout-idb-', 'webscout-smoke-', 'webscout-test-', 'webscout-testroot-',
+];
+export const FIXTURE_FILE_PATTERNS = [
+  /^webscout-test-\d+-\d+\.db(-wal|-shm)?$/, /^webscout-serve-\d+\.log$/, /^webscout-static-\d+\.log$/, /^webscout-relay-(\d+)\.log$/,
+];
+export function sweepFixtures({ dryRun = false, baseDir = scratchRoot(), now = Date.now(), maxAgeMs = STALE_UNOWNED_MS } = {}) {
+  const result = { dryRun, removed: 0, freedBytes: 0, failed: 0 };
+  let names = [];
+  try { names = fs.readdirSync(baseDir); } catch { return result; }
+  const livePrivateRoot = process.env.WEBSCOUT_TMPDIR ? norm(process.env.WEBSCOUT_TMPDIR) : null;
+  for (const name of names) {
+    const full = path.join(baseDir, name);
+    let st;
+    try { st = fs.lstatSync(full); } catch { continue; }
+    if (st.isSymbolicLink() || now - st.mtimeMs < maxAgeMs) continue;
+    if (livePrivateRoot && norm(full) === livePrivateRoot) continue; // a run-tests root is its own owner
+    const m = FIXTURE_FILE_PATTERNS.map((re) => re.exec(name)).find(Boolean);
+    const isDir = st.isDirectory() && FIXTURE_DIR_PREFIXES.some((p) => name.startsWith(p)) && !PREFIXES.some((p) => name.startsWith(p));
+    if (!isDir && !m) continue;
+    if (m && m[1] && isPidAlive(readPidFile(path.join(baseDir, `webscout-relay-${m[1]}.pid`)))) continue; // a live relay is still logging here
+    const bytes = isDir ? dirSize(full) : st.size;
+    if (dryRun) { result.removed += 1; result.freedBytes += bytes; continue; }
+    if (isDir ? removeDirSync(full, { quiet: true }) : unlinkQuiet(full)) { result.removed += 1; result.freedBytes += bytes; } else result.failed += 1;
+  }
+  return result;
+}
+function readPidFile(file) { try { const t = fs.readFileSync(file, 'utf8').trim(); return t.startsWith('{') ? Number(JSON.parse(t).pid) : Number(t); } catch { return 0; } }
+function unlinkQuiet(file) { try { fs.rmSync(file, { force: true }); return !fs.existsSync(file); } catch { return false; } }
+
 // Cheap health check for warnings: counts our dirs and how many are reclaimable. sizes:true
 // also walks them (slow with thousands of dirs - `scratch status` only).
 export function scratchStats({ baseDir = scratchRoot(), includeForeign = false, sizes = false, now = Date.now() } = {}) {
   const active = includeForeign ? [...PREFIXES, ...FOREIGN_PREFIXES] : PREFIXES;
-  const out = { dirs: 0, stale: 0, staleBytes: sizes ? 0 : undefined };
+  const out = { dirs: 0, stale: 0, legacy: 0, staleBytes: sizes ? 0 : undefined };
   let names = [];
   try { names = fs.readdirSync(baseDir); } catch { return out; }
   for (const name of names) {
@@ -314,6 +358,7 @@ export function scratchStats({ baseDir = scratchRoot(), includeForeign = false, 
     const full = path.join(baseDir, name);
     if (!isRealDir(full)) continue;
     out.dirs += 1;
+    if (!readMarker(full)) out.legacy += 1; // no owner marker: made by a pre-marker copy of the harness
     if (isStale(full, { now })) { out.stale += 1; if (sizes) out.staleBytes += dirSize(full); }
   }
   return out;

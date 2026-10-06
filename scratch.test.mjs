@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createScratchDir, ownScratchDir, withScratchDir, sweepStale, scratchStats, isPidAlive, MARKER } from './scratch.mjs';
+import { createScratchDir, ownScratchDir, withScratchDir, sweepStale, sweepFixtures, scratchStats, readMarker, isPidAlive, MARKER, HARNESS_VERSION } from './scratch.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'webscout-scratchtest-base-'));
@@ -176,4 +176,58 @@ test('CLI cleanup above 200 dirs needs --confirm (deletes nothing without it)', 
   assert.equal(fs.readdirSync(root).length, 205);
   assert.equal(await run('--confirm'), 0);
   assert.equal(fs.readdirSync(root).length, 0);
+});
+
+test('marker names the harness version and the copy that made the dir', () => {
+  const d = createScratchDir(PFX, { baseDir: base });
+  const m = JSON.parse(fs.readFileSync(path.join(d, MARKER), 'utf8'));
+  assert.equal(m.harness, HARNESS_VERSION);
+  assert.equal(m.source, here);
+  assert.ok(readMarker(d));
+});
+
+test('scratchStats counts unmarked (older-harness) dirs as legacy', () => {
+  const root = fs.mkdtempSync(path.join(base, 'legacy-root-'));
+  createScratchDir(PFX, { baseDir: root });
+  fs.mkdirSync(path.join(root, PFX + 'old'));
+  const st = scratchStats({ baseDir: root });
+  assert.equal(st.dirs, 2);
+  assert.equal(st.legacy, 1);
+});
+
+test('sweepStale counts the unmarked dirs it reclaims', () => {
+  const root = fs.mkdtempSync(path.join(base, 'unmarked-root-'));
+  fs.mkdirSync(path.join(root, PFX + 'old'));
+  const r = sweepStale({ baseDir: root, prefixes: [PFX], staleUnownedMs: 0, now: Date.now() + 1000, browserNames: ['node.exe', 'node'] });
+  assert.equal(r.removed.length, 1);
+  assert.equal(r.unmarked, 1);
+});
+
+test('sweepFixtures removes only old fixture dirs, test dbs and logs; keeps new ones, live-relay logs and foreign names', () => {
+  const root = fs.mkdtempSync(path.join(base, 'fixture-root-'));
+  const old = Date.now() - 3 * 24 * 3600 * 1000;
+  const make = (name, { dir = false, age = old } = {}) => {
+    const p = path.join(root, name);
+    if (dir) { fs.mkdirSync(p); fs.writeFileSync(path.join(p, 'f'), 'x'); } else fs.writeFileSync(p, 'x');
+    fs.utimesSync(p, new Date(age), new Date(age));
+    return p;
+  };
+  const oldDir = make('webscout-friction-awareness-aaaaaa', { dir: true });
+  const oldDb = make('webscout-test-123-456.db');
+  const oldWal = make('webscout-test-123-456.db-wal');
+  const oldLog = make('webscout-serve-9111.log');
+  const deadRelayLog = make('webscout-relay-9001.log');
+  const liveRelayLog = make('webscout-relay-9002.log');
+  fs.writeFileSync(path.join(root, 'webscout-relay-9002.pid'), JSON.stringify({ pid: process.pid, port: 9002 }));
+  const newDir = make('webscout-events-bbbbbb', { dir: true, age: Date.now() });
+  const foreign = make('other-app-cccccc', { dir: true });
+  const ledger = make('webscout-scratch-ledger.jsonl');
+  const profile = make(PFX + 'dddddd', { dir: true }); // profiles belong to sweepStale, never to the fixture sweep
+  const dry = sweepFixtures({ baseDir: root, dryRun: true });
+  assert.equal(dry.removed, 5);
+  assert.ok(fs.existsSync(oldDir), 'dry run deletes nothing');
+  const r = sweepFixtures({ baseDir: root });
+  assert.equal(r.removed, 5);
+  for (const gone of [oldDir, oldDb, oldWal, oldLog, deadRelayLog]) assert.equal(fs.existsSync(gone), false, gone);
+  for (const kept of [liveRelayLog, newDir, foreign, ledger, profile, path.join(root, 'webscout-relay-9002.pid')]) assert.equal(fs.existsSync(kept), true, kept);
 });

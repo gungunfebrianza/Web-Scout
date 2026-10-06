@@ -22,7 +22,8 @@ import { parseUsage, helpTopic, helpMissing } from './help.mjs';
 import { describeFailureContext } from './friction.mjs';
 import { renderNotice, renderSteps } from './notices.mjs';
 import { resolveRelayPid, stopRelay, startRelay, restartRelay, RELAY_SOURCE_FILES } from './relay-control.mjs';
-import { sweepStale, formatSweep, scratchStats } from './scratch.mjs';
+import { sweepStale, sweepFixtures, formatSweep, scratchStats } from './scratch.mjs';
+import { syncCopy, checkCopy } from './sync.mjs';
 
 // Above this many dirs a real (non-dry-run) cleanup needs --confirm: it shows the dry-run first.
 const SCRATCH_CONFIRM_ABOVE = 200;
@@ -950,7 +951,7 @@ async function main() {
     // Leaked profiles/fixtures (each browser profile is hundreds of MB) are invisible until the disk is full.
     const st = scratchStats();
     const atEnd = command === 'session' && rest[0] === 'end';
-    if (st.stale >= SCRATCH_WARN_AT || (atEnd && st.stale > 0)) console.error(`WARNING: ${st.stale} stale web-scout scratch dir(s) in the temp dir. Run "scratch cleanup --dry-run" (then "scratch cleanup --confirm").`);
+    if (st.stale >= SCRATCH_WARN_AT || (atEnd && st.stale > 0)) console.error(`WARNING: ${st.stale} stale web-scout scratch dir(s) in the temp dir${st.legacy ? ` (${st.legacy} have no owner marker: an older vendored copy of the harness leaked them - run "harness sync <project>/tools/web-scout" in each project that vendors web-scout)` : ''}. Run "scratch cleanup --dry-run" (then "scratch cleanup --confirm").`);
   }
 
   if (command === 'status') {
@@ -976,7 +977,8 @@ async function main() {
   if (command === 'scratch') {
     if (rest[0] === 'status') {
       const st = scratchStats({ includeForeign: true, sizes: true });
-      printResult({ summary: `${st.dirs} scratch dir(s), ${st.stale} reclaimable (${(st.staleBytes / 1048576).toFixed(1)} MB)`, ...st });
+      const fx = sweepFixtures({ dryRun: true });
+      printResult({ summary: `${st.dirs} scratch dir(s), ${st.stale} reclaimable (${(st.staleBytes / 1048576).toFixed(1)} MB); ${st.legacy} with no owner marker (older harness copy); ${fx.removed} old fixture/log entr${fx.removed === 1 ? 'y' : 'ies'} (${(fx.freedBytes / 1048576).toFixed(1)} MB)`, ...st, fixtures: fx });
       return;
     }
     if (rest[0] !== 'cleanup') throw new Error('scratch supports: cleanup [--dry-run] [--include-wl] [--min-age-min <n>] [--confirm], status');
@@ -986,13 +988,31 @@ async function main() {
     let note;
     if (!dryRun && !rest.includes('--confirm')) {
       const preview = sweepStale({ ...opts, dryRun: true });
-      if (preview.removed.length > SCRATCH_CONFIRM_ABOVE) {
+      if (preview.removed.length + sweepFixtures({ dryRun: true }).removed > SCRATCH_CONFIRM_ABOVE) {
         dryRun = true; process.exitCode = 1;
-        note = `${preview.removed.length} dirs exceeds ${SCRATCH_CONFIRM_ABOVE}: nothing deleted. Review this dry-run, then re-run with --confirm.`;
+        note = `more than ${SCRATCH_CONFIRM_ABOVE} entries (profiles + old fixtures/logs): nothing deleted. Review this dry-run, then re-run with --confirm.`;
       }
     }
     const result = sweepStale({ ...opts, dryRun });
-    printResult({ summary: formatSweep(result), ...(note ? { note } : {}), ...result, removed: result.removed.length > 20 ? `${result.removed.length} dirs (first 20: ${result.removed.slice(0, 20).map((r) => path.basename(r.dir)).join(', ')})` : result.removed.map((r) => r.dir) });
+    const fixtures = sweepFixtures({ dryRun });
+    printResult({ summary: `${formatSweep(result)}; ${dryRun ? 'would remove' : 'removed'} ${fixtures.removed} old fixture/log entr${fixtures.removed === 1 ? 'y' : 'ies'} (${(fixtures.freedBytes / 1048576).toFixed(1)} MB)`, fixtures, ...(note ? { note } : {}), ...result, removed: result.removed.length > 20 ? `${result.removed.length} dirs (first 20: ${result.removed.slice(0, 20).map((r) => path.basename(r.dir)).join(', ')})` : result.removed.map((r) => r.dir) });
+    return;
+  }
+
+  if (command === 'harness') {
+    // Keeps vendored copies of the browser harness (and its scratch lifecycle) current - see sync.mjs.
+    const sub = rest[0];
+    if (!['sync', 'check'].includes(sub)) throw new Error('harness supports: sync <dir> [--dry-run], check <dir>');
+    const target = rest.slice(1).find((a) => !a.startsWith('--'));
+    if (!target) throw new Error(`harness ${sub} needs the web-scout folder of the project to ${sub} (e.g. ../other-app/tools/web-scout)`);
+    if (sub === 'check') {
+      const r = checkCopy(target);
+      if (r.state !== 'current') process.exitCode = 1;
+      printResult({ summary: `${r.target}: ${r.state}${r.state === 'current' ? '' : ` - run "harness sync ${target}"`}`, ...r });
+      return;
+    }
+    const r = syncCopy(target, { dryRun: rest.includes('--dry-run') });
+    printResult({ summary: `${r.dryRun ? 'would update' : 'updated'} ${r.changed.length} file(s) in ${r.target}${r.changed.length ? `: ${r.changed.join(', ')}` : ' (already current)'}`, ...r });
     return;
   }
 

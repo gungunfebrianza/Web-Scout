@@ -10,7 +10,8 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    registry.mjs on disk (an edit is invisible until it restarts).
                                    Every command reply also warns once on stderr when that is so.
   scratch status                  count of web-scout scratch dirs in the temp dir and how many MB are
-                                   reclaimable. Every command also warns on stderr at >=20 stale dirs,
+                                   reclaimable, how many carry no owner marker (made by an older harness copy), and how many
+                                   old fixture/log entries (>24h) a cleanup would also remove. Every command also warns on stderr at >=20 stale dirs,
                                    and "session end" at >=1 (--confirm is needed above 200 dirs).
   scratch cleanup [--dry-run] [--include-wl] [--min-age-min <n>] [--confirm]
                                    sweep %TEMP% for webscout-browser-profile-*, webscout-crv-tab-profile-*
@@ -20,7 +21,14 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    Never follows symlinks/junctions. --dry-run only lists (dirs, MB);
                                    --include-wl also sweeps wl-browser-/wl-story-/wl-anchor- dirs
                                    (not created by web-scout). --min-age-min lowers the 24h age at which a
-                                   marker-less (pre-marker) dir counts as stale, e.g. 60. Runs automatically before each launch.
+                                   marker-less (pre-marker) dir counts as stale, e.g. 60. Also removes fixture dirs, test .db files and relay/serve logs older than 24h (a live relay's
+                                   log is kept). A browser launch runs the sweep automatically and says on stderr what it reclaimed.
+  harness sync <dir> [--dry-run]  copy browser-harness.mjs, scratch.mjs and scratch-guard.mjs into another project's
+                                   copy of web-scout (<dir> = the folder that holds browser-harness.mjs). A vendored copy
+                                   that predates the scratch lifecycle leaks a ~230 MB profile per test run; this carries the
+                                   fix over. Files that change are first saved in <dir>/.webscout-sync-backup/ (the copy may
+                                   not be under git); a .webscout-harness.json stamp records version + source. --dry-run lists.
+  harness check <dir>             exit 1 unless <dir>'s harness files match this checkout (current|stale|missing, per file)
   surfacemap build                regenerate docs/surfacemap.html and .json from the code (the interactive map of how
                                    every command, route and capability connects)
   surfacemap check                exit 1 when the map is stale or has error-level findings (what the test suite runs)

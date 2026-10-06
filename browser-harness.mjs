@@ -5,8 +5,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { freePort } from './test-relay.mjs';
-import { createScratchDir, ownScratchDir, sweepStale } from './scratch.mjs';
-import { lowDiskWarning } from './host-health.mjs';
+import { createScratchDir, ownScratchDir, sweepStale, sweepFixtures, recordSweep } from './scratch.mjs';
+// host-health.mjs only exists in a full checkout. This file is also vendored into other projects (see sync.mjs),
+// where it must still load and clean up after itself, so the low-disk warning is optional.
+let lowDiskWarning = () => null;
+try { ({ lowDiskWarning } = await import('./host-health.mjs')); } catch { /* vendored copy without the dashboard modules */ }
 
 // Cuts the profile's disk footprint (~460 MB of caches/component data per run before).
 export const SLIM_FLAGS = [
@@ -18,7 +21,19 @@ export const SLIM_FLAGS = [
 // Reclaim profiles/browsers orphaned by earlier crashed runs. Never lets a sweep failure block a launch.
 function sweepQuietly() {
   if (process.env.WEBSCOUT_NO_SWEEP === '1' || process.env.NODE_ENV === 'test') return; // opt-outs; tests get a private root instead
-  try { sweepStale({ markerOnly: true }); } catch { /* best effort */ }
+  try {
+    const marked = sweepStale({ markerOnly: true });
+    // Profiles left by older vendored copies of this harness carry no owner marker (and were never swept).
+    // Reclaim the ones untouched for an hour whose browser is gone; a younger one may belong to a live run.
+    const legacy = sweepStale({ prefixes: ['webscout-browser-profile-'], staleUnownedMs: 60 * 60 * 1000 });
+    const fixtures = sweepFixtures();
+    recordSweep(marked, 'launch');
+    recordSweep(legacy, 'launch-legacy');
+    const mb = ((marked.freedBytes + legacy.freedBytes + fixtures.freedBytes) / 1048576).toFixed(0);
+    const n = marked.removed.length + legacy.removed.length + fixtures.removed;
+    if (n) process.stderr.write(`webscout: reclaimed ${n} leftover scratch entr${n === 1 ? 'y' : 'ies'} (${mb} MB)${legacy.unmarked ? `; ${legacy.unmarked} had no owner marker - an older vendored copy of the harness leaked them, re-run "node cli.mjs harness sync <project>"` : ''}
+`);
+  } catch { /* best effort */ }
 }
 
 

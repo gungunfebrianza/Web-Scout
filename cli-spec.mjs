@@ -78,6 +78,8 @@ export const CLI_SPEC = [
     mcpExempt: 'deletes temp dirs and kills browser processes on the local machine - host housekeeping, not something an MCP tool call should trigger',
   },
   { cmd: 'scratch status', pos: [0, 0], mcp: null, mcpExempt: 'host disk housekeeping report - not an MCP capability' },
+  { cmd: 'harness sync', pos: [1, 1], bool: ['--dry-run'], mcp: null, mcpExempt: 'copies harness files into another project on the local machine - a maintainer task, not an agent capability' },
+  { cmd: 'harness check', pos: [1, 1], mcp: null, mcpExempt: 'compares the vendored harness of another project with this checkout - a maintainer task, not an agent capability' },
   { cmd: 'surfacemap build', pos: [0, 0], mcp: null, mcpExempt: 'regenerates docs/surfacemap.html in this checkout - a maintainer task, not something an agent calls' },
   { cmd: 'surfacemap check', pos: [0, 0], mcp: null, mcpExempt: 'CI-style staleness check of docs/surfacemap.html in this checkout - not an agent capability' },
   { cmd: 'surfacemap serve', pos: [0, 0], val: ['--target', '--port'], mcp: null, mcpExempt: 'starts a local web server that runs until Ctrl+C - a person looks at it, an agent has no use for it' },

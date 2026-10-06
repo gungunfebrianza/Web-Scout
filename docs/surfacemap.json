@@ -1048,6 +1048,32 @@
       }
     },
     {
+      "id": "cli:harness check",
+      "kind": "cli",
+      "key": "harness check",
+      "label": "harness check",
+      "origins": [
+        "code",
+        "declared"
+      ],
+      "meta": {
+        "mcpExempt": "compares the vendored harness of another project with this checkout - a maintainer task, not an agent capability"
+      }
+    },
+    {
+      "id": "cli:harness sync",
+      "kind": "cli",
+      "key": "harness sync",
+      "label": "harness sync",
+      "origins": [
+        "code",
+        "declared"
+      ],
+      "meta": {
+        "mcpExempt": "copies harness files into another project on the local machine - a maintainer task, not an agent capability"
+      }
+    },
+    {
       "id": "cli:help",
       "kind": "cli",
       "key": "help",
@@ -4940,6 +4966,16 @@
     {
       "from": "capability:health",
       "to": "http:GET /health",
+      "kind": "exposes"
+    },
+    {
+      "from": "capability:host",
+      "to": "cli:harness check",
+      "kind": "exposes"
+    },
+    {
+      "from": "capability:host",
+      "to": "cli:harness sync",
       "kind": "exposes"
     },
     {
