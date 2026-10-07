@@ -3,7 +3,7 @@
 // Other projects carry their own copy of tools/web-scout. The leak this repo fixed (a ~230 MB browser profile per
 // test run) kept happening in those copies because nothing carried the fix over. `harness sync` copies the files
 // that own browser/profile lifecycle into a copy; `harness check` says whether a copy is current (exit 1 when not).
-// The three files are self-contained (host-health.mjs is an optional import), so they work in a copy that is
+// The files are self-contained (host-health.mjs is an optional import), so they work in a copy that is
 // otherwise many versions behind.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -11,7 +11,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HARNESS_VERSION } from './scratch.mjs';
 
-export const HARNESS_FILES = ['browser-harness.mjs', 'scratch.mjs', 'scratch-guard.mjs'];
+// win-job / browser-slots / browser-reaper: browser-harness.mjs imports them (Job Object containment, slot cap, leak gate).
+export const HARNESS_FILES = ['browser-harness.mjs', 'scratch.mjs', 'scratch-guard.mjs', 'win-job.mjs', 'browser-slots.mjs', 'browser-reaper.mjs'];
 export const STAMP_NAME = '.webscout-harness.json';
 export const BACKUP_DIR = '.webscout-sync-backup';
 const here = path.dirname(fileURLToPath(import.meta.url));

@@ -519,6 +519,19 @@
       "meta": {}
     },
     {
+      "id": "cli:browsers",
+      "kind": "cli",
+      "key": "browsers",
+      "label": "browsers",
+      "origins": [
+        "code",
+        "declared"
+      ],
+      "meta": {
+        "mcpExempt": "lists and kills headless browser processes on the host machine - process control outside any page, like the relay commands, not something an MCP tool call should be able to do"
+      }
+    },
+    {
       "id": "cli:console clear",
       "kind": "cli",
       "key": "console clear",
@@ -4966,6 +4979,11 @@
     {
       "from": "capability:health",
       "to": "http:GET /health",
+      "kind": "exposes"
+    },
+    {
+      "from": "capability:host",
+      "to": "cli:browsers",
       "kind": "exposes"
     },
     {

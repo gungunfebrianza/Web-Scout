@@ -202,6 +202,27 @@ time anyone starts one - not only the next `node --test`. Run
 `node tools/web-scout/reap-test-relays.mjs` by hand for an immediate cleanup (e.g.
 right after a Ctrl-C) without waiting for the next run.
 
+**Headless browsers must not outlive their run.** On 2026-10-08, 68 orphaned headless
+`msedge.exe` processes (about 10 per e2e run, over hours of runs from several sessions) pinned
+the CPU and cost a day of work. The cause: the `msedge.exe` that `launchBrowser()` spawns is a
+trampoline that exits within a second, after starting the real browser as a separate tree with
+no living parent, so `child.kill()` and `taskkill /T` both aimed at a pid that was already gone.
+The only symptom was "could not fully remove ... (files still locked)", which read like
+housekeeping. Now:
+- every browser runs inside a Windows Job Object (`win-job.mjs`, a small C# host compiled once
+  with the `csc.exe` that ships with .NET Framework 4): when the host exits - the browser quit,
+  the owner died, the lifetime ran out, or anything killed it - Windows kills every process in
+  the job; the job also runs at below-normal priority with a hard CPU cap;
+- `close()` asks the browser to quit over CDP, then counts what is still running on its profile:
+  anything left is killed and **fails the run** (exit code 1, even after `process.exit(0)`), and
+  is recorded in the ledger that feeds `GET /analytics` (`browserHealth`) and the dashboard;
+- a machine-wide slot cap (`WEBSCOUT_MAX_BROWSERS`, default 2) makes extra runs wait;
+- `browsers` lists every web-scout browser with its CPU and owner, `browsers --kill` ends orphans;
+- `harness sync` carries all of it (win-job, browser-slots, browser-reaper) into vendored copies.
+
+Never close a browser by killing a pid you spawned yourself; use `launchBrowser()` and `close()`.
+If a run prints `LEAK -`, stop and fix the cause before running anything else.
+
 `relay.mjs`'s own `server.listen()` only runs when the file is the actual process
 entry point (`isMainModule`, checked against `process.argv[1]`) - a plain
 `import('./relay.mjs')` never binds a port. This bit twice in the same round: a

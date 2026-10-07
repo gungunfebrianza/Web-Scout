@@ -15,6 +15,8 @@ const realDir = path.dirname(fileURLToPath(import.meta.url));
 const tmp = tmpDir('webscout-auto-restart-');
 const pidPath = path.join(tmp, 'relay.pid');
 process.env.WEBSCOUT_PID_PATH = pidPath;
+// Private warn-cache: the shared one in cwd mutes the stale-relay warning for 5 min after any other run.
+process.env.WEBSCOUT_WARN_CACHE_PATH = path.join(tmp, 'warn-cache.json');
 const { startRelay, stopRelay, readRelayEvents, RELAY_SOURCE_FILES } = await import('./relay-control.mjs');
 
 let port;

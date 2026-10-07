@@ -51,6 +51,7 @@ import { discoverTranscripts, readTranscriptFile, importIntents } from './intent
 import { exportTrace, writeTrace } from './trace.mjs';
 import { autoCalibrateIfMissing } from './transcript-tokens.mjs';
 import * as repairApi from './self-repair.mjs';
+import { readBrowserLedger, summarizeBrowserLedger } from './browser-reaper.mjs';
 import * as hostHealth from './host-health.mjs';
 import * as friction from './friction.mjs';
 import * as notices from './notices.mjs';
@@ -2303,6 +2304,13 @@ function computeAnalytics() {
     const x = relapsedFriction[0];
     topFrictionItems.push({ kind: 'regression', severity: 80 + x.failuresSince, summary: `${x.summary}${relapsedFriction.length > 1 ? ` (+${relapsedFriction.length - 1} more relapse(s))` : ''} - see: friction regressions` });
   }
+  // 15. Headless browsers (browser-harness.mjs ledger): runs, CPU, and leaks - a browser process
+  // still alive after close(). Leaks fail their own run now; this keeps the cross-run trend visible.
+  let browserHealth = null;
+  try { browserHealth = summarizeBrowserLedger(readBrowserLedger()); } catch { /* no ledger readable */ }
+  if (browserHealth?.leaks) {
+    topFrictionItems.push({ kind: 'browserLeak', severity: 60 + browserHealth.leakedProcesses, summary: `${browserHealth.leaks} headless browser run(s) leaked ${browserHealth.leakedProcesses} process(es) in the last 24h, last at ${browserHealth.lastLeakAt} - "browsers" lists them, "browsers --kill" ends orphans` });
+  }
   topFrictionItems.sort((a, b) => b.severity - a.severity);
   topFrictionItems.splice(5);
 
@@ -2329,6 +2337,7 @@ function computeAnalytics() {
     macroAdoption,
     repeatedEvalShapes,
     topFrictionItems,
+    browserHealth,
     host: host ? { scratchBytes: host.scratchBytes, scratchDirs: host.metrics.dirs, staleDirs: host.staleDirs, orphanBrowsers: host.orphanBrowsers.length, freeDiskGb: host.metrics.freeGb, at: host.at } : null,
     activityPunchcard,
     durationByType,

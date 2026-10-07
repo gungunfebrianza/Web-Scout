@@ -776,6 +776,13 @@
 <div id="goldenDiffsStillFailingEmpty" class="empty" hidden>No golden diff is currently dirty.</div>
 </section>
 
+<section class="hud-section hud-scroll-col" id="browserHealthSection">
+<h2>Headless browsers</h2>
+<div class="muted">browser-harness runs in the last 24h: launches, CPU, and leaks (a browser process still running after close() - what pinned the CPU on 2026-10-08). Live orphans: <code>browsers</code> / <code>browsers --kill</code></div>
+<div class="hud-scroll-body" id="browserHealthContainer"></div>
+<div id="browserHealthEmpty" class="empty" hidden>No headless browser run recorded in the last 24h.</div>
+</section>
+
 <section class="hud-section hud-scroll-col" id="netUrlsSection">
 <h2>Recurring network failures</h2>
 <div class="muted">network requests that failed more than once, cross-session - the topFailedSelectors panel's own treatment, for net_entries instead of dispatched actions</div>
@@ -4925,6 +4932,24 @@ function renderGoldenDiffsStillFailing(a) {
     </div>`).join('');
 }
 
+function renderBrowserHealth(a) {
+  const container = el('browserHealthContainer');
+  const h = a.browserHealth;
+  if (!h || (!h.launches && !h.leaks && !h.reapedProcesses)) { container.innerHTML = ''; el('browserHealthEmpty').hidden = false; return; }
+  el('browserHealthEmpty').hidden = true;
+  const row = (label, value, title = label) => `<div class="duration-bar-row">
+      <div class="duration-bar-label" title="${esc(title)}">${esc(label)}</div>
+      <div class="duration-bar-value">${value}</div>
+    </div>`;
+  container.innerHTML = [
+    row('runs', `${h.launches} launched, ${h.jobContained} of ${h.closes} closed inside a Job Object, ${h.cpuSeconds} CPU-s`),
+    row('leaks', h.leaks ? `${h.leaks} run(s), ${h.leakedProcesses} process(es), last ${fmtTime(h.lastLeakAt)}` : 'none'),
+    row('reaped orphans', String(h.reapedProcesses)),
+    ...(h.recentLeaks || []).map((l) => row(l.script || '(inline script)', `leaked ${l.leaked} (${esc(l.mode || '?')}) ${fmtTime(l.at)}`, l.profile || '')),
+    ...(h.byScript || []).slice(0, 5).map((s) => row(s.script || '(inline script)', `${s.runs} run(s), ${s.cpuSeconds} CPU-s${s.leakedProcesses ? `, ${s.leakedProcesses} leaked` : ''}`)),
+  ].join('');
+}
+
 function renderTopFailedNetUrls(a) {
   const container = el('netUrlsContainer');
   const rows = a.topFailedNetUrls || [];
@@ -4959,6 +4984,7 @@ function renderCrossSessionCharts(a, opts = {}) {
   renderRepairCost(a);
   renderVerityStillFailing(a);
   renderGoldenDiffsStillFailing(a);
+  renderBrowserHealth(a);
   renderTopFailedNetUrls(a);
   renderTopFailedConsoleMessages(a);
 }
@@ -5481,6 +5507,7 @@ const PANELS = {
   wasteBySessionSection: { group: 'global', label: 'Wasteful sessions', autoEmpty: true, failLabel: 'over 30%', count: () => { const w = lastAnalyticsData?.wasteBySession; return w ? { n: w.length, fail: w.filter((r) => r.wastePct > 0.3).length, title: 'sessions ranked by wasted-call share (5+ calls)' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.wasteBySession ?? []) },
   verityStillFailingSection: { group: 'global', label: 'Verity still failing', autoEmpty: true, failLabel: 'still failing', count: () => { const v = lastAnalyticsData?.verityLabelsStillFailing; return v ? { n: v.length, fail: v.length, title: 'Verity labels whose most recent import is still FAIL' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.verityLabelsStillFailing ?? []) },
   goldenDiffsStillFailingSection: { group: 'global', label: 'Golden diffs dirty', autoEmpty: true, failLabel: 'still dirty', count: () => { const g = lastAnalyticsData?.goldenDiffsStillFailing; return g ? { n: g.length, fail: g.length, title: '"diff-golden" comparisons whose most recent result was non-clean' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.goldenDiffsStillFailing ?? []) },
+  browserHealthSection: { group: 'global', label: 'Headless browsers', autoEmpty: true, failLabel: 'leaks', count: () => { const h = lastAnalyticsData?.browserHealth; return h ? { n: h.launches, fail: h.leaks, title: 'browser-harness runs in the last 24h; failures = runs that leaked a browser process' } : null; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.browserHealth?.recentLeaks ?? []) },
   netUrlsSection: { group: 'global', label: 'Network failures', autoEmpty: true, failLabel: 'recurring', count: () => { const n = lastAnalyticsData?.topFailedNetUrls?.length; return n === undefined ? null : { n, fail: n, title: 'network requests that failed more than once' }; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.topFailedNetUrls ?? []) },
   consoleMessagesSection: { group: 'global', label: 'Console errors', autoEmpty: true, failLabel: 'recurring', count: () => { const n = lastAnalyticsData?.topFailedConsoleMessages?.length; return n === undefined ? null : { n, fail: n, title: 'console messages that occurred more than once' }; }, refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => a.topFailedConsoleMessages ?? []) },
   punchcardSection: { group: 'global', label: 'Punchcard', autoEmpty: true, count: () => (lastAnalyticsData ? { n: (lastAnalyticsData.activityPunchcard ?? []).flat().reduce((s, v) => s + v, 0), title: 'sessions started' } : null), refresh: () => refreshFriction(), exportRows: () => analyticsRows((a) => (a.activityPunchcard ?? []).flatMap((hours, day) => hours.map((count, hour) => ({ day: PUNCHCARD_DAY_LABELS[day], hour, count })).filter((r) => r.count))) },

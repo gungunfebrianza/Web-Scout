@@ -19,6 +19,8 @@ const tmp = tmpDir('webscout-relay-control-');
 const pidPath = path.join(tmp, 'relay.pid');
 // pidfilePath() reads this from process.env, and the relay child inherits it
 process.env.WEBSCOUT_PID_PATH = pidPath;
+// Private warn-cache: the shared one in cwd mutes the stale-relay warning for 5 min after any other run.
+process.env.WEBSCOUT_WARN_CACHE_PATH = path.join(tmp, 'warn-cache.json');
 process.env.WEBSCOUT_RELAY_LOG = path.join(tmp, 'relay-default.log'); // a CLI call that autostarts/restarts must not log into the shared temp dir
 const { startRelay, stopRelay, restartRelay, resolveRelayPid, readPidfile, RELAY_SOURCE_FILES } = await import('./relay-control.mjs');
 

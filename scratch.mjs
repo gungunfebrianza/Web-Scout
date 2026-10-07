@@ -23,7 +23,7 @@ export const scratchRoot = () => process.env.WEBSCOUT_TMPDIR || os.tmpdir();
 export const MARKER = '.webscout-owner.json';
 // Bumped whenever the scratch/harness lifecycle changes in a way an older vendored copy lacks. Stamped into every
 // marker and ledger event, so a leaked dir names the copy that made it ("harness 0 / no marker" = a pre-marker copy).
-export const HARNESS_VERSION = 2;
+export const HARNESS_VERSION = 3; // 3: Job Object containment, leak gate, slot cap (win-job/browser-slots/browser-reaper)
 export const HARNESS_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const PREFIXES = [
   'webscout-browser-profile-',
@@ -83,7 +83,9 @@ export function removeDirSync(dir, { attempts = 12, quiet = false } = {}) {
     sleepSync(delay);
     delay = Math.min(delay * 1.6, 800);
   }
-  if (!quiet) warn(`could not fully remove ${dir} (files still locked); the next sweep will retry`);
+  // Locked files under a browser profile usually mean a browser process is STILL RUNNING on it - say so;
+  // "files still locked" alone read like housekeeping while 68 leaked browsers pinned the CPU (2026-10-08).
+  if (!quiet) warn(`could not fully remove ${dir} (files still locked - a process may still be running on it; "node tools/web-scout/cli.mjs browsers" lists them); the next sweep will retry`);
   return false;
 }
 function isSymlink(p) { try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; } }

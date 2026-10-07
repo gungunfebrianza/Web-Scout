@@ -67,6 +67,7 @@ export async function startTestRelay({ script = path.join(__dirname, 'relay.mjs'
   const env = {
     WEBSCOUT_PORT: String(port),
     WEBSCOUT_DB_PATH: path.join(dir, 'test.db'),
+    WEBSCOUT_BROWSER_LEDGER: path.join(dir, 'browser-ledger.jsonl'),
     WEBSCOUT_PID_PATH: path.join(dir, 'relay.pid'),
     WEBSCOUT_NO_AUTOOPEN: '1',
     // "session end --trace" (relay.mjs's POST /sessions/:id/trace) defaults to writing under the

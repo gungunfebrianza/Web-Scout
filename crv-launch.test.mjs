@@ -13,6 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startTestRelay, freePort, spawnAsync } from './test-relay.mjs';
 import { buildLaunchUrl, browserSkip } from './browser-harness.mjs';
+import { listProfileProcesses, profileOf, killPids } from './browser-reaper.mjs';
 import { killTree, removeDirSync, listBrowserProcesses } from './scratch.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
@@ -89,6 +90,10 @@ test('CLI: "crv launch" opens a real tab with the activation params and the rela
   assert.equal(out.connected, true, JSON.stringify(out));
   assert.equal(out.agent, 'crv-launch-tab');
   assert.match(out.origin, new RegExp(`127\\.0\\.0\\.1:${pagePort}$`));
+  // A headless tab has no window to close: end it here, or it runs (and burns CPU) after the suite.
+  const left = listProfileProcesses().filter((p) => { const d = profileOf(p.commandLine); return d && path.resolve(d).toLowerCase() === path.resolve(out.profile).toLowerCase(); });
+  killPids(left.map((p) => p.pid));
+  if (out.maxLifetimeMinutes !== undefined) assert.ok(out.maxLifetimeMinutes > 0, 'a headless tab on Windows carries a lifetime cap');
   // "crv launch" leaves the tab open on purpose (that is the command); a test must not. The browser may
   // have handed off to another process, so kill by profile as well as by pid, then remove the profile.
   if (out.pid) killTree(out.pid);

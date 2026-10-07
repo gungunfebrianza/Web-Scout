@@ -30,6 +30,7 @@ const SCRATCH_CONFIRM_ABOVE = 200;
 const SCRATCH_WARN_AT = 20;
 import { startStaticServer, stopStaticServer } from './serve-control.mjs';
 import { launchTab, buildLaunchUrl } from './browser-harness.mjs';
+import { reapBrowsers, readBrowserLedger, summarizeBrowserLedger } from './browser-reaper.mjs';
 import { rankAutoTraces } from './trace.mjs';
 
 // Set once near the top of main() from a `--agent <name>` flag found
@@ -964,6 +965,25 @@ async function main() {
     return;
   }
 
+  // Local process control, no relay: the headless browsers web-scout started, worst CPU first.
+  if (command === 'browsers') {
+    const kill = rest.includes('--kill');
+    const all = rest.includes('--all');
+    if (all && !kill) throw new Error('--all only means something with --kill (it widens the kill from orphans to every web-scout browser)');
+    const r = reapBrowsers({ kill, all });
+    const ledger = summarizeBrowserLedger(readBrowserLedger());
+    const orphans = r.groups.filter((g) => g.orphan);
+    printResult({
+      browsers: r.groups.map((g) => ({ profile: path.basename(g.profile), kind: g.kind, processes: g.processes, cpuSeconds: g.cpuSeconds, ageMinutes: g.ageSeconds === null ? null : Math.round(g.ageSeconds / 60), ownerPid: g.ownerPid, ownerAlive: g.ownerAlive, orphan: g.orphan })),
+      killed: r.killed.map((g) => ({ profile: path.basename(g.profile), processes: g.processes, cpuSeconds: g.cpuSeconds })),
+      last24h: { launches: ledger.launches, leaks: ledger.leaks, leakedProcesses: ledger.leakedProcesses, reapedProcesses: ledger.reapedProcesses, cpuSeconds: ledger.cpuSeconds, lastLeakAt: ledger.lastLeakAt },
+      note: r.killed.length ? `killed ${r.killed.reduce((s, g) => s + g.processes, 0)} process(es) in ${r.killed.length} group(s).`
+        : orphans.length ? `${orphans.length} orphan group(s) (owner gone) - "browsers --kill" ends them.`
+          : r.groups.length ? 'every headless browser has a live owner.' : 'no web-scout browser is running.',
+    });
+    return;
+  }
+
   if (command === 'surfacemap') {
     // Runs the vendored generator against this checkout's surfacemap.config.mjs, so nobody types the long path.
     const bin = fileURLToPath(new URL('./vendor/surfacemap/bin/surfacemap.mjs', import.meta.url));
@@ -1807,7 +1827,7 @@ async function main() {
         if (!target) throw new Error('crv launch requires a URL, e.g. "crv launch http://127.0.0.1:9100/#capital-flow --agent p410"');
         if (!agentFlag) throw new Error('crv launch requires --agent <name> - two tabs sharing the relay\'s "default" slot is exactly the tab-collision incident this command exists to avoid');
         const url = buildLaunchUrl(target, agentFlag, PORT);
-        const { pid, profile } = launchTab(url.toString(), { headless: !!headlessValue && !headedValue });
+        const { pid, profile, maxLifetimeMs } = await launchTab(url.toString(), { headless: !!headlessValue && !headedValue });
         const deadline = Date.now() + 15000;
         let health = null;
         while (Date.now() < deadline) {
@@ -1820,6 +1840,7 @@ async function main() {
         return {
           launched: true, connected, agent: agentFlag, url: url.toString(), pid, profile,
           headless: !!headlessValue && !headedValue,
+          ...(maxLifetimeMs ? { maxLifetimeMinutes: Math.round(maxLifetimeMs / 60000) } : {}),
           origin: health?.agents_detail?.find((a) => a.name === agentFlag)?.origin ?? null,
           ...(connected ? {} : { reason: `browser launched (pid ${pid}) but agent '${agentFlag}' never connected within 15s - check the URL loads and has ?webscout=1, or that the relay is reachable` }),
         };

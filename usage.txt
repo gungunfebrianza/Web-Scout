@@ -49,6 +49,14 @@ Usage: node tools/web-scout/cli.mjs <command> [args...]
                                    `pkill` (silently does nothing against a Windows-native node
                                    process) and the netstat + taskkill dance. Not exposed over MCP
                                    on purpose.
+  browsers [--kill [--all]]       every headless browser web-scout started (browser-harness runs, the
+                                   shared browser, CRV tabs), one row per profile, worst CPU first:
+                                   processes, cpuSeconds, ageMinutes, ownerPid/ownerAlive, orphan. An
+                                   orphan is a headless run whose owner process is gone. --kill ends
+                                   orphans only (never a live run or a CRV tab); --kill --all ends every
+                                   web-scout browser. last24h summarizes the run ledger (launches,
+                                   leaks, CPU). No relay needed; not exposed over MCP on purpose. The
+                                   hook form is `node tools/web-scout/browser-reaper.mjs --kill --quiet`.
   ping [--agent <name>]         fast liveness probe (default timeout 3000ms, distinct from
                                    PING_TIMEOUT_MS = 3000) - does no DOM/IndexedDB work, so a
                                    caller trying to tell "the tab is slow" from "the tab is

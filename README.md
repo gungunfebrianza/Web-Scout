@@ -369,6 +369,8 @@ relay status                  # works even when the relay is down; reports pid, 
                                # uncleanExits means something killed the relay from outside
 relay restart                 # stop + start (also: relay start, relay stop). Replaces `pkill` -
                                # which silently does nothing against a Windows-native node process
+browsers                      # every headless browser web-scout started: processes, CPU, owner,
+                               # orphan; browsers --kill ends the orphans (owner gone), never a live run
 ```
 **Scratch dirs / browsers**: headless profiles live in `%TEMP%` with an owner marker and are
 removed (browser process tree killed first) on exit, error, Ctrl+C and SIGTERM. `scratch cleanup
@@ -795,6 +797,13 @@ startup unless noted:
 | `WEBSCOUT_TEST_LIVE` | unset | Set to `1` to run the relay-touching tests against the already-running relay (needed only for tests that require a connected browser tab). |
 | `WEBSCOUT_AUTO_CALIBRATE` | unset | Opt-in: set to `1` to let a relay with no calibration file try `transcript-tokens.mjs`'s no-key method once, the first time a session starts. Set automatically by `relay start`/`restart` and the client's own autostart - never by a plain `node relay.mjs`, and a test relay never sets it. |
 | `WEBSCOUT_TRANSCRIPT_HOME` | the OS home dir | Where `transcript-tokens.mjs` (and `WEBSCOUT_AUTO_CALIBRATE`) looks for `.claude/projects/` transcripts to calibrate from. |
+| `WEBSCOUT_MAX_BROWSERS` | `2` | Machine-wide cap on concurrent headless browsers (`browser-slots.mjs`); a launch past it waits for a slot. `0` = no cap. Read by `browser-harness.mjs`. |
+| `WEBSCOUT_BROWSER_CPU` | `25` | Hard CPU cap for one headless browser's whole process tree, in percent of the machine (Windows Job Object). `0` = none. |
+| `WEBSCOUT_BROWSER_MAX_MS` | `1800000` | Hard lifetime of one headless browser (30 min); its Job Object kills it after that. `0` = none. |
+| `WEBSCOUT_CRV_HEADLESS_MAX_MS` | `7200000` | Hard lifetime of a `crv launch --headless` tab (2 h): it has no window anyone can close, so its Job Object ends it. |
+| `WEBSCOUT_SHARED_BROWSER` | unset | Set to `1` to have every `launchBrowser()` share one headless browser (an isolated browser context each) instead of starting its own. It shuts itself down after `WEBSCOUT_SHARED_IDLE_MS` (default 5 min) with no page open, or `WEBSCOUT_SHARED_MAX_MS` (default 4 h). Windows only; elsewhere it falls back to a private browser. |
+| `WEBSCOUT_LEAK_OK` | unset | Set to `1` to make a leaked headless browser process (still running after `close()`) only a warning instead of failing the run. |
+| `WEBSCOUT_NO_JOB` | unset | Set to `1` to launch headless browsers with a plain spawn instead of inside a Windows Job Object (diagnostics only: the plain spawn is what leaked). |
 | `WEBSCOUT_RELAY_REGISTRY` | `<tmpdir>/webscout-relays.jsonl` | The leaked-relay registry `reapLeakedRelays()` reads/writes - every relay, test or real, registers here on startup. Only a test isolating this behavior should ever need to override it. |
 
 The dashboard's **Settings** menu shows all of the above, plus a
@@ -893,7 +902,11 @@ start a relay with a tab connected and set `WEBSCOUT_TEST_LIVE=1` (and
 `docs-drift.test.mjs` (every command and flag is documented) and
 `command-coverage.test.mjs` (one report of every surface a command is still
 missing, and a refusal of unfinished `scaffold-command.mjs` stubs).
-`inject-browser.test.mjs` and `dashboard.test.mjs` drive a real headless
+`browser-leak.test.mjs` holds the headless-browser lifecycle: a closed browser leaves no
+process or profile behind, every process of a Windows run sits in the Job Object at below-normal
+priority, an owner killed with no chance to clean up still takes its browser with it, a plain
+spawn that skips the polite quit trips the leak gate (exit code 1), and the orphan grouping,
+ledger summary and slot cap. `inject-browser.test.mjs` and `dashboard.test.mjs` drive a real headless
 Chromium/Edge (`browser-harness.mjs`; set `WEBSCOUT_BROWSER` if none is found -
 they skip themselves without one, unless `WEBSCOUT_REQUIRE_BROWSER=1`) to check the
 page-change counter, the whole-page outline, the scoped-read accounting, the build
@@ -1008,6 +1021,7 @@ Every command, its flags and the MCP action that mirrors it. `usage.txt` (or `he
 | `relay stop` | - | - |
 | `relay restart` | - | - |
 | `relay status` | - | - |
+| `browsers` | `--kill` `--all` | - |
 | `session start` | `--strict-crv` `--auto-snapshot` `--no-briefing` `--lean` `--crv-compact` `--allow-remote` `--auto-recover` `--tags <v>` `--stores <v>` `--token-budget <v>` `--if-stale-min <v>` `--agent <v>` | `webscout_session.start` |
 | `session end` | `--trace` `--apply-suggestions` | `webscout_session.end` |
 | `session current` | - | `webscout_session.current` |

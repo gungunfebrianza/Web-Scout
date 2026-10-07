@@ -87,6 +87,10 @@ export const CLI_SPEC = [
   { cmd: 'relay stop', pos: [0, 0], mcp: null, mcpExempt: NOMCP_PROCESS },
   { cmd: 'relay restart', pos: [0, 0], mcp: null, mcpExempt: NOMCP_PROCESS },
   { cmd: 'relay status', pos: [0, 0], mcp: null, mcpExempt: NOMCP_PROCESS },
+  {
+    cmd: 'browsers', pos: [0, 0], bool: ['--kill', '--all'], mcp: null,
+    mcpExempt: 'lists and kills headless browser processes on the host machine - process control outside any page, like the relay commands, not something an MCP tool call should be able to do',
+  },
 
   {
     cmd: 'session start', pos: [1, 2], bool: ['--strict-crv', '--auto-snapshot', '--no-briefing', '--lean', '--crv-compact', '--allow-remote', '--auto-recover'], val: ['--tags', '--stores', '--token-budget', '--if-stale-min', '--agent'],
